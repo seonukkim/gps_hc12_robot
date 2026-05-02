@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Safe HC-12 heartbeat and telemetry test.")
     parser.add_argument("--port", default="/dev/ttyACM0", help="USB serial device")
     parser.add_argument("--baud", type=int, default=9600, help="Serial baudrate")
+    parser.add_argument("--heartbeat-hz", type=float, default=5.0, help="Heartbeat rate in Hz")
     parser.add_argument(
         "--log-dir",
         default="data/hc12_logs",
@@ -39,6 +40,7 @@ def main() -> int:
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"station_hc12_test_{dt.datetime.now():%Y%m%d_%H%M%S}.log"
+    hb_period = 1.0 / args.heartbeat_hz if args.heartbeat_hz > 0 else 0.2
 
     print(f"Opening {args.port} @ {args.baud}")
     print(f"Logging raw traffic to {log_path}")
@@ -51,7 +53,7 @@ def main() -> int:
         while True:
             try:
                 now = time.monotonic()
-                if now - last_hb >= 0.5:
+                if now - last_hb >= hb_period:
                     seq += 1
                     frame = encode_frame("HB", seq, "STATION")
                     ser.write(frame)
@@ -68,7 +70,10 @@ def main() -> int:
                     else:
                         print_frame(msg_type, rx_seq, payload)
             except KeyboardInterrupt:
-                print("\nExiting heartbeat test.")
+                stop_frame = encode_frame("CMD", seq + 1, "STOP", "0", "0")
+                ser.write(stop_frame)
+                log_line(log_handle, "TX", stop_frame)
+                print("\nExiting heartbeat test after sending STOP.")
                 return 0
 
 

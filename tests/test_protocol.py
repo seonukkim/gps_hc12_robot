@@ -1,6 +1,13 @@
 import pytest
 
-from gps_coverage_core.protocol import checksum_xor, decode_frame, encode_frame
+from gps_coverage_core.protocol import (
+    checksum_xor,
+    clamp_unit,
+    decode_frame,
+    encode_frame,
+    format_command_float,
+    manual_command_fields,
+)
 
 
 def test_valid_cmd_frame() -> None:
@@ -40,3 +47,17 @@ def test_non_integer_sequence() -> None:
     checksum = checksum_xor(body)
     with pytest.raises(ValueError, match="SEQ must be an integer"):
         decode_frame(f"@{body}*{checksum:02X}\n")
+
+
+def test_manual_command_fields() -> None:
+    fields = manual_command_fields(0.375, -0.5, True, False, limit=0.25)
+    assert fields == ("MANUAL", "0.25", "-0.25", "1", "0")
+    frame = encode_frame("CMD", 105, *fields)
+    assert decode_frame(frame) == ("CMD", 105, ["MANUAL", "0.25", "-0.25", "1", "0"])
+
+
+def test_command_float_formatting_and_clamp() -> None:
+    assert clamp_unit(2.0, limit=0.25) == pytest.approx(0.25)
+    assert clamp_unit(-2.0, limit=0.25) == pytest.approx(-0.25)
+    assert format_command_float(1.0) == "1.0"
+    assert format_command_float(-0.0) == "0"

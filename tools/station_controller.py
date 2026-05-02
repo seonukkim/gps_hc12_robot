@@ -8,7 +8,16 @@ from pathlib import Path
 import serial
 import _bootstrap  # noqa: F401
 
-from gps_coverage_core.protocol import decode_frame, encode_frame
+from gps_coverage_core.protocol import (
+    clamp_unit,
+    decode_frame,
+    encode_frame,
+    format_command_float,
+    manual_command_fields,
+)
+
+DEFAULT_HEARTBEAT_HZ = 5.0
+DEFAULT_STOP_PERIOD = 1.0
 
 
 class StationController:
@@ -24,9 +33,9 @@ class StationController:
         self._serial = serial.Serial(port, baud, timeout=timeout)
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
-        self.log_file = (log_path / f"station_controller_{dt.datetime.now():%Y%m%d_%H%M%S}.log").open(
-            "w", encoding="utf-8"
-        )
+        self.log_file = (
+            log_path / f"station_controller_{dt.datetime.now():%Y%m%d_%H%M%S}.log"
+        ).open("w", encoding="utf-8")
 
     def close(self) -> None:
         self.log_file.close()
@@ -38,7 +47,9 @@ class StationController:
 
     def _log(self, direction: str, data: bytes) -> None:
         stamp = dt.datetime.now(dt.UTC).isoformat()
-        self.log_file.write(f"{stamp},{direction},{data.decode('ascii', errors='replace').rstrip()}\n")
+        self.log_file.write(
+            f"{stamp},{direction},{data.decode('ascii', errors='replace').rstrip()}\n"
+        )
         self.log_file.flush()
 
     def _send_frame(self, msg_type: str, *fields: object) -> int:
@@ -51,8 +62,33 @@ class StationController:
     def send_heartbeat(self) -> int:
         return self._send_frame("HB", "STATION")
 
-    def send_cmd(self, command: str, left: float | int = 0, right: float | int = 0) -> int:
-        return self._send_frame("CMD", command, left, right)
+    def send_stop(self) -> int:
+        return self._send_frame("CMD", "STOP", "0", "0")
+
+    def send_auto(self, left: float | int = 0, right: float | int = 0) -> int:
+        return self._send_frame(
+            "CMD",
+            "AUTO",
+            format_command_float(clamp_unit(float(left))),
+            format_command_float(clamp_unit(float(right))),
+        )
+
+    def send_manual(
+        self,
+        steer: float,
+        throttle: float,
+        *,
+        deadman: bool,
+        estop: bool = False,
+        limit: float = 1.0,
+    ) -> int:
+        return self._send_frame(
+            "CMD",
+            *manual_command_fields(steer, throttle, deadman, estop, limit=limit),
+        )
+
+    def send_cmd(self, command: str, *fields: object) -> int:
+        return self._send_frame("CMD", command, *fields)
 
     def poll(self) -> list[tuple[str, int, list[str]]]:
         decoded: list[tuple[str, int, list[str]]] = []
@@ -72,14 +108,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Safe station controller loop.")
     parser.add_argument("--port", default="/dev/ttyACM0", help="USB serial device")
     parser.add_argument("--baud", type=int, default=9600, help="Serial baudrate")
-    parser.add_argument("--heartbeat-hz", type=float, default=2.0, help="Heartbeat rate in Hz")
-    parser.add_argument("--stop-period", type=float, default=1.0, help="STOP cadence in seconds")
+    parser.add_argument(
+        "--heartbeat-hz",
+        type=float,
+        default=DEFAULT_HEARTBEAT_HZ,
+        help="Heartbeat rate in Hz",
+    )
+    parser.add_argument(
+        "--stop-period",
+        type=float,
+        default=DEFAULT_STOP_PERIOD,
+        help="STOP cadence in seconds",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    hb_period = 1.0 / args.heartbeat_hz if args.heartbeat_hz > 0 else 0.5
+    hb_period = 1.0 / args.heartbeat_hz if args.heartbeat_hz > 0 else 1.0 / DEFAULT_HEARTBEAT_HZ
     controller = StationController(port=args.port, baud=args.baud)
     print(f"Running safe controller on {args.port} @ {args.baud}")
     print("Default behavior sends heartbeat and STOP only.")
@@ -93,7 +139,7 @@ def main() -> int:
                 controller.send_heartbeat()
                 last_hb = now
             if now - last_stop >= args.stop_period:
-                controller.send_cmd("STOP", 0, 0)
+                controller.send_stop()
                 last_stop = now
 
             for msg_type, seq, payload in controller.poll():
@@ -102,7 +148,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nCtrl+C received; sending STOP five times.")
         for _ in range(5):
-            controller.send_cmd("STOP", 0, 0)
+            controller.send_stop()
             time.sleep(0.1)
         return 0
     finally:

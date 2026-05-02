@@ -9,6 +9,47 @@ def checksum_xor(text: str) -> int:
     return checksum
 
 
+def clamp_unit(value: float, *, limit: float = 1.0) -> float:
+    """Clamp a numeric command value to ``[-limit, +limit]``."""
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    limit = min(limit, 1.0)
+    value = float(value)
+    if value > limit:
+        return limit
+    if value < -limit:
+        return -limit
+    return value
+
+
+def format_command_float(value: float) -> str:
+    """Return a compact decimal string for command payload fields."""
+    text = f"{float(value):.3f}".rstrip("0").rstrip(".")
+    if text in {"", "-0"}:
+        return "0"
+    if "." not in text:
+        return f"{text}.0"
+    return text
+
+
+def manual_command_fields(
+    steer: float,
+    throttle: float,
+    deadman: bool,
+    estop: bool,
+    *,
+    limit: float = 1.0,
+) -> tuple[str, str, str, str, str]:
+    """Return payload fields for a ``CMD,MANUAL`` frame."""
+    return (
+        "MANUAL",
+        format_command_float(clamp_unit(steer, limit=limit)),
+        format_command_float(clamp_unit(throttle, limit=limit)),
+        "1" if deadman else "0",
+        "1" if estop else "0",
+    )
+
+
 def _validate_token(token: str, label: str, *, allow_empty: bool = False) -> str:
     if not isinstance(token, str):
         raise ValueError(f"{label} must be a string")
