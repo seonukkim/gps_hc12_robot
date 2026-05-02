@@ -45,3 +45,35 @@ The PPM printout is 1-based, but the firmware array is 0-based.
 3. Toggle SWB and confirm CH5 changes between low/high values.
 4. Turn transmitter off and record receiver failsafe behavior.
 5. Do not upload motor-control firmware until wheels are off the ground.
+
+## Confirmed observations
+
+- SWB up: CH5 ≈ 1001 us → MANUAL
+- SWB down: CH5 ≈ 2001 us → AUTO
+- Transmitter OFF: CH3 ≈ 876 us
+  - Current firmware threshold: RC_MIN_VALID_US = 900
+  - Therefore transmitter OFF should be treated as RC_BAD / FAILSAFE.
+
+## Current safety interpretation
+
+- MODE_CHANNEL_INDEX = 4
+- RC_AUTO_SWITCH_ON_US = 1600
+- CH5 > 1600 → AUTO
+- CH5 <= 1600 → MANUAL
+- CH3 < 900 when transmitter is OFF → invalid RC signal
+
+## Confirmed rc_mix_test result after calibration
+
+- Steering center: around 1490 us
+- Throttle center: around 1546 us after transmitter reset/recenter
+- CH5 low: around 1001 us -> MANUAL
+- CH5 middle: around 1501 us -> MANUAL
+- CH5 high: around 2001~2002 us -> AUTO
+- Transmitter OFF: CH3 around 875~876 us -> RC_BAD
+- RC_BAD output: virtual_left_us=1500, virtual_right_us=1500
+- Hands-off output: throttle=0.00, virtual_left_us=1500, virtual_right_us=1500
+
+Safety conclusion:
+- RC mode switch mapping is valid.
+- RC failsafe detection is valid.
+- Neutral motor command is now safe in rc_mix_test.
