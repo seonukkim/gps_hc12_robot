@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+install/
+log/
+*.pyc
+.env
+*.secret
+*.key
+data/**/*.csv
+data/**/*.log
+outputs/*
+!outputs/.gitkeep
+.DS_Store
