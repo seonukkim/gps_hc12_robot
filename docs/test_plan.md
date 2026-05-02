@@ -14,6 +14,11 @@
 4. ESC safety
    - wheel-off-ground only
    - verify startup neutral, manual override, and `STOP`
+   - keep the RC Manual/Auto switch on `CH5` in `MANUAL`
+   - center the steering and throttle joystick before powering the ESCs
+   - confirm USB debug shows `left_cmd=0.000` and `right_cmd=0.000` before applying throttle
+   - use small throttle pulses only
+   - transmitter switch-off or RC link loss must return the rover to stop
 
 ## Station Validation
 
@@ -23,10 +28,17 @@
 2. Core tests
    - `uv run pytest -q`
 3. HC-12 link
-   - `uv run python tools/station_hc12_test.py --port /dev/ttyACM0`
+   - `uv run python tools/station_hc12_test.py --port /dev/ttyACM0 --heartbeat-hz 5`
 4. Safe controller loop
    - `uv run python tools/station_controller.py --port /dev/ttyACM0`
-5. Planner preview
+5. Keyboard manual bench test
+   - wheel-off-ground only
+   - start with RC transmitter off or RC invalid so station-manual takeover is exercised
+   - run `uv run python tools/station_keyboard_manual.py --port /dev/ttyUSB0 --baud 9600 --max-speed 0.25`
+   - confirm neutral frames on startup, `deadman` off by default, and `STOP` on exit
+   - confirm manual drive only while fresh manual frames continue arriving with `deadman` enabled
+   - confirm stale link or released controls return outputs to neutral within the station timeout window
+6. Planner preview
    - run `tools/path_preview.py` and inspect saved image
 
 ## ROS2

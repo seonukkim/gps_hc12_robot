@@ -12,18 +12,22 @@ constexpr long GPS_BAUD = 9600;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
 // Printed transmitter labels are 1-based (CH1-CH8), while ppmChannels[] uses 0-based indexes.
-constexpr uint8_t STEERING_CHANNEL_INDEX = 0;  // Printed CH1
-constexpr uint8_t THROTTLE_CHANNEL_INDEX = 2;  // Printed CH3
-constexpr uint8_t MODE_CHANNEL_INDEX = 4;      // Printed CH5
-constexpr uint16_t STEERING_CENTER_US = 1490;
-constexpr uint16_t THROTTLE_CENTER_US = 1546;
+// The integrated station controller can physically look like CH7 at the panel,
+// but the receiver PPM mapping used by firmware is CH1 steering, CH2 throttle,
+// and CH5 Manual/Auto. CH7 is reserved/unused for now.
+constexpr uint8_t STEERING_CHANNEL_INDEX = 0;  // Station joystick horizontal: PPM CH1
+constexpr uint8_t THROTTLE_CHANNEL_INDEX = 1;  // Station joystick vertical: PPM CH2
+constexpr uint8_t MODE_CHANNEL_INDEX = 4;      // Station Manual/Auto switch: PPM CH5
+constexpr uint16_t STEERING_CENTER_US = 1504;
+constexpr uint16_t THROTTLE_CENTER_US = 1500;
 constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_RANGE_US = 300;
-constexpr uint32_t STATION_TIMEOUT_MS = 1500;
+constexpr uint32_t STATION_TIMEOUT_MS = 500;
+constexpr float STATION_MANUAL_MAX_OUTPUT = 0.25f;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_PERIOD_MS = 500;
 constexpr bool ENABLE_USB_DEBUG = true;
@@ -36,6 +40,20 @@ enum RobotMode {
   AUTO_RUNNING,
   LINK_LOST,
   FAILSAFE
+};
+
+enum ControlSource {
+  CONTROL_SOURCE_STOP,
+  CONTROL_SOURCE_RC_MANUAL,
+  CONTROL_SOURCE_STATION_MANUAL,
+  CONTROL_SOURCE_AUTO
+};
+
+struct StationManualCommand {
+  float steer;
+  float throttle;
+  bool deadman;
+  uint32_t lastFrameMs;
 };
 
 #if ENABLE_GPS_TELEMETRY
@@ -53,11 +71,17 @@ RobotMode currentMode = DISARMED;
 String hc12Line;
 uint32_t lastStationFrameMs = 0;
 long lastStationSeq = -1;
+StationManualCommand stationManual = {0.0f, 0.0f, false, 0};
+bool stationEstop = false;
+bool autoCommandActive = false;
 uint32_t lastTelemetryMs = 0;
 uint32_t lastStatusMs = 0;
 uint32_t lastUsbDebugMs = 0;
+ControlSource currentControlSource = CONTROL_SOURCE_STOP;
 float autoLeftCmd = 0.0f;
 float autoRightCmd = 0.0f;
+float lastLeftOutputCmd = 0.0f;
+float lastRightOutputCmd = 0.0f;
 
 void ppmISR() {
   uint32_t now = micros();
@@ -103,11 +127,14 @@ void writeFrame(const char *type, uint32_t seq, const String &payload) {
 void motorStop() {
   escLeft.writeMicroseconds(ESC_NEUTRAL_US);
   escRight.writeMicroseconds(ESC_NEUTRAL_US);
+  lastLeftOutputCmd = 0.0f;
+  lastRightOutputCmd = 0.0f;
 }
 
 void clearAutoCommand() {
   autoLeftCmd = 0.0f;
   autoRightCmd = 0.0f;
+  autoCommandActive = false;
 }
 
 uint16_t clampPulse(int pulse) {
@@ -130,9 +157,15 @@ float clampUnit(float value) {
   return value;
 }
 
+float absFloat(float value) {
+  return value < 0.0f ? -value : value;
+}
+
 void applyDriveCommand(float left, float right) {
   left = clampUnit(left);
   right = clampUnit(right);
+  lastLeftOutputCmd = left;
+  lastRightOutputCmd = right;
 
   int leftPulse = ESC_NEUTRAL_US + static_cast<int>(left * ESC_RANGE_US);
   int rightPulse = ESC_NEUTRAL_US + static_cast<int>(right * ESC_RANGE_US);
@@ -143,6 +176,21 @@ void applyDriveCommand(float left, float right) {
 void applyAutoCommand(float left, float right) {
   // Wheel-off-ground only for ESC validation.
   applyDriveCommand(left, right);
+}
+
+bool stationLinkValid() {
+  return lastStationFrameMs != 0 && millis() - lastStationFrameMs <= STATION_TIMEOUT_MS;
+}
+
+bool stationManualValid() {
+  return stationManual.lastFrameMs != 0 && millis() - stationManual.lastFrameMs <= STATION_TIMEOUT_MS;
+}
+
+void clearStationManualCommand() {
+  stationManual.steer = 0.0f;
+  stationManual.throttle = 0.0f;
+  stationManual.deadman = false;
+  stationManual.lastFrameMs = 0;
 }
 
 bool rcFrameRecent() {
@@ -213,6 +261,21 @@ void applyManualOverride(uint16_t steeringUs, uint16_t throttleUs) {
   applyDriveCommand(left, right);
 }
 
+void applyStationManualCommand() {
+  float left = stationManual.throttle - stationManual.steer;
+  float right = stationManual.throttle + stationManual.steer;
+  float maxMagnitude = absFloat(left);
+  if (absFloat(right) > maxMagnitude) {
+    maxMagnitude = absFloat(right);
+  }
+  if (maxMagnitude > STATION_MANUAL_MAX_OUTPUT && maxMagnitude > 0.0f) {
+    float scale = STATION_MANUAL_MAX_OUTPUT / maxMagnitude;
+    left *= scale;
+    right *= scale;
+  }
+  applyDriveCommand(left, right);
+}
+
 const char *modeName(RobotMode mode) {
   switch (mode) {
     case DISARMED: return "DISARMED";
@@ -225,29 +288,50 @@ const char *modeName(RobotMode mode) {
   }
 }
 
-const char *safetyStateName(bool rcValid, bool autoSwitchOn) {
-  if (!rcValid) {
-    return "STOP/NEUTRAL_RC_INVALID";
+const char *controlSourceName(ControlSource source) {
+  switch (source) {
+    case CONTROL_SOURCE_RC_MANUAL: return "RC_MANUAL";
+    case CONTROL_SOURCE_STATION_MANUAL: return "STATION_MANUAL";
+    case CONTROL_SOURCE_AUTO: return "AUTO";
+    case CONTROL_SOURCE_STOP:
+    default: return "STOP";
   }
-  if (currentMode == LINK_LOST) {
-    return "STOP/NEUTRAL_LINK_LOST";
+}
+
+bool parseFloatToken(const String &token, float &valueOut) {
+  char *endPtr = nullptr;
+  valueOut = strtof(token.c_str(), &endPtr);
+  return endPtr != token.c_str() && *endPtr == '\0';
+}
+
+bool parseBoolToken(const String &token, bool &valueOut) {
+  if (token == "1" || token.equalsIgnoreCase("true")) {
+    valueOut = true;
+    return true;
   }
-  if (currentMode == FAILSAFE) {
-    return "STOP/NEUTRAL_FAILSAFE";
+  if (token == "0" || token.equalsIgnoreCase("false")) {
+    valueOut = false;
+    return true;
   }
-  if (!autoSwitchOn) {
-    return "MANUAL_RC_MIX";
+  return false;
+}
+
+bool splitCsvFields(const String &text, String *fields, size_t maxFields, size_t &fieldCount) {
+  fieldCount = 0;
+  int start = 0;
+  while (start <= text.length()) {
+    if (fieldCount >= maxFields) {
+      return false;
+    }
+    int comma = text.indexOf(',', start);
+    if (comma < 0) {
+      fields[fieldCount++] = text.substring(start);
+      return true;
+    }
+    fields[fieldCount++] = text.substring(start, comma);
+    start = comma + 1;
   }
-  if (currentMode == AUTO_RUNNING) {
-    return "AUTO_CMD_ACTIVE";
-  }
-  if (currentMode == AUTO_READY) {
-    return "STOP/NEUTRAL_AUTO_READY";
-  }
-  if (currentMode == DISARMED) {
-    return "STOP/NEUTRAL_DISARMED";
-  }
-  return "STOP/NEUTRAL";
+  return true;
 }
 
 void debugPrintStatus() {
@@ -311,18 +395,24 @@ void debugPrintStatus() {
   } else {
     Serial.print(lastStationSeq);
   }
-  Serial.print(F(" safety="));
-  Serial.print(safetyStateName(rcValid, autoSwitchOn));
-  Serial.print(F(" auto_left="));
-  Serial.print(autoLeftCmd, 3);
-  Serial.print(F(" auto_right="));
-  Serial.println(autoRightCmd, 3);
+  Serial.print(F(" station_manual_valid="));
+  Serial.print(stationManualValid() ? F("true") : F("false"));
+  Serial.print(F(" station_deadman="));
+  Serial.print(stationManual.deadman ? F("true") : F("false"));
+  Serial.print(F(" station_estop="));
+  Serial.print(stationEstop ? F("true") : F("false"));
+  Serial.print(F(" control_source="));
+  Serial.print(controlSourceName(currentControlSource));
+  Serial.print(F(" left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" right_cmd="));
+  Serial.println(lastRightOutputCmd, 3);
 }
 
 void sendStatus(uint32_t refSeq) {
   String payload = String(modeName(currentMode));
   payload += rcChannelsValid() ? ",RC_OK" : ",RC_BAD";
-  payload += (millis() - lastStationFrameMs < STATION_TIMEOUT_MS) ? ",LINK_OK," : ",LINK_LOST,";
+  payload += stationLinkValid() ? ",LINK_OK," : ",LINK_LOST,";
   payload += String(refSeq);
   writeFrame("STAT", refSeq, payload);
 }
@@ -401,36 +491,82 @@ bool decodeFrame(const String &line, String &typeOut, long &seqOut, String &payl
 }
 
 void handleCommand(long seq, const String &payload) {
-  int comma = payload.indexOf(',');
-  String command = comma >= 0 ? payload.substring(0, comma) : payload;
+  String fields[5];
+  size_t fieldCount = 0;
+  if (!splitCsvFields(payload, fields, 5, fieldCount) || fieldCount == 0) {
+    sendErr(seq, "CMD_PAYLOAD");
+    return;
+  }
+
+  String command = fields[0];
 
   if (command == "STOP") {
+    stationEstop = true;
+    clearStationManualCommand();
     clearAutoCommand();
     motorStop();
-    currentMode = rcAutoSwitchOn() ? AUTO_READY : MANUAL;
+    currentControlSource = CONTROL_SOURCE_STOP;
     sendAck(seq, "OK");
     return;
   }
 
-  if (command == "AUTO") {
+  if (command == "MANUAL") {
+    if (fieldCount != 5) {
+      sendErr(seq, "MANUAL_PAYLOAD");
+      return;
+    }
+
+    float steer = 0.0f;
+    float throttle = 0.0f;
+    bool deadman = false;
+    bool estop = false;
+    if (!parseFloatToken(fields[1], steer) || !parseFloatToken(fields[2], throttle) ||
+        !parseBoolToken(fields[3], deadman) || !parseBoolToken(fields[4], estop)) {
+      sendErr(seq, "MANUAL_PAYLOAD");
+      return;
+    }
+
+    clearAutoCommand();
+    stationManual.steer = clampUnit(steer);
+    stationManual.throttle = clampUnit(throttle);
+    stationManual.deadman = deadman;
+    stationManual.lastFrameMs = millis();
+    stationEstop = estop;
+    if (stationEstop) {
+      motorStop();
+      currentControlSource = CONTROL_SOURCE_STOP;
+    }
+    sendAck(seq, "OK");
+    return;
+  }
+
+  if (command == "AUTO" || command == "START") {
+    if (fieldCount != 3) {
+      sendErr(seq, "AUTO_PAYLOAD");
+      return;
+    }
+
     if (!rcChannelsValid() || !rcAutoSwitchOn()) {
-      currentMode = MANUAL;
       clearAutoCommand();
       motorStop();
       sendErr(seq, "AUTO_REJECTED");
       return;
     }
 
-    int first = payload.indexOf(',');
-    int second = payload.indexOf(',', first + 1);
-    if (first < 0 || second < 0) {
+    float left = 0.0f;
+    float right = 0.0f;
+    if (!parseFloatToken(fields[1], left) || !parseFloatToken(fields[2], right)) {
       sendErr(seq, "AUTO_PAYLOAD");
       return;
     }
 
-    autoLeftCmd = payload.substring(first + 1, second).toFloat();
-    autoRightCmd = payload.substring(second + 1).toFloat();
+    autoLeftCmd = clampUnit(left);
+    autoRightCmd = clampUnit(right);
+    autoCommandActive = true;
+    clearStationManualCommand();
+    stationEstop = false;
     currentMode = AUTO_RUNNING;
+    currentControlSource = CONTROL_SOURCE_AUTO;
     applyAutoCommand(autoLeftCmd, autoRightCmd);
     sendAck(seq, "OK");
     return;
@@ -452,9 +588,6 @@ void processHC12Line(const String &line) {
   lastStationSeq = seq;
 
   if (type == "HB") {
-    if (currentMode == DISARMED) {
-      currentMode = rcAutoSwitchOn() ? AUTO_READY : MANUAL;
-    }
     sendAck(seq, "OK");
   } else if (type == "CMD") {
     handleCommand(seq, payload);
@@ -481,6 +614,8 @@ void setup() {
   Serial.println("OpenRB robot controller skeleton starting.");
   Serial.println("Confirm OpenRB-150 UART mapping before deployment.");
   Serial.println("Motor tests are wheel-off-ground only.");
+  Serial.println("RC mode input uses receiver PPM CH5; PPM CH7 is reserved/unused.");
+  Serial.println("CH5 high enters AUTO_READY only; drive stays STOP until explicit AUTO.");
 }
 
 void loop() {
@@ -505,37 +640,60 @@ void loop() {
   uint16_t modeUs = 0;
   readRcChannels(steeringUs, throttleUs, modeUs);
 
+  uint32_t now = millis();
   bool rcValid = rcChannelsValid(steeringUs, throttleUs, modeUs);
   bool autoSwitchOn = rcAutoSwitchOn(modeUs);
+  bool stationManualFresh = stationManualValid();
+  bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;
+  bool rcManualActive = rcValid && !autoSwitchOn;
 
-  if (!rcValid) {
-    currentMode = FAILSAFE;
-    clearAutoCommand();
-    motorStop();
-  } else if (!autoSwitchOn) {
-    currentMode = MANUAL;
-    clearAutoCommand();
-    applyManualOverride(steeringUs, throttleUs);
-  } else if (currentMode == MANUAL || currentMode == DISARMED) {
-    currentMode = AUTO_READY;
-    clearAutoCommand();
-    motorStop();
-  }
-
-  if (currentMode == AUTO_RUNNING && millis() - lastStationFrameMs > STATION_TIMEOUT_MS) {
+  if (autoCommandActive && !stationLinkValid()) {
     currentMode = LINK_LOST;
     clearAutoCommand();
     motorStop();
   }
 
-  if (millis() - lastTelemetryMs > TELEMETRY_PERIOD_MS) {
-    sendGpsTelemetry();
-    lastTelemetryMs = millis();
+  bool autoActive = rcValid && autoSwitchOn && autoCommandActive && stationLinkValid() && !stationEstop;
+
+  if (stationEstop) {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = DISARMED;
+    motorStop();
+  } else if (stationManualActive) {
+    currentMode = MANUAL;
+    currentControlSource = CONTROL_SOURCE_STATION_MANUAL;
+    applyStationManualCommand();
+  } else if (rcManualActive) {
+    currentMode = MANUAL;
+    currentControlSource = CONTROL_SOURCE_RC_MANUAL;
+    clearAutoCommand();
+    applyManualOverride(steeringUs, throttleUs);
+  } else if (autoActive) {
+    currentMode = AUTO_RUNNING;
+    currentControlSource = CONTROL_SOURCE_AUTO;
+    applyAutoCommand(autoLeftCmd, autoRightCmd);
+  } else {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    motorStop();
+    if (!rcValid) {
+      currentMode = FAILSAFE;
+    } else if (autoSwitchOn) {
+      if (currentMode != LINK_LOST) {
+        currentMode = AUTO_READY;
+      }
+    } else {
+      currentMode = DISARMED;
+    }
   }
 
-  if (millis() - lastStatusMs > STATUS_PERIOD_MS) {
-    sendStatus(lastStationFrameMs);
-    lastStatusMs = millis();
+  if (now - lastTelemetryMs > TELEMETRY_PERIOD_MS) {
+    sendGpsTelemetry();
+    lastTelemetryMs = now;
+  }
+
+  if (now - lastStatusMs > STATUS_PERIOD_MS) {
+    sendStatus(lastStationSeq >= 0 ? static_cast<uint32_t>(lastStationSeq) : 0);
+    lastStatusMs = now;
   }
 
   debugPrintStatus();

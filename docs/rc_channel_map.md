@@ -1,79 +1,52 @@
 # RC Channel Map
 
-Controller: RadioLink T8FB BT  
-Receiver output: PPM  
-OpenRB PPM input pin: D6  
-Test firmware: `firmware/ppm_test/ppm_test.ino`  
-Serial baudrate: 115200
+Context:
+- Station controller: disassembled RadioLink transmitter integrated into the Jetson/station box
+- Receiver output: PPM into OpenRB D6
+- Verification sources: `firmware/rc_mix_test/rc_mix_test.ino` output and rover `USBDBG` logs
 
-## Confirmed T8FB channel map
+## Station Integrated Controller Mapping
 
-| Printed Channel | T8FB Function | Rover Use |
-|---:|---|---|
-| CH1 | AIL / right stick horizontal | Steering |
-| CH2 | ELE / right stick vertical | Unused initially |
-| CH3 | THR / left stick vertical | Throttle |
-| CH4 | RUD / left stick horizontal | Optional steering/yaw |
-| CH5 | SWB / right top switch | Manual/Auto mode switch |
-| CH6 | VR-B / right knob | Optional speed limit |
-| CH7 | SWA / left top switch | Optional arm/disarm |
-| CH8 | VR-A / left knob | Optional tuning |
+| PPM Channel | Station Control | Firmware Use | Notes |
+|---:|---|---|---|
+| CH1 | Steering joystick horizontal | Steering | `STEERING_CHANNEL_INDEX = 0` |
+| CH2 | Throttle joystick vertical | Throttle | `THROTTLE_CHANNEL_INDEX = 1` |
+| CH5 | Manual/Auto switch | Mode select | `MODE_CHANNEL_INDEX = 4` |
+| CH7 | Reserved / unused | None | Do not use for mode |
 
-## Index note for Arduino code
+The station panel can physically look like `CH7`, but the firmware uses the receiver's PPM `CH5` for Manual/Auto mode. `CH7` is reserved/unused for now.
 
-The PPM printout is 1-based, but the firmware array is 0-based.
+## Firmware Constants
 
-- Printed CH1 -> code index 0
-- Printed CH2 -> code index 1
-- Printed CH3 -> code index 2
-- Printed CH4 -> code index 3
-- Printed CH5 -> code index 4
-- Printed CH6 -> code index 5
-- Printed CH7 -> code index 6
-- Printed CH8 -> code index 7
+- `STEERING_CHANNEL_INDEX = 0`
+- `THROTTLE_CHANNEL_INDEX = 1`
+- `MODE_CHANNEL_INDEX = 4`
+- `STEERING_CENTER_US = 1504`
+- `THROTTLE_CENTER_US = 1500`
+- `RC_DEADBAND_US = 80`
+- `RC_AUTO_SWITCH_ON_US = 1600`
 
-## Mapping used by rover firmware
+## Mode Interpretation
 
-- Steering: CH1 -> index 0
-- Throttle: CH3 -> index 2
-- Manual/Auto: CH5 -> index 4
+- `CH5 <= 1600 us` -> `MANUAL`
+- `CH5 > 1600 us` -> `AUTO_READY`
+- `CH5` high by itself must not drive motors
+- In `AUTO_READY`, `control_source` remains `STOP` until a valid explicit station/autonomous command is accepted
+- `MANUAL` allows RC manual drive
 
-## Required final checks before motor test
+## Confirmed Observations
 
-1. Move right stick left/right and confirm CH1 changes.
-2. Move left stick up/down and confirm CH3 changes.
-3. Toggle SWB and confirm CH5 changes between low/high values.
-4. Turn transmitter off and record receiver failsafe behavior.
-5. Do not upload motor-control firmware until wheels are off the ground.
+- `CH1` moves with steering input
+- `CH2` moves with throttle input
+- `CH5` low/mid stays `MANUAL`
+- `CH5` high selects `AUTO_READY`
+- `CH7` is not used by firmware for mode
+- Transmitter/link loss drives RC invalid handling and motor stop behavior
 
-## Confirmed observations
+## Bench Check
 
-- SWB up: CH5 ≈ 1001 us → MANUAL
-- SWB down: CH5 ≈ 2001 us → AUTO
-- Transmitter OFF: CH3 ≈ 876 us
-  - Current firmware threshold: RC_MIN_VALID_US = 900
-  - Therefore transmitter OFF should be treated as RC_BAD / FAILSAFE.
-
-## Current safety interpretation
-
-- MODE_CHANNEL_INDEX = 4
-- RC_AUTO_SWITCH_ON_US = 1600
-- CH5 > 1600 → AUTO
-- CH5 <= 1600 → MANUAL
-- CH3 < 900 when transmitter is OFF → invalid RC signal
-
-## Confirmed rc_mix_test result after calibration
-
-- Steering center: around 1490 us
-- Throttle center: around 1546 us after transmitter reset/recenter
-- CH5 low: around 1001 us -> MANUAL
-- CH5 middle: around 1501 us -> MANUAL
-- CH5 high: around 2001~2002 us -> AUTO
-- Transmitter OFF: CH3 around 875~876 us -> RC_BAD
-- RC_BAD output: virtual_left_us=1500, virtual_right_us=1500
-- Hands-off output: throttle=0.00, virtual_left_us=1500, virtual_right_us=1500
-
-Safety conclusion:
-- RC mode switch mapping is valid.
-- RC failsafe detection is valid.
-- Neutral motor command is now safe in rc_mix_test.
+1. Move the steering joystick and confirm `CH1` changes.
+2. Move the throttle joystick and confirm `CH2` changes.
+3. Toggle the Manual/Auto switch and confirm `CH5` changes between low/high values.
+4. Confirm `CH7` may move independently, but it does not affect rover mode.
+5. Turn the transmitter off or break the RC link and confirm the rover returns to stop/failsafe behavior.

@@ -50,6 +50,7 @@ All station tools expose `--port` and default to `/dev/ttyACM0`:
 - No `AUTO` mode on station startup.
 - Ctrl+C in the controller sends `STOP` five times before exit.
 - Motor validation is wheel-off-ground only.
+- Integrated station controller mapping is `PPM CH1=steering`, `CH2=throttle`, `CH5=Manual/Auto`; the panel may look like `CH7`, but `CH7` is not used for mode.
 - RC manual override must take priority over station commands.
 - Link timeout during rover `AUTO` must stop the motors and require explicit re-arming.
 
