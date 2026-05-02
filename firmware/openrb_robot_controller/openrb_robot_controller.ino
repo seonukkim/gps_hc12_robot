@@ -1,12 +1,8 @@
 #include <Servo.h>
-#include <SoftwareSerial.h>
 #include <TinyGPS++.h>
 
-// Confirm the actual OpenRB-150 UART pin mapping before use.
-constexpr uint8_t HC12_RX_PIN = 10;
-constexpr uint8_t HC12_TX_PIN = 11;
-constexpr uint8_t GPS_RX_PIN = 8;
-constexpr uint8_t GPS_TX_PIN = 9;
+constexpr bool ENABLE_GPS_TELEMETRY = false;
+#define HC12_SERIAL Serial2
 
 constexpr uint8_t PPM_PIN = 6;
 constexpr uint8_t ESC_LEFT_PIN = 4;
@@ -15,8 +11,13 @@ constexpr long HC12_BAUD = 9600;
 constexpr long GPS_BAUD = 9600;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
+// Printed transmitter labels are 1-based (CH1-CH8), while ppmChannels[] uses 0-based indexes.
+constexpr uint8_t STEERING_CHANNEL_INDEX = 0;  // Printed CH1
+constexpr uint8_t THROTTLE_CHANNEL_INDEX = 2;  // Printed CH3
+constexpr uint8_t MODE_CHANNEL_INDEX = 4;      // Printed CH5
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
+constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_RANGE_US = 300;
 constexpr uint32_t STATION_TIMEOUT_MS = 1500;
@@ -32,9 +33,9 @@ enum RobotMode {
   FAILSAFE
 };
 
-SoftwareSerial hc12Serial(HC12_RX_PIN, HC12_TX_PIN);
-SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
+#if ENABLE_GPS_TELEMETRY
 TinyGPSPlus gps;
+#endif
 Servo escLeft;
 Servo escRight;
 
@@ -83,13 +84,13 @@ void writeFrame(const char *type, uint32_t seq, const String &payload) {
   }
 
   uint8_t checksum = checksumXor(body);
-  hc12Serial.print("@");
-  hc12Serial.print(body);
-  hc12Serial.print("*");
+  HC12_SERIAL.print("@");
+  HC12_SERIAL.print(body);
+  HC12_SERIAL.print("*");
   if (checksum < 0x10) {
-    hc12Serial.print("0");
+    HC12_SERIAL.print("0");
   }
-  hc12Serial.println(checksum, HEX);
+  HC12_SERIAL.println(checksum, HEX);
 }
 
 void motorStop() {
@@ -124,23 +125,21 @@ bool rcChannelsValid() {
     return false;
   }
   noInterrupts();
-  uint16_t ch1 = ppmChannels[0];
-  uint16_t ch2 = ppmChannels[1];
-  uint16_t ch3 = ppmChannels[2];
-  uint16_t ch4 = ppmChannels[3];
+  uint16_t steering = ppmChannels[STEERING_CHANNEL_INDEX];
+  uint16_t throttle = ppmChannels[THROTTLE_CHANNEL_INDEX];
+  uint16_t mode = ppmChannels[MODE_CHANNEL_INDEX];
   interrupts();
 
-  return ch1 >= RC_MIN_VALID_US && ch1 <= RC_MAX_VALID_US &&
-         ch2 >= RC_MIN_VALID_US && ch2 <= RC_MAX_VALID_US &&
-         ch3 >= RC_MIN_VALID_US && ch3 <= RC_MAX_VALID_US &&
-         ch4 >= RC_MIN_VALID_US && ch4 <= RC_MAX_VALID_US;
+  return steering >= RC_MIN_VALID_US && steering <= RC_MAX_VALID_US &&
+         throttle >= RC_MIN_VALID_US && throttle <= RC_MAX_VALID_US &&
+         mode >= RC_MIN_VALID_US && mode <= RC_MAX_VALID_US;
 }
 
 bool rcAutoSwitchOn() {
   noInterrupts();
-  uint16_t ch4 = ppmChannels[3];
+  uint16_t mode = ppmChannels[MODE_CHANNEL_INDEX];
   interrupts();
-  return ch4 > 1600;
+  return mode > RC_AUTO_SWITCH_ON_US;
 }
 
 const char *modeName(RobotMode mode) {
@@ -172,7 +171,9 @@ void sendErr(uint32_t seq, const char *reason) {
 }
 
 void sendGpsTelemetry() {
+#if ENABLE_GPS_TELEMETRY
   if (!gps.location.isValid()) {
+    writeFrame("GPS", millis(), "NO_FIX");
     return;
   }
 
@@ -190,6 +191,9 @@ void sendGpsTelemetry() {
   payload += ",";
   payload += gps.location.isValid() ? "1" : "0";
   writeFrame("GPS", millis(), payload);
+#else
+  writeFrame("GPS", millis(), "GPS_DISABLED");
+#endif
 }
 
 bool decodeFrame(const String &line, String &typeOut, long &seqOut, String &payloadOut) {
@@ -293,8 +297,11 @@ void processHC12Line(const String &line) {
 
 void setup() {
   Serial.begin(115200);
-  hc12Serial.begin(HC12_BAUD);
-  gpsSerial.begin(GPS_BAUD);
+  HC12_SERIAL.begin(HC12_BAUD);
+#if ENABLE_GPS_TELEMETRY
+  // Confirm the OpenRB-150 secondary GPS UART mapping before enabling this path.
+  Serial1.begin(GPS_BAUD);
+#endif
 
   pinMode(PPM_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
@@ -309,12 +316,14 @@ void setup() {
 }
 
 void loop() {
-  while (gpsSerial.available() > 0) {
-    gps.encode(gpsSerial.read());
+#if ENABLE_GPS_TELEMETRY
+  while (Serial1.available() > 0) {
+    gps.encode(Serial1.read());
   }
+#endif
 
-  while (hc12Serial.available() > 0) {
-    char c = static_cast<char>(hc12Serial.read());
+  while (HC12_SERIAL.available() > 0) {
+    char c = static_cast<char>(HC12_SERIAL.read());
     if (c == '\n') {
       processHC12Line(hc12Line);
       hc12Line = "";
