@@ -15,6 +15,9 @@ constexpr uint8_t CHANNEL_COUNT = 8;
 constexpr uint8_t STEERING_CHANNEL_INDEX = 0;  // Printed CH1
 constexpr uint8_t THROTTLE_CHANNEL_INDEX = 2;  // Printed CH3
 constexpr uint8_t MODE_CHANNEL_INDEX = 4;      // Printed CH5
+constexpr uint16_t STEERING_CENTER_US = 1490;
+constexpr uint16_t THROTTLE_CENTER_US = 1546;
+constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
@@ -23,6 +26,8 @@ constexpr uint16_t ESC_RANGE_US = 300;
 constexpr uint32_t STATION_TIMEOUT_MS = 1500;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_PERIOD_MS = 500;
+constexpr bool ENABLE_USB_DEBUG = true;
+constexpr uint32_t USB_DEBUG_PERIOD_MS = 500;
 
 enum RobotMode {
   DISARMED,
@@ -47,8 +52,10 @@ volatile uint32_t lastPpmFrameMs = 0;
 RobotMode currentMode = DISARMED;
 String hc12Line;
 uint32_t lastStationFrameMs = 0;
+long lastStationSeq = -1;
 uint32_t lastTelemetryMs = 0;
 uint32_t lastStatusMs = 0;
+uint32_t lastUsbDebugMs = 0;
 float autoLeftCmd = 0.0f;
 float autoRightCmd = 0.0f;
 
@@ -98,6 +105,11 @@ void motorStop() {
   escRight.writeMicroseconds(ESC_NEUTRAL_US);
 }
 
+void clearAutoCommand() {
+  autoLeftCmd = 0.0f;
+  autoRightCmd = 0.0f;
+}
+
 uint16_t clampPulse(int pulse) {
   if (pulse < ESC_NEUTRAL_US - ESC_RANGE_US) {
     return ESC_NEUTRAL_US - ESC_RANGE_US;
@@ -108,38 +120,97 @@ uint16_t clampPulse(int pulse) {
   return pulse;
 }
 
-void applyAutoCommand(float left, float right) {
-  // Wheel-off-ground only for ESC validation.
+float clampUnit(float value) {
+  if (value > 1.0f) {
+    return 1.0f;
+  }
+  if (value < -1.0f) {
+    return -1.0f;
+  }
+  return value;
+}
+
+void applyDriveCommand(float left, float right) {
+  left = clampUnit(left);
+  right = clampUnit(right);
+
   int leftPulse = ESC_NEUTRAL_US + static_cast<int>(left * ESC_RANGE_US);
   int rightPulse = ESC_NEUTRAL_US + static_cast<int>(right * ESC_RANGE_US);
   escLeft.writeMicroseconds(clampPulse(leftPulse));
   escRight.writeMicroseconds(clampPulse(rightPulse));
 }
 
+void applyAutoCommand(float left, float right) {
+  // Wheel-off-ground only for ESC validation.
+  applyDriveCommand(left, right);
+}
+
 bool rcFrameRecent() {
   return millis() - lastPpmFrameMs < 200;
 }
 
-bool rcChannelsValid() {
+void readRcChannels(uint16_t &steering, uint16_t &throttle, uint16_t &mode) {
+  noInterrupts();
+  steering = ppmChannels[STEERING_CHANNEL_INDEX];
+  throttle = ppmChannels[THROTTLE_CHANNEL_INDEX];
+  mode = ppmChannels[MODE_CHANNEL_INDEX];
+  interrupts();
+}
+
+bool rcPulseValid(uint16_t pulseUs) {
+  return pulseUs >= RC_MIN_VALID_US && pulseUs <= RC_MAX_VALID_US;
+}
+
+float normRcCentered(uint16_t pulseUs, uint16_t centerUs) {
+  int delta = static_cast<int>(pulseUs) - static_cast<int>(centerUs);
+
+  if (abs(delta) <= RC_DEADBAND_US) {
+    return 0.0f;
+  }
+
+  float denom = delta > 0 ? (2000.0f - centerUs) : (centerUs - 1000.0f);
+  if (denom < 1.0f) {
+    return 0.0f;
+  }
+
+  return clampUnit(static_cast<float>(delta) / denom);
+}
+
+bool rcChannelsValid(uint16_t steering, uint16_t throttle, uint16_t mode) {
   if (!rcFrameRecent()) {
     return false;
   }
-  noInterrupts();
-  uint16_t steering = ppmChannels[STEERING_CHANNEL_INDEX];
-  uint16_t throttle = ppmChannels[THROTTLE_CHANNEL_INDEX];
-  uint16_t mode = ppmChannels[MODE_CHANNEL_INDEX];
-  interrupts();
 
-  return steering >= RC_MIN_VALID_US && steering <= RC_MAX_VALID_US &&
-         throttle >= RC_MIN_VALID_US && throttle <= RC_MAX_VALID_US &&
-         mode >= RC_MIN_VALID_US && mode <= RC_MAX_VALID_US;
+  return rcPulseValid(steering) && rcPulseValid(throttle) && rcPulseValid(mode);
+}
+
+bool rcChannelsValid() {
+  uint16_t steering = 0;
+  uint16_t throttle = 0;
+  uint16_t mode = 0;
+  readRcChannels(steering, throttle, mode);
+  return rcChannelsValid(steering, throttle, mode);
+}
+
+bool rcAutoSwitchOn(uint16_t mode) {
+  return mode > RC_AUTO_SWITCH_ON_US;
 }
 
 bool rcAutoSwitchOn() {
-  noInterrupts();
-  uint16_t mode = ppmChannels[MODE_CHANNEL_INDEX];
-  interrupts();
-  return mode > RC_AUTO_SWITCH_ON_US;
+  uint16_t steering = 0;
+  uint16_t throttle = 0;
+  uint16_t mode = 0;
+  readRcChannels(steering, throttle, mode);
+  return rcAutoSwitchOn(mode);
+}
+
+void applyManualOverride(uint16_t steeringUs, uint16_t throttleUs) {
+  float steering = normRcCentered(steeringUs, STEERING_CENTER_US);
+  float throttle = normRcCentered(throttleUs, THROTTLE_CENTER_US);
+
+  float left = throttle - steering;
+  float right = throttle + steering;
+  applyDriveCommand(left, right);
 }
 
 const char *modeName(RobotMode mode) {
@@ -152,6 +223,100 @@ const char *modeName(RobotMode mode) {
     case FAILSAFE: return "FAILSAFE";
     default: return "UNKNOWN";
   }
+}
+
+const char *safetyStateName(bool rcValid, bool autoSwitchOn) {
+  if (!rcValid) {
+    return "STOP/NEUTRAL_RC_INVALID";
+  }
+  if (currentMode == LINK_LOST) {
+    return "STOP/NEUTRAL_LINK_LOST";
+  }
+  if (currentMode == FAILSAFE) {
+    return "STOP/NEUTRAL_FAILSAFE";
+  }
+  if (!autoSwitchOn) {
+    return "MANUAL_RC_MIX";
+  }
+  if (currentMode == AUTO_RUNNING) {
+    return "AUTO_CMD_ACTIVE";
+  }
+  if (currentMode == AUTO_READY) {
+    return "STOP/NEUTRAL_AUTO_READY";
+  }
+  if (currentMode == DISARMED) {
+    return "STOP/NEUTRAL_DISARMED";
+  }
+  return "STOP/NEUTRAL";
+}
+
+void debugPrintStatus() {
+  if (!ENABLE_USB_DEBUG) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (now - lastUsbDebugMs < USB_DEBUG_PERIOD_MS) {
+    return;
+  }
+  lastUsbDebugMs = now;
+
+  uint16_t steeringUs = 0;
+  uint16_t throttleUs = 0;
+  uint16_t modeUs = 0;
+  uint32_t ppmFrameMs = 0;
+  noInterrupts();
+  steeringUs = ppmChannels[STEERING_CHANNEL_INDEX];
+  throttleUs = ppmChannels[THROTTLE_CHANNEL_INDEX];
+  modeUs = ppmChannels[MODE_CHANNEL_INDEX];
+  ppmFrameMs = lastPpmFrameMs;
+  interrupts();
+
+  bool rcValid = rcChannelsValid(steeringUs, throttleUs, modeUs);
+  bool autoSwitchOn = rcAutoSwitchOn(modeUs);
+  float steeringNorm = normRcCentered(steeringUs, STEERING_CENTER_US);
+  float throttleNorm = normRcCentered(throttleUs, THROTTLE_CENTER_US);
+
+  Serial.print(F("USBDBG mode="));
+  Serial.print(modeName(currentMode));
+  Serial.print(F(" rc_ok="));
+  Serial.print(rcValid ? F("true") : F("false"));
+  Serial.print(F(" auto_sw="));
+  Serial.print(autoSwitchOn ? F("true") : F("false"));
+  Serial.print(F(" ppm_age_ms="));
+  if (ppmFrameMs == 0) {
+    Serial.print(F("NA"));
+  } else {
+    Serial.print(now - ppmFrameMs);
+  }
+  Serial.print(F(" steer_us="));
+  Serial.print(steeringUs);
+  Serial.print(F(" throttle_us="));
+  Serial.print(throttleUs);
+  Serial.print(F(" mode_us="));
+  Serial.print(modeUs);
+  Serial.print(F(" steer_norm="));
+  Serial.print(steeringNorm, 3);
+  Serial.print(F(" throttle_norm="));
+  Serial.print(throttleNorm, 3);
+  Serial.print(F(" station_age_ms="));
+  if (lastStationFrameMs == 0) {
+    Serial.print(F("NA"));
+  } else {
+    Serial.print(now - lastStationFrameMs);
+  }
+  Serial.print(F(" station_seq="));
+  if (lastStationSeq < 0) {
+    Serial.print(F("NA"));
+  } else {
+    Serial.print(lastStationSeq);
+  }
+  Serial.print(F(" safety="));
+  Serial.print(safetyStateName(rcValid, autoSwitchOn));
+  Serial.print(F(" auto_left="));
+  Serial.print(autoLeftCmd, 3);
+  Serial.print(F(" auto_right="));
+  Serial.println(autoRightCmd, 3);
 }
 
 void sendStatus(uint32_t refSeq) {
@@ -240,6 +405,7 @@ void handleCommand(long seq, const String &payload) {
   String command = comma >= 0 ? payload.substring(0, comma) : payload;
 
   if (command == "STOP") {
+    clearAutoCommand();
     motorStop();
     currentMode = rcAutoSwitchOn() ? AUTO_READY : MANUAL;
     sendAck(seq, "OK");
@@ -249,6 +415,7 @@ void handleCommand(long seq, const String &payload) {
   if (command == "AUTO") {
     if (!rcChannelsValid() || !rcAutoSwitchOn()) {
       currentMode = MANUAL;
+      clearAutoCommand();
       motorStop();
       sendErr(seq, "AUTO_REJECTED");
       return;
@@ -282,6 +449,7 @@ void processHC12Line(const String &line) {
   }
 
   lastStationFrameMs = millis();
+  lastStationSeq = seq;
 
   if (type == "HB") {
     if (currentMode == DISARMED) {
@@ -332,23 +500,31 @@ void loop() {
     }
   }
 
-  if (!rcChannelsValid()) {
+  uint16_t steeringUs = 0;
+  uint16_t throttleUs = 0;
+  uint16_t modeUs = 0;
+  readRcChannels(steeringUs, throttleUs, modeUs);
+
+  bool rcValid = rcChannelsValid(steeringUs, throttleUs, modeUs);
+  bool autoSwitchOn = rcAutoSwitchOn(modeUs);
+
+  if (!rcValid) {
     currentMode = FAILSAFE;
+    clearAutoCommand();
     motorStop();
-  } else if (!rcAutoSwitchOn()) {
-    if (currentMode == AUTO_RUNNING || currentMode == AUTO_READY || currentMode == LINK_LOST) {
-      currentMode = MANUAL;
-      motorStop();
-    } else if (currentMode == DISARMED) {
-      currentMode = MANUAL;
-    }
+  } else if (!autoSwitchOn) {
+    currentMode = MANUAL;
+    clearAutoCommand();
+    applyManualOverride(steeringUs, throttleUs);
   } else if (currentMode == MANUAL || currentMode == DISARMED) {
     currentMode = AUTO_READY;
+    clearAutoCommand();
     motorStop();
   }
 
   if (currentMode == AUTO_RUNNING && millis() - lastStationFrameMs > STATION_TIMEOUT_MS) {
     currentMode = LINK_LOST;
+    clearAutoCommand();
     motorStop();
   }
 
@@ -361,4 +537,6 @@ void loop() {
     sendStatus(lastStationFrameMs);
     lastStatusMs = millis();
   }
+
+  debugPrintStatus();
 }
