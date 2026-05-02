@@ -50,3 +50,27 @@ The station panel can physically look like `CH7`, but the firmware uses the rece
 3. Toggle the Manual/Auto switch and confirm `CH5` changes between low/high values.
 4. Confirm `CH7` may move independently, but it does not affect rover mode.
 5. Turn the transmitter off or break the RC link and confirm the rover returns to stop/failsafe behavior.
+
+## Final note on station physical switch label
+
+The physical switch on the station panel may appear to be labeled CH7, but the receiver PPM stream reports this Manual/Auto switch as PPM CH5.
+
+Final firmware mapping:
+- Steering: PPM CH1 / code index 0
+- Throttle: PPM CH2 / code index 1
+- Manual/Auto: PPM CH5 / code index 4
+- PPM CH7 is not used for Manual/Auto in the current firmware.
+
+Do not change `MODE_CHANNEL_INDEX` to 6 unless raw PPM logs confirm that the desired physical switch actually changes printed CH7.
+
+## Final physical station control note
+
+Final operating convention:
+
+- Steering: joystick horizontal -> PPM CH1 -> code index 0
+- Throttle: joystick vertical -> PPM CH2 -> code index 1
+- Manual/Auto mode: the working physical mode switch on the station panel -> PPM CH5 -> code index 4
+
+The station panel label may look confusing because the working physical switch may appear to be in a CH7 position.
+For operation, relabel that working switch as `CH5 / MODE / MANUAL-AUTO`.
+CH7 is not used for mode in the current firmware.
