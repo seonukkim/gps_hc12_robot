@@ -11,7 +11,6 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from gps_coverage_core.geo import GeoPoint, latlon_to_local
 from gps_coverage_core.planner import generate_lawnmower_path
 
 
@@ -33,16 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    point_a = GeoPoint(lat=args.lat_a, lon=args.lon_a)
-    point_b = GeoPoint(lat=args.lat_b, lon=args.lon_b)
+    point_a = {"lat": args.lat_a, "lon": args.lon_a}
+    point_b = {"lat": args.lat_b, "lon": args.lon_b}
     path = generate_lawnmower_path(point_a, point_b, args.spacing)
-    local_points = [latlon_to_local(point_a, point) for point in path]
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    xs = [point.x_m for point in local_points]
-    ys = [point.y_m for point in local_points]
+    xs = [float(point["x"]) for point in path]
+    ys = [float(point["y"]) for point in path]
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.plot(xs, ys, marker="o", linewidth=1.5)

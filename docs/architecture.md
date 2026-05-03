@@ -1,16 +1,22 @@
 # Architecture
 
+## Status Note
+
+This is the target architecture and current boundary model for the pre-ROS2 Python/OpenRB prototype. Python core protocol and planning code are implemented independently from ROS2. ROS2 Jazzy orchestration is planned later, and station-side HC-12 end-to-end operation should be described as pending until the station hardware and link test are confirmed.
+
 ## Ground Station
 
 - Platform: WSL2 Ubuntu 24.04 or Jetson
-- Stack: Python, `uv`, ROS2 Jazzy
-- Radio link: HC-12 over USB serial, default `/dev/ttyACM0` at `9600`
-- Responsibilities:
-  - high-level mission logic
+- Current stack: Python and `uv`
+- Planned stack: ROS2 Jazzy integration on top of the ROS-independent core modules
+- Intended radio link: HC-12 over USB serial, default `/dev/ttyACM0` at `9600`; station-side end-to-end confirmation is pending
+- Current responsibilities:
+  - high-level mission logic for safe tests and offline or mock missions
   - coverage path planning
   - GPS telemetry logging
-  - ROS2 bridging and orchestration
   - operator-facing diagnostics
+- Planned responsibilities:
+  - ROS2 bridging and orchestration
 
 Ground-station defaults are intentionally conservative: heartbeat plus `STOP` only unless the operator explicitly changes behavior.
 

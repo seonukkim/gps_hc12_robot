@@ -90,8 +90,8 @@ class StationController:
     def send_cmd(self, command: str, *fields: object) -> int:
         return self._send_frame("CMD", command, *fields)
 
-    def poll(self) -> list[tuple[str, int, list[str]]]:
-        decoded: list[tuple[str, int, list[str]]] = []
+    def poll(self) -> list[dict[str, str | int]]:
+        decoded: list[dict[str, str | int]] = []
         while True:
             raw = self._serial.readline()
             if not raw:
@@ -142,8 +142,8 @@ def main() -> int:
                 controller.send_stop()
                 last_stop = now
 
-            for msg_type, seq, payload in controller.poll():
-                print(f"{msg_type:<4} seq={seq} payload={payload}")
+            for frame in controller.poll():
+                print(f"{frame['type']:<4} seq={frame['seq']} payload={frame['payload']}")
             time.sleep(0.05)
     except KeyboardInterrupt:
         print("\nCtrl+C received; sending STOP five times.")

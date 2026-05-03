@@ -30,7 +30,7 @@ def log_line(handle, direction: str, data: bytes) -> None:
     handle.flush()
 
 
-def print_frame(msg_type: str, seq: int, payload: list[str]) -> None:
+def print_frame(msg_type: str, seq: int, payload: str) -> None:
     if msg_type in {"GPS", "STAT", "ACK", "ERR"}:
         print(f"{msg_type:<4} seq={seq} payload={payload}")
 
@@ -64,11 +64,11 @@ def main() -> int:
                 if raw:
                     log_line(log_handle, "RX", raw)
                     try:
-                        msg_type, rx_seq, payload = decode_frame(raw)
+                        frame = decode_frame(raw)
                     except ValueError as exc:
                         print(f"RX parse error: {exc}: {raw!r}")
                     else:
-                        print_frame(msg_type, rx_seq, payload)
+                        print_frame(str(frame["type"]), int(frame["seq"]), str(frame["payload"]))
             except KeyboardInterrupt:
                 stop_frame = encode_frame("CMD", seq + 1, "STOP", "0", "0")
                 ser.write(stop_frame)

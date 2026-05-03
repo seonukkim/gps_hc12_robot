@@ -47,14 +47,15 @@ def main() -> int:
                 if not raw:
                     continue
                 try:
-                    msg_type, seq, payload = decode_frame(raw)
+                    frame = decode_frame(raw)
                 except ValueError as exc:
                     print(f"RX parse error: {exc}: {raw!r}")
                     continue
-                if msg_type != "GPS":
+                if frame["type"] != "GPS":
                     continue
 
-                fix = GPSTelemetry.from_payload(seq, payload)
+                payload_fields = frame["payload"].split(",") if frame["payload"] else []
+                fix = GPSTelemetry.from_payload(int(frame["seq"]), payload_fields)
                 row = {"timestamp_utc": dt.datetime.now(dt.UTC).isoformat(), **fix.as_csv_row()}
                 writer.writerow(row)
                 handle.flush()

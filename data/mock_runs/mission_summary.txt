@@ -1,0 +1,9 @@
+A: 35.573188, 129.239825
+B: 35.573250, 129.240000
+spacing_m: 8.00
+num_lanes: 4
+waypoints: 8
+waypoints_json: /home/user/project-lab/gps_hc12_robot/data/mock_runs/waypoints.json
+waypoints_csv: /home/user/project-lab/gps_hc12_robot/data/mock_runs/waypoints.csv
+mission_summary: /home/user/project-lab/gps_hc12_robot/data/mock_runs/mission_summary.txt
+path_preview: /home/user/project-lab/gps_hc12_robot/data/mock_runs/path_preview.png

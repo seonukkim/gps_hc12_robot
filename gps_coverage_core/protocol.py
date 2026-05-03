@@ -64,19 +64,45 @@ def _validate_token(token: str, label: str, *, allow_empty: bool = False) -> str
     return token
 
 
-def encode_frame(msg_type: str, seq: int, *fields: object) -> bytes:
+def _validate_frame_type(frame_type: str) -> str:
+    if not isinstance(frame_type, str):
+        raise ValueError("TYPE must be a string")
+    if frame_type == "":
+        raise ValueError("TYPE must be non-empty")
+    try:
+        frame_type.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("TYPE must be ASCII") from exc
+    if any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for char in frame_type):
+        raise ValueError("TYPE must be an uppercase ASCII token")
+    return frame_type
+
+
+def _coerce_payload_text(payload: str, extra_fields: tuple[object, ...]) -> str:
+    payload_parts = [str(payload), *(str(field) for field in extra_fields)]
+    payload_text = ",".join(payload_parts)
+    try:
+        payload_text.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("PAYLOAD must be ASCII") from exc
+    if "\r" in payload_text or "\n" in payload_text:
+        raise ValueError("PAYLOAD must not contain newline characters")
+    return payload_text
+
+
+def encode_frame(frame_type: str, seq: int, payload: str, *extra_fields: object) -> bytes:
     """Encode a message frame as ``@TYPE,SEQ,PAYLOAD*CS\\n``."""
     if isinstance(seq, bool) or not isinstance(seq, int):
         raise ValueError("SEQ must be an integer")
-    msg_type = _validate_token(msg_type, "msg_type")
-    payload = [_validate_token(str(field), f"field[{index}]") for index, field in enumerate(fields)]
-    body = ",".join([msg_type, str(seq), *payload])
+    frame_type = _validate_frame_type(frame_type)
+    payload_text = _coerce_payload_text(payload, extra_fields)
+    body = f"{frame_type},{seq},{payload_text}"
     checksum = checksum_xor(body)
     return f"@{body}*{checksum:02X}\n".encode("ascii")
 
 
-def decode_frame(line: bytes | str) -> tuple[str, int, list[str]]:
-    """Decode a frame and return ``(msg_type, seq, payload_fields)``."""
+def decode_frame(line: bytes | str) -> dict[str, str | int]:
+    """Decode a frame and return the parsed fields plus the raw line."""
     if isinstance(line, bytes):
         try:
             text = line.decode("ascii")
@@ -87,37 +113,46 @@ def decode_frame(line: bytes | str) -> tuple[str, int, list[str]]:
     else:
         raise ValueError("line must be bytes or str")
 
-    text = text.strip()
+    raw = text
+    text = text.rstrip("\r\n")
     if not text.startswith("@"):
         raise ValueError("frame must start with @")
     if "*" not in text:
         raise ValueError("frame must include checksum separator")
 
     body, checksum_text = text[1:].rsplit("*", 1)
-    if not checksum_text:
+    if checksum_text == "":
         raise ValueError("frame checksum is missing")
+    if len(checksum_text) != 2:
+        raise ValueError("frame checksum must be two hex digits")
 
     try:
         expected = int(checksum_text, 16)
     except ValueError as exc:
-        raise ValueError("frame checksum must be hex") from exc
+        raise ValueError("frame checksum must be hexadecimal") from exc
 
     actual = checksum_xor(body)
     if actual != expected:
         raise ValueError("frame checksum mismatch")
 
-    parts = body.split(",")
-    if len(parts) < 2:
-        raise ValueError("frame body must contain TYPE and SEQ")
+    parts = body.split(",", 2)
+    if len(parts) != 3:
+        raise ValueError("frame body must contain TYPE, SEQ, and PAYLOAD")
 
-    msg_type = parts[0]
-    if not msg_type:
-        raise ValueError("TYPE is missing")
-    _validate_token(msg_type, "msg_type")
+    frame_type, seq_text, payload = parts
+    frame_type = _validate_frame_type(frame_type)
+    if "\r" in payload or "\n" in payload:
+        raise ValueError("PAYLOAD must not contain newline characters")
 
     try:
-        seq = int(parts[1])
+        seq = int(seq_text)
     except ValueError as exc:
         raise ValueError("SEQ must be an integer") from exc
 
-    return msg_type, seq, parts[2:]
+    return {
+        "type": frame_type,
+        "seq": seq,
+        "payload": payload,
+        "checksum": checksum_text.upper(),
+        "raw": raw,
+    }
