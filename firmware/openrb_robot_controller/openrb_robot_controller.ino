@@ -1,14 +1,16 @@
 #include <Servo.h>
 #include <TinyGPS++.h>
 
-constexpr bool ENABLE_GPS_TELEMETRY = false;
+#define ENABLE_GPS_TELEMETRY 1
 #define HC12_SERIAL Serial2
+#define GPS_SERIAL Serial3
 
 constexpr uint8_t PPM_PIN = 6;
 constexpr uint8_t ESC_LEFT_PIN = 4;
 constexpr uint8_t ESC_RIGHT_PIN = 5;
 constexpr long HC12_BAUD = 9600;
 constexpr long GPS_BAUD = 9600;
+constexpr long USB_BAUD = 115200;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
 // Printed transmitter labels are 1-based (CH1-CH8), while ppmChannels[] uses 0-based indexes.
@@ -406,7 +408,39 @@ void debugPrintStatus() {
   Serial.print(F(" left_cmd="));
   Serial.print(lastLeftOutputCmd, 3);
   Serial.print(F(" right_cmd="));
-  Serial.println(lastRightOutputCmd, 3);
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" gps_fix="));
+  Serial.print(gps.location.isValid() ? F("true") : F("false"));
+  Serial.print(F(" gps_lat="));
+  if (gps.location.isValid()) {
+    Serial.print(gps.location.lat(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_lon="));
+  if (gps.location.isValid()) {
+    Serial.print(gps.location.lng(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_sats="));
+  if (gps.satellites.isValid()) {
+    Serial.print(gps.satellites.value());
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_hdop="));
+  if (gps.hdop.isValid()) {
+    Serial.print(gps.hdop.hdop(), 2);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_age_ms="));
+  if (gps.location.isValid()) {
+    Serial.println(gps.location.age());
+  } else {
+    Serial.println(F("NA"));
+  }
 }
 
 void sendStatus(uint32_t refSeq) {
@@ -427,24 +461,40 @@ void sendErr(uint32_t seq, const char *reason) {
 
 void sendGpsTelemetry() {
 #if ENABLE_GPS_TELEMETRY
-  if (!gps.location.isValid()) {
-    writeFrame("GPS", millis(), "NO_FIX");
-    return;
-  }
-
   String payload;
-  payload.reserve(64);
-  payload += String(gps.location.lat(), 6);
-  payload += ",";
-  payload += String(gps.location.lng(), 6);
-  payload += ",";
-  payload += String(gps.altitude.meters(), 1);
-  payload += ",";
-  payload += String(gps.satellites.value());
-  payload += ",";
-  payload += String(gps.hdop.hdop(), 1);
-  payload += ",";
+  payload.reserve(96);
+  payload += "fix=";
   payload += gps.location.isValid() ? "1" : "0";
+  payload += ",lat=";
+  if (gps.location.isValid()) {
+    payload += String(gps.location.lat(), 6);
+  } else {
+    payload += "NA";
+  }
+  payload += ",lon=";
+  if (gps.location.isValid()) {
+    payload += String(gps.location.lng(), 6);
+  } else {
+    payload += "NA";
+  }
+  payload += ",sats=";
+  if (gps.satellites.isValid()) {
+    payload += String(gps.satellites.value());
+  } else {
+    payload += "NA";
+  }
+  payload += ",hdop=";
+  if (gps.hdop.isValid()) {
+    payload += String(gps.hdop.hdop(), 2);
+  } else {
+    payload += "NA";
+  }
+  payload += ",age_ms=";
+  if (gps.location.isValid()) {
+    payload += String(gps.location.age());
+  } else {
+    payload += "NA";
+  }
   writeFrame("GPS", millis(), payload);
 #else
   writeFrame("GPS", millis(), "GPS_DISABLED");
@@ -597,11 +647,10 @@ void processHC12Line(const String &line) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(USB_BAUD);
   HC12_SERIAL.begin(HC12_BAUD);
 #if ENABLE_GPS_TELEMETRY
-  // Confirm the OpenRB-150 secondary GPS UART mapping before enabling this path.
-  Serial1.begin(GPS_BAUD);
+  GPS_SERIAL.begin(GPS_BAUD);
 #endif
 
   pinMode(PPM_PIN, INPUT_PULLUP);
@@ -612,7 +661,7 @@ void setup() {
   motorStop();
 
   Serial.println("OpenRB robot controller skeleton starting.");
-  Serial.println("Confirm OpenRB-150 UART mapping before deployment.");
+  Serial.println("GPS telemetry uses OpenRB-150 Serial3 (D13/RX) at 9600 baud.");
   Serial.println("Motor tests are wheel-off-ground only.");
   Serial.println("RC mode input uses receiver PPM CH5; PPM CH7 is reserved/unused.");
   Serial.println("CH5 high enters AUTO_READY only; drive stays STOP until explicit AUTO.");
@@ -620,8 +669,8 @@ void setup() {
 
 void loop() {
 #if ENABLE_GPS_TELEMETRY
-  while (Serial1.available() > 0) {
-    gps.encode(Serial1.read());
+  while (GPS_SERIAL.available() > 0) {
+    gps.encode(GPS_SERIAL.read());
   }
 #endif
 

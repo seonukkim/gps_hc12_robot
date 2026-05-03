@@ -1,0 +1,113 @@
+#include <TinyGPS++.h>
+
+// GPS-only hardware UART test for OpenRB-150.
+//
+// OpenRB pinmap:
+//   D14 = TX
+//   D13 = RX
+//
+// GPS module pin order:
+//   PPS | RX | TX | GND | UCC
+//
+// Wiring:
+//   GPS UCC -> OpenRB +5V
+//   GPS GND -> OpenRB GND
+//   GPS TX  -> OpenRB D13/RX
+//   GPS RX  -> OpenRB D14/TX optional
+//   GPS PPS -> not connected
+//
+// Important:
+//   GPS TX goes to OpenRB RX.
+//   GPS RX goes to OpenRB TX if connected.
+//
+// This sketch is GPS-only.
+// It does not control motors.
+
+#define GPS_SERIAL Serial2
+
+constexpr long GPS_BAUD = 9600;
+constexpr long USB_BAUD = 115200;
+constexpr uint32_t REPORT_PERIOD_MS = 1000;
+
+TinyGPSPlus gps;
+
+uint32_t lastReportMs = 0;
+uint32_t charsThisSecond = 0;
+uint32_t totalChars = 0;
+
+void setup() {
+  Serial.begin(USB_BAUD);
+
+  uint32_t start = millis();
+  while (!Serial && millis() - start < 1200) {
+    delay(10);
+  }
+
+  GPS_SERIAL.begin(GPS_BAUD);
+
+  Serial.println();
+  Serial.println("GPS D13/D14 Serial2 test ready.");
+  Serial.println("Wiring: GPS TX -> OpenRB D13/RX, GPS GND -> GND, GPS UCC -> +5V.");
+  Serial.println("GPS RX -> OpenRB D14/TX is optional. PPS is unused.");
+}
+
+void printGpsReport() {
+  Serial.print("chars_1s=");
+  Serial.print(charsThisSecond);
+
+  Serial.print(" total_chars=");
+  Serial.print(totalChars);
+
+  Serial.print(" tinygps_chars=");
+  Serial.print(gps.charsProcessed());
+
+  Serial.print(" status=");
+  if (gps.location.isValid()) {
+    Serial.print("FIX");
+    Serial.print(" lat=");
+    Serial.print(gps.location.lat(), 7);
+    Serial.print(" lon=");
+    Serial.print(gps.location.lng(), 7);
+  } else {
+    Serial.print("NO_FIX");
+  }
+
+  Serial.print(" sats=");
+  if (gps.satellites.isValid()) {
+    Serial.print(gps.satellites.value());
+  } else {
+    Serial.print("NA");
+  }
+
+  Serial.print(" hdop=");
+  if (gps.hdop.isValid()) {
+    Serial.print(gps.hdop.hdop(), 2);
+  } else {
+    Serial.print("NA");
+  }
+
+  Serial.print(" age_ms=");
+  if (gps.location.isValid()) {
+    Serial.print(gps.location.age());
+  } else {
+    Serial.print("NA");
+  }
+
+  Serial.println();
+  charsThisSecond = 0;
+}
+
+void loop() {
+  while (GPS_SERIAL.available() > 0) {
+    char c = static_cast<char>(GPS_SERIAL.read());
+    gps.encode(c);
+    charsThisSecond++;
+    totalChars++;
+  }
+
+  uint32_t now = millis();
+  if (now - lastReportMs >= REPORT_PERIOD_MS) {
+    lastReportMs = now;
+    printGpsReport();
+  }
+}

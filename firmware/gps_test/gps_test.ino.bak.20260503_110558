@@ -1,0 +1,111 @@
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+
+// GPS module pin order: PPS | RX | TX | GND | UCC
+//
+// Current wiring for this test:
+//   GPS UCC -> OpenRB +5V
+//   GPS GND -> OpenRB GND
+//   GPS TX  -> OpenRB D8   (OpenRB receives GPS data here)
+//   GPS RX  -> OpenRB D9   (optional; not required for read-only test)
+//   GPS PPS -> not connected
+//
+// Note:
+//   This sketch is GPS-only. It does not control motors.
+//   It is intended to verify that NMEA characters arrive from the GPS.
+
+constexpr uint8_t GPS_RX_PIN = 8;   // OpenRB receives from GPS TX
+constexpr uint8_t GPS_TX_PIN = 9;   // OpenRB transmits to GPS RX, optional
+constexpr long GPS_BAUD = 9600;
+constexpr long USB_BAUD = 115200;
+constexpr uint32_t REPORT_PERIOD_MS = 1000;
+
+SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
+TinyGPSPlus gps;
+
+uint32_t lastReportMs = 0;
+uint32_t charsThisSecond = 0;
+uint32_t totalChars = 0;
+
+void setup() {
+  Serial.begin(USB_BAUD);
+
+  // Do not block forever waiting for USB serial.
+  uint32_t start = millis();
+  while (!Serial && millis() - start < 1200) {
+    delay(10);
+  }
+
+  gpsSerial.begin(GPS_BAUD);
+
+  Serial.println();
+  Serial.println("GPS D8/D9 test ready.");
+  Serial.println("Wiring: GPS TX -> OpenRB D8, GPS GND -> GND, GPS UCC -> +5V.");
+  Serial.println("GPS RX -> D9 is optional. PPS is unused.");
+  Serial.println("If chars_1s stays 0, check GPS TX/GND/UCC or D8 support.");
+}
+
+void printGpsReport() {
+  Serial.print("chars_1s=");
+  Serial.print(charsThisSecond);
+
+  Serial.print(" total_chars=");
+  Serial.print(totalChars);
+
+  Serial.print(" tinygps_chars=");
+  Serial.print(gps.charsProcessed());
+
+  Serial.print(" status=");
+  if (gps.location.isValid()) {
+    Serial.print("FIX");
+    Serial.print(" lat=");
+    Serial.print(gps.location.lat(), 7);
+    Serial.print(" lon=");
+    Serial.print(gps.location.lng(), 7);
+  } else {
+    Serial.print("NO_FIX");
+  }
+
+  Serial.print(" sats=");
+  if (gps.satellites.isValid()) {
+    Serial.print(gps.satellites.value());
+  } else {
+    Serial.print("NA");
+  }
+
+  Serial.print(" hdop=");
+  if (gps.hdop.isValid()) {
+    Serial.print(gps.hdop.hdop(), 2);
+  } else {
+    Serial.print("NA");
+  }
+
+  Serial.print(" age_ms=");
+  if (gps.location.isValid()) {
+    Serial.print(gps.location.age());
+  } else {
+    Serial.print("NA");
+  }
+
+  Serial.println();
+
+  charsThisSecond = 0;
+}
+
+void loop() {
+  while (gpsSerial.available() > 0) {
+    char c = static_cast<char>(gpsSerial.read());
+    gps.encode(c);
+    charsThisSecond++;
+    totalChars++;
+
+    // Uncomment this if you want to see raw NMEA characters.
+    // Serial.write(c);
+  }
+
+  uint32_t now = millis();
+  if (now - lastReportMs >= REPORT_PERIOD_MS) {
+    lastReportMs = now;
+    printGpsReport();
+  }
+}
