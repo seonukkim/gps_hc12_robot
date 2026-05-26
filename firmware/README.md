@@ -36,3 +36,14 @@ On Linux/WSL station hosts, the upload port may instead look like
 
 Full manual-control bring-up notes are in
 [`docs/manual_control.md`](../docs/manual_control.md).
+
+## GPS UART Probe
+
+Use this standalone sketch when validating GPS UART wiring and baudrate:
+
+```text
+firmware/gps_uart_probe/gps_uart_probe.ino
+```
+
+It does not attach motor outputs. Full procedure and per-variant compile/upload
+commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).

@@ -25,15 +25,24 @@ Rover responsibilities:
 - RC manual input and mode switch handling
 - ESC output generation
 - HC-12 frame parsing and acknowledgements
-- GPS reading on `Serial3`
+- GPS reading from the selected rover GPS UART
 - rover telemetry and USB debug output
 - failsafe handling for stale link, invalid RC, STOP, and station E-stop
 
 ## Current Hardware Assumptions
 
 - Rover controller: OpenRB-150.
-- HC-12 rover UART: `Serial2`, `9600` baud.
-- GPS rover UART: `Serial3`, `9600` baud.
+- Integrated controller HC-12 rover UART: `Serial2`, `9600` baud.
+- Integrated controller GPS rover UART: `Serial3`, `9600` baud.
+- Current GPS probe result: central OpenRB connector works as `Serial2`,
+  `9600` baud, with readable NMEA and GPS fix.
+- Current architecture issue: the confirmed physical GPS path and integrated
+  HC-12 path both point at `Serial2`.
+- Selected resolution: Option B. Preserve HC-12 on `Serial2`, keep
+  `GPS_SERIAL=Serial3`, and move GPS to a verified physical `Serial3` RX/TX
+  path.
+- Open issue: actual `Serial3` RX/TX pin mapping is unresolved and must be
+  found with loopback and pin-finder tests.
 - OpenRB USB debug: `115200` baud.
 - Station serial default: `/dev/ttyACM0`, override with `--port`.
 - RC receiver PPM input: OpenRB `D6`.
@@ -42,6 +51,13 @@ Rover responsibilities:
 
 Do not change pin mappings, serial ports, or channel assumptions without
 updating `docs/rc_channel_map.md`, `docs/manual_control.md`, and this document.
+
+UART decision:
+
+- Option B is selected.
+- Preserve the known-working HC-12 manual-control path on `Serial2`.
+- Move GPS to verified `Serial3` RX/TX pins before relying on integrated GPS
+  telemetry.
 
 ## Implemented Components
 

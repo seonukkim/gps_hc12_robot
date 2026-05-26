@@ -1,5 +1,12 @@
 # GPS Serial3 Test Result
 
+> Historical result: this page records a prior successful `Serial3` / `D13` /
+> `9600` GPS test. On 2026-05-26, a fresh GPS-only test on the same assumed
+> input reported `chars_1s=0 total_chars=0 tinygps_chars=0`, so the current GPS
+> UART path must be revalidated with `docs/gps_bringup.md`. The follow-up probe
+> confirmed the current central OpenRB connector as `Serial2` at `9600`, not
+> `Serial3` D13/D14, and reached `fix=true`.
+
 ## Confirmed wiring
 
 GPS module pin order used in test:

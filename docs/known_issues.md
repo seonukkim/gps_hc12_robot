@@ -63,6 +63,63 @@ lat,lon,alt,sats,hdop,fix_valid
 
 This must be fixed before relying on live station GPS telemetry.
 
+## GPS And HC-12 UART Allocation Conflict
+
+Status:
+
+- GPS UART receive is confirmed on `Serial2` at `9600` with the GPS connected
+  to the current central OpenRB connector.
+- GPS module baudrate is confirmed as `9600`.
+- The central OpenRB connector is confirmed as `Serial2`.
+- The physical `Serial3` RX/TX pin mapping is unresolved.
+- GPS fix succeeded on that path:
+  - `lat` around `35.57107`
+  - `lon` around `129.1860`
+  - `sats` around `5`
+  - `hdop` around `1.61-1.62`
+- The integrated rover firmware currently defines:
+
+```cpp
+#define HC12_SERIAL Serial2
+#define GPS_SERIAL Serial3
+```
+
+Risk:
+
+- GPS and HC-12 cannot both own the same `Serial2` UART during normal rover
+  operation.
+- Changing the integrated firmware to put GPS on `Serial2` without moving
+  HC-12 would break or conflict with the known-working HC-12 manual control
+  path.
+- Keeping the integrated firmware unchanged while the GPS remains on the
+  central connector means integrated GPS telemetry will still read from
+  `Serial3`, where current D13/D14 tests saw no bytes.
+
+Decision:
+
+- Choose Option B.
+- Preserve known-working HC-12 manual control on `Serial2`.
+- Move GPS to a verified physical `Serial3` RX/TX path.
+- Keep integrated firmware architecture as `HC12_SERIAL=Serial2` and
+  `GPS_SERIAL=Serial3`.
+
+Next hardware action:
+
+- Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
+- Move GPS only after `Serial3` RX/TX is physically verified.
+- Do not modify `firmware/openrb_robot_controller/openrb_robot_controller.ino`
+  for this until GPS is verified on the selected `Serial3` pins.
+
+Next software milestone:
+
+- Add a GPS diagnostic integrated firmware mode after GPS is verified on
+  `Serial3`.
+- The diagnostic mode should report selected GPS UART, raw character counts,
+  TinyGPS++ processed characters, fix state, sats, HDOP, lat/lon, and GPS age.
+- It must not implement autonomous movement.
+- It must not weaken manual control, STOP override, heartbeat timeout, or
+  failsafe behavior.
+
 ## Station HC-12 Device Still Needs Confirmation
 
 The repository defaults to `/dev/ttyACM0`, but the actual station HC-12 USB

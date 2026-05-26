@@ -1,13 +1,24 @@
 # Current Hardware Status
 
+> 2026-05-26 note: GPS UART receive is now confirmed on `Serial2` at `9600`
+> with the GPS connected to the central OpenRB connector. The earlier `Serial3`
+> `D13` / `D14` checks failed because the current wiring is not on those pins.
+> GPS fix also succeeded on this `Serial2` path. The project chose Option B:
+> preserve HC-12 on `Serial2` and move GPS to a verified physical `Serial3`
+> RX/TX path.
+
 ## Confirmed working
 
 - OpenRB-150 USB debug: working
 - RC receiver PPM input: working
 - RC manual mode: working
 - Failsafe STOP behavior: working
-- GPS module: working
-- GPS FIX: confirmed
+- GPS UART receive: working on `Serial2` at `9600` with current central
+  connector wiring
+- GPS module baudrate: confirmed `9600`
+- GPS NMEA output: working; `$GPRMC`, `$GPVTG`, `$GPGGA`, `$GPGSV`, and
+  `$GPGLL` observed
+- GPS FIX: working on the current `Serial2` probe path
 
 ## Confirmed RC debug state
 
@@ -22,7 +33,30 @@ Observed from USBDBG:
 - `left_cmd=0.000`
 - `right_cmd=0.000`
 
-## Confirmed GPS debug state
+## Latest GPS Probe State
+
+Observed from `firmware/gps_uart_probe/gps_uart_probe.ino`:
+
+```text
+selected_port=Serial2 baud=9600
+chars_1s roughly 350-520
+raw_preview contains $GPRMC, $GPVTG, $GPGGA, $GPGSV, $GPGLL
+tinygps_chars increases
+fix=true
+lat around 35.57107
+lon around 129.1860
+sats around 5
+hdop around 1.61-1.62
+```
+
+Interpretation:
+
+- GPS UART communication is working.
+- GPS satellite fix is working on the `Serial2` probe path.
+- Next action is resolving UART allocation in the integrated rover system, not
+  more GPS UART probing.
+
+## Historical GPS Debug State
 
 Observed from USBDBG:
 
@@ -32,24 +66,41 @@ Observed from USBDBG:
 - `gps_sats=8`
 - `gps_hdop≈1.14`
 
-## Confirmed GPS wiring
+## Current GPS Wiring
 
 | GPS pin | OpenRB-150 pin |
 |---|---|
 | VCC / UCC | +5V |
 | GND | GND |
-| TX | D13 / RX |
+| TX | central OpenRB connector; confirmed as `Serial2` receive path |
 | RX | not connected |
 | PPS | not connected |
 
+Current status:
+
+- Central OpenRB connector is confirmed as `Serial2`.
+- `Serial3` physical RX/TX pin mapping is unresolved.
+- Historical `Serial3` D13/D14 wiring notes in older docs must be treated as a
+  different wiring setup until revalidated.
+
 ## Firmware mapping
 
-- GPS serial: `Serial3`
-- GPS baud: `9600`
+- Integrated controller HC-12 serial: `Serial2`
+- Integrated controller GPS serial: `Serial3`
+- GPS probe confirmed current physical GPS path: `Serial2` at `9600`
+- UART allocation conflict: current GPS wiring and integrated HC-12 both point
+  at `Serial2`
+- Selected resolution: Option B, preserve HC-12 on `Serial2` and move GPS to
+  verified `Serial3` RX/TX pins.
 - USB debug baud: `115200`
 
 ## Pending
 
+- Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
+- Move GPS to verified `Serial3` RX/TX pins, then rerun the GPS probe on
+  `Serial3` at confirmed `9600` baud.
+- Next software milestone: add a non-motion GPS diagnostic integrated firmware
+  mode after GPS is verified on `Serial3`.
 - Station-side HC-12-USB device is not confirmed.
 - `/dev/ttyUSB*` is not visible yet on the station/development side.
 - Need to confirm whether station HC-12-USB is installed and connected to MPC.

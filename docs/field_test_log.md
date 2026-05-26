@@ -1,7 +1,8 @@
 # Field Test Log
 
 Use this file as the project-level index for bench and field tests. Detailed raw
-logs should remain in `data/` or another run-specific output directory.
+logs should remain in `data/`, `outputs/logs/`, or another run-specific output
+directory.
 
 All motor tests are wheel-off-ground unless a later entry explicitly documents a
 safe ground-contact setup.
@@ -79,6 +80,175 @@ Next action:
   - straight up should produce forward
   - straight down should produce reverse
   - straight left/right should steer without large throttle bias
+
+## 2026-05-26: GPS Serial3 Zero-Byte Result And UART Probe Setup
+
+Sketch:
+
+```text
+GPS-only test on OpenRB-150, Serial3 RX D13 at 9600
+```
+
+Observed output:
+
+```text
+chars_1s=0 total_chars=0 tinygps_chars=0 status=NO_FIX sats=NA hdop=NA age_ms=NA
+```
+
+Interpretation:
+
+- The sketch is running and USB serial monitor works.
+- No GPS bytes are reaching the configured `Serial3` input.
+- This is a wiring, selected UART, baudrate, module power, or GPS output
+  configuration problem until proven otherwise.
+- This is not only a `NO_FIX` / satellite visibility problem.
+
+Repository action:
+
+- Added standalone safe probe:
+  `firmware/gps_uart_probe/gps_uart_probe.ino`.
+- Added GPS bring-up workflow:
+  `docs/gps_bringup.md`.
+- Did not modify `firmware/openrb_robot_controller/openrb_robot_controller.ino`.
+- Did not add any motor-driving behavior.
+
+Compile checks:
+
+| Candidate | Result |
+|---|---|
+| `Serial3` RX `D13` at `9600` | pass |
+| `Serial3` RX `D13` at `38400` | pass |
+| `Serial3` RX `D13` at `115200` | pass |
+| `Serial2` at `9600` | pass |
+| `SoftwareSerial` RX `D8` / TX `D9` at `9600` | not supported; `SoftwareSerial.h` unavailable in this OpenRB build |
+
+Next action:
+
+- Run the standalone probe in the order documented in
+  `docs/gps_bringup.md`.
+- First rerun `Serial3` RX `D13` at `9600` with the new probe so the raw
+  preview field confirms whether bytes are truly absent.
+
+## 2026-05-26: GPS Serial2 UART Success, Initial No-Fix Result
+
+Sketch:
+
+```text
+firmware/gps_uart_probe/gps_uart_probe.ino
+GPS_PROBE_MODE=2
+GPS_PROBE_BAUD=9600
+```
+
+Observed output summary:
+
+```text
+selected_port=Serial2 baud=9600
+chars_1s roughly 349-370
+raw_preview contains $GPRMC, $GPVTG, $GPGGA
+tinygps_chars increases
+sats fluctuates between 0 and 3
+hdop around 3.65 or 99.99
+fix=false
+lat=NA lon=NA
+```
+
+Interpretation:
+
+- GPS UART communication is working on `Serial2` at `9600`.
+- The GPS is connected to the central OpenRB connector, not the `Serial3`
+  D13/D14 pins used by the earlier repo assumption.
+- `Serial3` D13/D14 probe failures are explained by current wiring, not by
+  GPS module failure.
+- Remaining issue is satellite fix quality; likely indoor or poor sky-view
+  testing.
+
+Architecture note:
+
+- Integrated firmware currently defines `HC12_SERIAL` as `Serial2` and
+  `GPS_SERIAL` as `Serial3`.
+- The current GPS wiring also uses `Serial2`, so GPS and HC-12 UART allocation
+  must be decided before integrating live GPS with manual HC-12 control.
+- Recommendation is to preserve the known-working HC-12 manual control path
+  unless the instructor or hardware constraints require moving it.
+
+Historical next decision, superseded by Option B:
+
+- Option A: keep GPS on `Serial2` and move HC-12 to another verified UART.
+- Option B: keep HC-12 on `Serial2` and move GPS to verified `Serial3` pins.
+
+Superseded by:
+
+- `2026-05-26: GPS Serial2 Fix Success`
+
+Repeat command:
+
+```bash
+arduino-cli monitor -p /dev/cu.usbmodem12101 --config baudrate=115200
+```
+
+Logging variant:
+
+```bash
+mkdir -p outputs/logs
+arduino-cli monitor -p /dev/cu.usbmodem12101 --config baudrate=115200 | tee outputs/logs/gps_outdoor_fix_serial2_$(date +%Y%m%d_%H%M%S).log
+```
+
+## 2026-05-26: GPS Serial2 Fix Success
+
+Sketch:
+
+```text
+firmware/gps_uart_probe/gps_uart_probe.ino
+GPS_PROBE_MODE=2
+GPS_PROBE_BAUD=9600
+```
+
+Observed final result:
+
+```text
+selected_port=Serial2 baud=9600
+chars_1s roughly 350-520
+raw_preview includes $GPRMC, $GPVTG, $GPGGA, $GPGSV, $GPGLL
+tinygps_chars increases
+fix=true
+lat around 35.57107
+lon around 129.1860
+sats around 5
+hdop around 1.61-1.62
+```
+
+Conclusion:
+
+- GPS UART bring-up succeeded.
+- GPS is physically connected to the central OpenRB connector.
+- The confirmed working GPS path is `Serial2` at `9600` baud.
+- `Serial3` D13/D14 tests at `9600`, `38400`, and `115200` produced zero
+  bytes because the current wiring is not on D13/D14.
+- Those `Serial3` failures are invalid for the current wiring and are not GPS
+  module failures.
+
+Architecture note:
+
+- Integrated firmware currently defines `HC12_SERIAL` as `Serial2`.
+- GPS is physically confirmed on `Serial2`.
+- Integrated firmware currently defines `GPS_SERIAL` as `Serial3`.
+- This is a likely UART conflict that must be resolved before live integrated
+  GPS telemetry can be trusted with HC-12 manual control.
+
+Next milestone:
+
+- Do not implement autonomy.
+- Do not modify motor control.
+- Do not weaken STOP, failsafe, heartbeat timeout, or manual control.
+- UART allocation decision: choose Option B.
+- Preserve known-working HC-12 manual control on `Serial2`.
+- Move GPS to a verified physical `Serial3` RX/TX path.
+- Keep integrated firmware architecture as `HC12_SERIAL=Serial2` and
+  `GPS_SERIAL=Serial3`.
+- Serial3 physical pin mapping is unresolved; locate actual `Serial3` RX/TX
+  using loopback and pin-finder tests before moving GPS.
+- Next software milestone should be a GPS diagnostic integrated firmware mode,
+  not autonomous movement.
 
 ## Known Manual Direction Attempts
 
