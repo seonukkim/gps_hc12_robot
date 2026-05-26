@@ -5,6 +5,7 @@
 #define HC12_SERIAL Serial2
 #define GPS_SERIAL Serial3
 
+constexpr const char *FIRMWARE_ID = "openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26";
 constexpr uint8_t PPM_PIN = 6;
 constexpr uint8_t ESC_LEFT_PIN = 4;
 constexpr uint8_t ESC_RIGHT_PIN = 5;
@@ -26,6 +27,7 @@ constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
+constexpr float RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678f;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_RANGE_US = 300;
 constexpr uint32_t STATION_TIMEOUT_MS = 500;
@@ -226,6 +228,11 @@ float normRcCentered(uint16_t pulseUs, uint16_t centerUs) {
   return clampUnit(static_cast<float>(delta) / denom);
 }
 
+void mapRcManualAxes(float rawSteering, float rawThrottle, float &steeringOut, float &throttleOut) {
+  steeringOut = clampUnit((rawSteering + rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE);
+  throttleOut = clampUnit((rawSteering - rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE);
+}
+
 bool rcChannelsValid(uint16_t steering, uint16_t throttle, uint16_t mode) {
   if (!rcFrameRecent()) {
     return false;
@@ -255,8 +262,11 @@ bool rcAutoSwitchOn() {
 }
 
 void applyManualOverride(uint16_t steeringUs, uint16_t throttleUs) {
-  float steering = normRcCentered(steeringUs, STEERING_CENTER_US);
-  float throttle = normRcCentered(throttleUs, THROTTLE_CENTER_US);
+  float rawSteering = normRcCentered(steeringUs, STEERING_CENTER_US);
+  float rawThrottle = normRcCentered(throttleUs, THROTTLE_CENTER_US);
+  float steering = 0.0f;
+  float throttle = 0.0f;
+  mapRcManualAxes(rawSteering, rawThrottle, steering, throttle);
 
   float left = throttle - steering;
   float right = throttle + steering;
@@ -362,6 +372,9 @@ void debugPrintStatus() {
   bool autoSwitchOn = rcAutoSwitchOn(modeUs);
   float steeringNorm = normRcCentered(steeringUs, STEERING_CENTER_US);
   float throttleNorm = normRcCentered(throttleUs, THROTTLE_CENTER_US);
+  float manualSteering = 0.0f;
+  float manualThrottle = 0.0f;
+  mapRcManualAxes(steeringNorm, throttleNorm, manualSteering, manualThrottle);
 
   Serial.print(F("USBDBG mode="));
   Serial.print(modeName(currentMode));
@@ -385,6 +398,10 @@ void debugPrintStatus() {
   Serial.print(steeringNorm, 3);
   Serial.print(F(" throttle_norm="));
   Serial.print(throttleNorm, 3);
+  Serial.print(F(" manual_steer_cmd="));
+  Serial.print(manualSteering, 3);
+  Serial.print(F(" manual_throttle_cmd="));
+  Serial.print(manualThrottle, 3);
   Serial.print(F(" station_age_ms="));
   if (lastStationFrameMs == 0) {
     Serial.print(F("NA"));
@@ -660,11 +677,14 @@ void setup() {
   escRight.attach(ESC_RIGHT_PIN);
   motorStop();
 
-  Serial.println("OpenRB robot controller skeleton starting.");
+  Serial.print("Firmware: ");
+  Serial.println(FIRMWARE_ID);
+  Serial.println("OpenRB robot controller starting.");
   Serial.println("GPS telemetry uses OpenRB-150 Serial3 (D13/RX) at 9600 baud.");
   Serial.println("Motor tests are wheel-off-ground only.");
   Serial.println("RC mode input uses receiver PPM CH5; PPM CH7 is reserved/unused.");
   Serial.println("CH5 high enters AUTO_READY only; drive stays STOP until explicit AUTO.");
+  Serial.println("Station manual accepts CMD,MANUAL only when fresh frames and deadman=1.");
 }
 
 void loop() {

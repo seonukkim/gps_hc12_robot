@@ -1,8 +1,26 @@
 # Repository Guidance
 
 - Use `uv` for dependency and task execution.
+- Before planning non-trivial work, read:
+  - `docs/project_context.md`
+  - `docs/architecture.md`
+  - `docs/roadmap.md`
+  - `docs/protocol.md`
+  - `docs/safety_and_failures.md`
+  - `docs/field_test_log.md`
+  - `docs/known_issues.md`
+  - `docs/manual_control.md`
+  - `docs/rc_channel_map.md`
 - Preserve safe station defaults: heartbeat and `STOP` only unless explicitly changed.
 - Default USB serial device is `/dev/ttyACM0`; expose `--port` in serial tools.
 - Do not introduce station-side startup behavior that sends live motor-driving `AUTO` commands.
 - Keep core protocol and planning modules independent from ROS2.
 - Treat rover motor testing as wheel-off-ground only.
+- Do not remove or weaken manual control.
+- `STOP` must override manual, station, and future autonomous commands.
+- Do not make the rover move immediately after path generation.
+- Keep station behavior dry-run/not armed by default.
+- Do not introduce ROS2 runtime behavior or micro-ROS until the simple HC-12 protocol, telemetry schema, STOP behavior, and dry-run station workflow are stable.
+- Do not change pin mappings, serial ports, RC channel mappings, or hardware assumptions without updating the docs listed above.
+- Manual direction mapping has known pitfalls. Read `docs/manual_control.md` and `docs/known_issues.md` before changing RC axis mapping or motor direction code.
+- Current next priority is station-side remote operation: point A/B selection, sweep-width input, GPS telemetry, path planning, preview/logging, and dry-run command generation. Do not implement autonomy before that plan is explicit and tested.

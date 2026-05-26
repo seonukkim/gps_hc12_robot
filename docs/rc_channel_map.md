@@ -25,6 +25,23 @@ The station panel can physically look like `CH7`, but the firmware uses the rece
 - `THROTTLE_CENTER_US = 1500`
 - `RC_DEADBAND_US = 80`
 - `RC_AUTO_SWITCH_ON_US = 1600`
+- `RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678`
+
+RC manual mode remaps the raw CH1/CH2 stick axes through a 45-degree correction
+before motor mixing. This is required because bench tests showed that direct
+CH1/CH2 mapping placed the forward/reverse axis on a diagonal. The current
+target behavior is:
+
+- physical stick straight up -> forward
+- physical stick straight down -> reverse
+- physical stick straight left/right -> steering without forward/reverse bias
+
+Current remap:
+
+```cpp
+steering = (rawSteering + rawThrottle) * 0.70710678;
+throttle = (rawSteering - rawThrottle) * 0.70710678;
+```
 
 ## Mode Interpretation
 

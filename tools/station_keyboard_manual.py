@@ -15,6 +15,7 @@ from station_controller import DEFAULT_HEARTBEAT_HZ, StationController
 MANUAL_TX_HZ = 20.0
 AXIS_HOLD_S = 0.35
 MAX_FIRST_TEST_SPEED = 0.25
+STOP_PERIOD_S = 0.5
 ARROW_TOKENS = {
     b"\x1b[A": "UP",
     b"\x1b[B": "DOWN",
@@ -91,6 +92,7 @@ def read_input(fd: int, buffer: bytearray) -> list[str]:
 
 def render_status(
     *,
+    armed: bool,
     deadman: bool,
     estop: bool,
     steer: float,
@@ -99,6 +101,7 @@ def render_status(
 ) -> None:
     sys.stdout.write(
         "\r"
+        f"armed={'ON ' if armed else 'OFF'} "
         f"deadman={'ON ' if deadman else 'OFF'} "
         f"estop={'ON ' if estop else 'OFF'} "
         f"steer={steer:+.2f} "
@@ -110,8 +113,10 @@ def render_status(
 
 def print_instructions(max_speed: float) -> None:
     print(f"Opening keyboard manual control with max speed {max_speed:.2f}")
-    print("Controls: WASD or arrow keys drive, space toggles deadman, x sets E-STOP, c clears E-STOP.")
-    print("Neutral manual frames are sent continuously. Press n to zero axes, q to quit.")
+    print("Startup is safe: heartbeat plus STOP only until station manual is armed.")
+    print("Controls: e arms/disarms station manual, WASD or arrow keys drive.")
+    print("Space toggles deadman, x sets E-STOP/disarms, c clears local E-STOP.")
+    print("When armed, neutral manual frames are sent continuously. Press n to zero axes, q to quit.")
     print("Terminal key repeat is used for hold-like motion; releasing keys returns to neutral shortly.")
 
 
@@ -125,12 +130,14 @@ def main() -> int:
 
     deadman = False
     estop = False
+    armed = False
     steer_cmd = 0.0
     throttle_cmd = 0.0
     steer_until = 0.0
     throttle_until = 0.0
     last_hb = 0.0
     last_manual = 0.0
+    last_stop = 0.0
     last_seq: int | None = None
 
     print_instructions(args.max_speed)
@@ -142,7 +149,20 @@ def main() -> int:
                     lower = token.lower()
                     if token == "CTRL_C" or lower == "q":
                         raise KeyboardInterrupt
-                    if token == "UP" or lower == "w":
+                    if lower == "e":
+                        deadman = False
+                        steer_until = 0.0
+                        throttle_until = 0.0
+                        if estop:
+                            continue
+                        if not armed:
+                            armed = True
+                            print("Station manual armed. Deadman is OFF; press space before driving.")
+                        else:
+                            armed = False
+                            print("Station manual disarmed; sending STOP.")
+                            last_seq = controller.send_stop()
+                    elif token == "UP" or lower == "w":
                         throttle_cmd = args.max_speed
                         throttle_until = now + AXIS_HOLD_S
                     elif token == "DOWN" or lower == "s":
@@ -155,12 +175,15 @@ def main() -> int:
                         steer_cmd = args.max_speed
                         steer_until = now + AXIS_HOLD_S
                     elif lower == " ":
-                        deadman = not deadman
+                        if armed and not estop:
+                            deadman = not deadman
                     elif lower == "x":
                         estop = True
+                        armed = False
                         deadman = False
                         steer_until = 0.0
                         throttle_until = 0.0
+                        last_seq = controller.send_stop()
                     elif lower == "c":
                         estop = False
                     elif lower == "n":
@@ -177,7 +200,11 @@ def main() -> int:
                     controller.send_heartbeat()
                     last_hb = now
 
-                if now - last_manual >= manual_period:
+                if not armed and now - last_stop >= STOP_PERIOD_S:
+                    last_seq = controller.send_stop()
+                    last_stop = now
+
+                if armed and now - last_manual >= manual_period:
                     last_seq = controller.send_manual(
                         steer,
                         throttle,
@@ -187,10 +214,14 @@ def main() -> int:
                     )
                     last_manual = now
 
-                for msg_type, seq, payload in controller.poll():
-                    print(f"\rRX {msg_type:<4} seq={seq} payload={payload}    ")
+                for frame in controller.poll():
+                    print(
+                        f"\rRX {frame['type']:<4} "
+                        f"seq={frame['seq']} payload={frame['payload']}    "
+                    )
 
                 render_status(
+                    armed=armed,
                     deadman=deadman and not estop,
                     estop=estop,
                     steer=steer,

@@ -34,9 +34,11 @@
 5. Keyboard manual bench test
    - wheel-off-ground only
    - start with RC transmitter off or RC invalid so station-manual takeover is exercised
-   - run `uv run python tools/station_keyboard_manual.py --port /dev/ttyUSB0 --baud 9600 --max-speed 0.25`
-   - confirm neutral frames on startup, `deadman` off by default, and `STOP` on exit
+   - run `uv run python tools/station_keyboard_manual.py --port /dev/ttyACM0 --baud 9600 --max-speed 0.25`
+   - confirm heartbeat plus `STOP` on startup before pressing `e`
+   - press `e` to arm station manual, then confirm neutral manual frames with `deadman` off
    - confirm manual drive only while fresh manual frames continue arriving with `deadman` enabled
+   - confirm `x` disarms and sends `STOP`
    - confirm stale link or released controls return outputs to neutral within the station timeout window
 6. Planner preview
    - run `tools/path_preview.py` and inspect saved image

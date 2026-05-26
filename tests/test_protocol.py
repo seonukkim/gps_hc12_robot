@@ -1,6 +1,11 @@
 import pytest
 
-from gps_coverage_core.protocol import checksum_xor, decode_frame, encode_frame
+from gps_coverage_core.protocol import (
+    checksum_xor,
+    decode_frame,
+    encode_frame,
+    manual_command_fields,
+)
 
 
 def test_valid_gps_frame() -> None:
@@ -64,3 +69,13 @@ def test_payload_with_comma_round_trip() -> None:
     assert decoded["type"] == "CMD"
     assert decoded["seq"] == 103
     assert decoded["payload"] == payload
+
+
+def test_manual_command_fields_clamp_and_encode_booleans() -> None:
+    assert manual_command_fields(0.7, -0.5, True, False, limit=0.25) == (
+        "MANUAL",
+        "0.25",
+        "-0.25",
+        "1",
+        "0",
+    )

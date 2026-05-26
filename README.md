@@ -214,6 +214,15 @@ must be treated as wheel-off-ground motor testing only:
 uv run python tools/station_keyboard_manual.py --port /dev/ttyACM0 --max-speed 0.25
 ```
 
+The keyboard tool starts in heartbeat-plus-`STOP` mode. Press `e` to arm station
+manual control, press space to enable the deadman, then use `WASD` or arrow keys
+for short manual pulses. Press `x` for local E-stop/disarm and `q` to exit; exit
+sends repeated `STOP` frames.
+
+See [docs/manual_control.md](docs/manual_control.md) for the current rover
+firmware upload steps, RC direction mapping, USB debug checks, and station
+manual-control procedure.
+
 ## Figure Gallery
 
 Shared generated figures belong in
