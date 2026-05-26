@@ -171,7 +171,7 @@ Architecture note:
 - Recommendation is to preserve the known-working HC-12 manual control path
   unless the instructor or hardware constraints require moving it.
 
-Historical next decision, superseded by Option B:
+Historical next decision, later superseded by final Option A:
 
 - Option A: keep GPS on `Serial2` and move HC-12 to another verified UART.
 - Option B: keep HC-12 on `Serial2` and move GPS to verified `Serial3` pins.
@@ -240,15 +240,46 @@ Next milestone:
 - Do not implement autonomy.
 - Do not modify motor control.
 - Do not weaken STOP, failsafe, heartbeat timeout, or manual control.
-- UART allocation decision: choose Option B.
-- Preserve known-working HC-12 manual control on `Serial2`.
-- Move GPS to a verified physical `Serial3` RX/TX path.
-- Keep integrated firmware architecture as `HC12_SERIAL=Serial2` and
-  `GPS_SERIAL=Serial3`.
+- Historical UART allocation decision was Option B, now superseded.
 - Serial3 physical pin mapping is unresolved; locate actual `Serial3` RX/TX
-  using loopback and pin-finder tests before moving GPS.
+  using loopback and pin-finder tests.
 - Next software milestone should be a GPS diagnostic integrated firmware mode,
   not autonomous movement.
+
+## 2026-05-26: Final UART Plan Switched To Option A
+
+Final decision:
+
+- Keep GPS on the current central OpenRB connector.
+- Treat the current central connector as the confirmed GPS `Serial2` path.
+- Final target mapping:
+  - `GPS_SERIAL=Serial2`
+  - `HC12_SERIAL=Serial3`
+- HC-12 appears to be mounted under or behind the OpenRB board and needs its
+  UART wiring verified separately.
+- The purple module appears to be an IMU on an I2C-style connection; do not
+  treat it as UART.
+
+Superseded:
+
+- Previous Option B decision is superseded.
+- Do not move GPS to Serial3.
+- Do not treat the Serial3 D13/D14 zero-byte GPS tests as GPS failure; the GPS
+  was not wired there.
+
+Next hardware milestone:
+
+- Identify actual Serial3 RX/TX physical pins.
+- Run Serial3 TX-to-RX loopback.
+- Move HC-12 data lines to verified Serial3 RX/TX.
+- Run HC-12 Serial3 echo test.
+- Only after that, update `openrb_robot_controller` mapping.
+
+Safety boundary:
+
+- Do not modify motor control.
+- Do not implement autonomy.
+- Do not weaken STOP, heartbeat timeout, failsafe, or manual control.
 
 ## Known Manual Direction Attempts
 

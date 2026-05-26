@@ -3,9 +3,9 @@
 > 2026-05-26 note: GPS UART receive is now confirmed on `Serial2` at `9600`
 > with the GPS connected to the central OpenRB connector. The earlier `Serial3`
 > `D13` / `D14` checks failed because the current wiring is not on those pins.
-> GPS fix also succeeded on this `Serial2` path. The project chose Option B:
-> preserve HC-12 on `Serial2` and move GPS to a verified physical `Serial3`
-> RX/TX path.
+> GPS fix also succeeded on this `Serial2` path. The final UART plan is now
+> Option A: keep GPS on `Serial2` and move HC-12 to verified `Serial3` pins
+> after Serial3 loopback and HC-12 echo testing.
 
 ## Confirmed working
 
@@ -19,6 +19,8 @@
 - GPS NMEA output: working; `$GPRMC`, `$GPVTG`, `$GPGGA`, `$GPGSV`, and
   `$GPGLL` observed
 - GPS FIX: working on the current `Serial2` probe path
+- Purple module: appears to be an IMU on an I2C-style connection; not a UART
+  path
 
 ## Confirmed RC debug state
 
@@ -53,8 +55,8 @@ Interpretation:
 
 - GPS UART communication is working.
 - GPS satellite fix is working on the `Serial2` probe path.
-- Next action is resolving UART allocation in the integrated rover system, not
-  more GPS UART probing.
+- GPS should stay on the current central connector.
+- Next action is verifying HC-12 on `Serial3`, not more GPS UART probing.
 
 ## Historical GPS Debug State
 
@@ -82,6 +84,8 @@ Current status:
 - `Serial3` physical RX/TX pin mapping is unresolved.
 - Historical `Serial3` D13/D14 wiring notes in older docs must be treated as a
   different wiring setup until revalidated.
+- Purple module appears to be I2C-style IMU wiring and should not be treated as
+  UART.
 
 ## Firmware mapping
 
@@ -90,17 +94,22 @@ Current status:
 - GPS probe confirmed current physical GPS path: `Serial2` at `9600`
 - UART allocation conflict: current GPS wiring and integrated HC-12 both point
   at `Serial2`
-- Selected resolution: Option B, preserve HC-12 on `Serial2` and move GPS to
-  verified `Serial3` RX/TX pins.
+- Previous selected resolution Option B is superseded.
+- Final target mapping after hardware verification:
+  - `GPS_SERIAL=Serial2`
+  - `HC12_SERIAL=Serial3`
 - USB debug baud: `115200`
 
 ## Pending
 
 - Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
-- Move GPS to verified `Serial3` RX/TX pins, then rerun the GPS probe on
-  `Serial3` at confirmed `9600` baud.
+- Run Serial3 TX-to-RX loopback.
+- Move HC-12 data lines to verified `Serial3` RX/TX.
+- Run an HC-12 Serial3 echo test.
+- Only then update `openrb_robot_controller` mapping.
 - Next software milestone: add a non-motion GPS diagnostic integrated firmware
-  mode after GPS is verified on `Serial3`.
+  mode after HC-12 is verified on `Serial3` and GPS remains verified on
+  `Serial2`.
 - Station-side HC-12-USB device is not confirmed.
 - `/dev/ttyUSB*` is not visible yet on the station/development side.
 - Need to confirm whether station HC-12-USB is installed and connected to MPC.

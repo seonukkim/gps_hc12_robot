@@ -5,6 +5,9 @@
 - HC-12 `TX` -> OpenRB `RX`
 - HC-12 `RX` <- OpenRB `TX`
 - common `GND` between HC-12, OpenRB, GPS, and power domains
+- HC-12 appears to be mounted under or behind the OpenRB board; verify its
+  actual UART wiring separately before changing integrated firmware.
+- Final plan: move HC-12 data lines to verified physical `Serial3` RX/TX pins.
 
 ## GPS
 
@@ -19,16 +22,28 @@
 - `Serial3` D13/D14 tests failed because the current GPS wiring was not on
   D13/D14.
 
-Integrated firmware currently assigns `Serial2` to HC-12 and `Serial3` to GPS.
-The project chose Option B: preserve HC-12 on `Serial2` and move GPS to a
-verified physical `Serial3` RX/TX path. Do not leave GPS and HC-12 competing for
-`Serial2`.
+GPS should stay on the current central OpenRB connector. Final plan:
+
+- `GPS_SERIAL=Serial2`
+- `HC12_SERIAL=Serial3`, after Serial3 physical pin verification and HC-12 echo
+  test
+
+The previous Option B decision is superseded. Do not leave GPS and HC-12
+competing for `Serial2`.
+
+## IMU / Purple Module
+
+- The purple module appears to be an IMU on an I2C-style connection.
+- Do not treat the purple module as UART wiring.
+- Do not use it as evidence for HC-12 or GPS serial pin assignment.
 
 Next wiring action:
 
 - Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
-- Move GPS only after `Serial3` RX/TX is physically verified.
-- Rerun the GPS probe on `Serial3` at the confirmed `9600` baud.
+- Run Serial3 TX-to-RX loopback.
+- Move HC-12 data lines to verified `Serial3` RX/TX.
+- Run an HC-12 Serial3 echo test.
+- Only then update `openrb_robot_controller` mapping.
 
 ## Voltage / Logic
 

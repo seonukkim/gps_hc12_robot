@@ -47,3 +47,15 @@ firmware/gps_uart_probe/gps_uart_probe.ino
 
 It does not attach motor outputs. Full procedure and per-variant compile/upload
 commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
+
+## Serial3 Pin Verification
+
+Use these standalone sketches before moving GPS to `Serial3`:
+
+```text
+firmware/pin_finder_test/pin_finder_test.ino
+firmware/serial3_loopback_test/serial3_loopback_test.ino
+```
+
+They do not attach motor outputs. Full wiring and compile/upload commands are
+in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
