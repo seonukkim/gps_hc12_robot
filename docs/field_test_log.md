@@ -465,6 +465,44 @@ Rule:
 - AUTO is still computation-only.
 - Real motion is not enabled yet.
 
+## 2026-05-27: Station-Side Coverage Path Planning Dry-Run
+
+Command tested:
+
+```bash
+uv run python scripts/station/plan_coverage_path.py \
+  --point-a 35.571070,129.186000 \
+  --point-b 35.571070,129.186300 \
+  --sweep-width-m 20.0 \
+  --lane-spacing-m 5.0 \
+  --speed-mps 0.4 \
+  --mission-name codex_station_path_smoke
+```
+
+Observed result:
+
+- CLI generated `mission.json`.
+- CLI generated `mission.csv`.
+- CLI generated `preview.png`.
+- Inputs included point A/B, sweep width, and lane spacing.
+- Preview showed lawnmower/boustrophedon lanes.
+- No rover firmware was modified.
+- No commands were sent to the rover.
+- This is PC/Mac-side dry-run only.
+
+Artifacts:
+
+```text
+outputs/missions/codex_station_path_smoke/mission.json
+outputs/missions/codex_station_path_smoke/mission.csv
+outputs/missions/codex_station_path_smoke/preview.png
+```
+
+Rule:
+
+- This mission output is not yet executed by the rover.
+- Next step is onboard mission dry-run, not real motion.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

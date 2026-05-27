@@ -452,19 +452,21 @@ uv run python scripts/station/plan_coverage_path.py \
   --sweep-width-m 20.0 \
   --lane-spacing-m 5.0 \
   --speed-mps 0.4 \
-  --mission-name test_area_001
+  --mission-name codex_station_path_smoke
 ```
 
 Outputs:
 
 ```text
-outputs/missions/test_area_001/mission.json
-outputs/missions/test_area_001/mission.csv
-outputs/missions/test_area_001/preview.png
+outputs/missions/codex_station_path_smoke/mission.json
+outputs/missions/codex_station_path_smoke/mission.csv
+outputs/missions/codex_station_path_smoke/preview.png
 ```
 
 See [docs/station_path_planning.md](docs/station_path_planning.md). Path
-generation remains dry-run only and must not be sent to the rover yet.
+generation remains dry-run only and must not be sent to the rover yet. The
+tested mission output is not yet executed by the rover; the next step is onboard
+mission dry-run, not real motion.
 
 Generate a standalone path preview figure:
 

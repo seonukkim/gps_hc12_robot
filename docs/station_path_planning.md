@@ -17,6 +17,8 @@ extends to the left side of the A-to-B baseline in the local metric frame.
 
 ## Command
 
+Exact tested command:
+
 ```bash
 uv run python scripts/station/plan_coverage_path.py \
   --point-a 35.571070,129.186000 \
@@ -24,7 +26,7 @@ uv run python scripts/station/plan_coverage_path.py \
   --sweep-width-m 20.0 \
   --lane-spacing-m 5.0 \
   --speed-mps 0.4 \
-  --mission-name test_area_001
+  --mission-name codex_station_path_smoke
 ```
 
 Default output directory:
@@ -36,10 +38,17 @@ outputs/missions/
 Generated files:
 
 ```text
-outputs/missions/test_area_001/mission.json
-outputs/missions/test_area_001/mission.csv
-outputs/missions/test_area_001/preview.png
+outputs/missions/codex_station_path_smoke/mission.json
+outputs/missions/codex_station_path_smoke/mission.csv
+outputs/missions/codex_station_path_smoke/preview.png
 ```
+
+Observed dry-run result:
+
+- `mission.json`, `mission.csv`, and `preview.png` were generated.
+- The preview showed lawnmower/boustrophedon lanes.
+- No rover firmware was modified.
+- No commands were sent to the rover.
 
 ## Geometry
 
@@ -101,6 +110,8 @@ The preview image shows:
 - This is station-side path generation only.
 - Do not connect this tool to HC-12.
 - Do not send the generated waypoints to the rover yet.
+- This mission output is not yet executed by the rover.
+- Next step is onboard mission dry-run, not real motion.
 - Keep the fixed-wiring RC + GPS firmware in dry-run mode for readiness checks
   only.
 - Real waypoint following requires a separate safety design, heading source,
