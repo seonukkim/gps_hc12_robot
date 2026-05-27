@@ -67,7 +67,7 @@ and readiness fields. This is not real waypoint following.
 Expected dry-run USB debug additions:
 
 ```text
-autonomy_dryrun=true target=35.571120,129.186050 target_distance_m=... target_bearing_deg=... gps_ready=... target_ready=... autonomy_ready=...
+autonomy_dryrun=true target_lat=35.571120 target_lon=129.186050 target_distance_m=... target_bearing_deg=... gps_ready=... target_ready=... autonomy_ready=...
 ```
 
 When uploading a compile-time variant, upload the matching build directory. For

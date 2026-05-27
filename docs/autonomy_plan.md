@@ -28,12 +28,20 @@ AUTO dry-run debug fields:
 
 ```text
 autonomy_dryrun=true
-target=35.571120,129.186050
+target_lat=35.571120
+target_lon=129.186050
 target_distance_m=...
 target_bearing_deg=...
 gps_ready=...
 target_ready=...
 autonomy_ready=...
+```
+
+The current placeholder target is hard-coded in the firmware as:
+
+```text
+lat=35.571120
+lon=129.186050
 ```
 
 The placeholder target is only used to compute distance and bearing from the
@@ -52,7 +60,8 @@ Observed:
 - `control_source=RC_MANUAL` in MANUAL mode.
 - Stick input changed `left_cmd` and `right_cmd`.
 - AUTO mode printed `autonomy_dryrun=true`.
-- AUTO mode printed GPS fields and target distance/bearing fields.
+- AUTO mode printed GPS fields, `target_lat`, `target_lon`, and target
+  distance/bearing fields.
 - With the antenna outside/open sky, `gps_fix=true` was observed.
 - AUTO mode kept `left_cmd=0` and `right_cmd=0`.
 - No motor movement occurred in AUTO dry-run.

@@ -541,10 +541,14 @@ void debugPrintStatus() {
   bool targetReady = DRYRUN_TARGET_AVAILABLE;
   bool autonomyReady = rcValid && autoSwitchOn && gpsReady && targetReady;
   Serial.print(F(" autonomy_dryrun=true"));
-  Serial.print(F(" target="));
+  Serial.print(F(" target_lat="));
   if (targetReady) {
     Serial.print(DRYRUN_TARGET_LAT, 6);
-    Serial.print(F(","));
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" target_lon="));
+  if (targetReady) {
     Serial.print(DRYRUN_TARGET_LON, 6);
   } else {
     Serial.print(F("NA"));
