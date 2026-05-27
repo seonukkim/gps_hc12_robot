@@ -7,7 +7,9 @@
 - common `GND` between HC-12, OpenRB, GPS, and power domains
 - HC-12 appears to be mounted under or behind the OpenRB board; verify its
   actual UART wiring separately before changing integrated firmware.
-- Final plan: move HC-12 data lines to verified physical `Serial3` RX/TX pins.
+- Fixed Wiring Plan: HC-12 cannot be moved right now. Audit the current wiring
+  from code and diagnostics before assuming whether it shares `Serial2` with
+  GPS.
 
 ## GPS
 
@@ -22,14 +24,21 @@
 - `Serial3` D13/D14 tests failed because the current GPS wiring was not on
   D13/D14.
 
-GPS should stay on the current central OpenRB connector. Final plan:
+GPS must stay on the current central OpenRB connector. Confirmed GPS path:
 
-- `GPS_SERIAL=Serial2`
-- `HC12_SERIAL=Serial3`, after Serial3 physical pin verification and HC-12 echo
-  test
+- GPS physical connector: central OpenRB connector
+- GPS UART: `Serial2`
+- GPS baud: `9600`
 
-The previous Option B decision is superseded. Do not leave GPS and HC-12
-competing for `Serial2`.
+Previous Option A and Option B UART-rewiring plans are superseded by the Fixed
+Wiring Plan. Do not move GPS. Do not move HC-12.
+
+## Fixed Wiring Decision Table
+
+| Current HC-12 wiring audit result | Decision |
+|---|---|
+| HC-12 is independent from GPS `Serial2` | Proceed with integrated GPS on `Serial2` plus HC-12 telemetry after diagnostics confirm both paths can coexist. |
+| HC-12 shares GPS `Serial2` | Do not use GPS and HC-12 simultaneously. Use USB/onboard mission flow for GPS-dependent work and mark HC-12 operation blocked by fixed hardware. |
 
 ## IMU / Purple Module
 
@@ -39,11 +48,11 @@ competing for `Serial2`.
 
 Next wiring action:
 
-- Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
-- Run Serial3 TX-to-RX loopback.
-- Move HC-12 data lines to verified `Serial3` RX/TX.
-- Run an HC-12 Serial3 echo test.
-- Only then update `openrb_robot_controller` mapping.
+- Do not rewire GPS or HC-12.
+- Audit current HC-12 data-line routing from board inspection, code, and
+  receive-only diagnostics where safe.
+- Add an integrated GPS `Serial2` diagnostic firmware mode.
+- Run receive-only station telemetry testing only if safe.
 
 ## Voltage / Logic
 

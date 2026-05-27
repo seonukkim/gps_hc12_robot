@@ -71,11 +71,12 @@ Status:
   to the current central OpenRB connector.
 - GPS module baudrate is confirmed as `9600`.
 - The central OpenRB connector is confirmed as `Serial2`.
-- The physical `Serial3` RX/TX pin mapping is unresolved.
 - The purple module appears to be an IMU on an I2C-style connection and should
   not be treated as UART.
 - HC-12 appears to be mounted under or behind the OpenRB board and needs its
   UART wiring verified separately.
+- GPS cannot be moved.
+- HC-12 cannot be moved right now.
 - GPS fix succeeded on that path:
   - `lat` around `35.57107`
   - `lon` around `129.1860`
@@ -92,34 +93,35 @@ Risk:
 
 - GPS and HC-12 cannot both own the same `Serial2` UART during normal rover
   operation.
-- Changing the integrated firmware to put GPS on `Serial2` before HC-12 is
-  physically moved to a verified UART would create a `Serial2` conflict.
-- Keeping the integrated firmware unchanged while the GPS remains on the
-  central connector means integrated GPS telemetry will still read from
-  `Serial3`, where current GPS wiring has no bytes.
+- If HC-12 shares GPS `Serial2`, simultaneous GPS plus HC-12 bidirectional
+  communication may not be possible.
+- Do not assume HC-12 shares `Serial2`; audit current wiring from code,
+  board inspection, and diagnostics first.
+- Keeping the integrated firmware unchanged means integrated GPS telemetry will
+  still read from `Serial3`, where current GPS wiring has no bytes.
 
 Decision:
 
-- Previous Option B decision is superseded.
-- Final plan is Option A based on actual hardware wiring:
-  - keep GPS on the current central connector
-  - set final `GPS_SERIAL=Serial2`
-  - move HC-12 data lines to verified physical `Serial3` RX/TX
-  - set final `HC12_SERIAL=Serial3`
+- Previous Option A and Option B UART-rewiring plans are superseded.
+- Fixed Wiring Plan:
+  - keep GPS on the current central connector / `Serial2`
+  - keep HC-12 physically as-is
+  - do not move either module
+  - audit whether HC-12 is independent from or sharing GPS `Serial2`
 
-Next hardware action:
+Decision table:
 
-- Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
-- Run Serial3 TX-to-RX loopback.
-- Move HC-12 data lines to verified `Serial3` RX/TX.
-- Run an HC-12 Serial3 echo test.
-- Do not modify `firmware/openrb_robot_controller/openrb_robot_controller.ino`
-  for this until HC-12 is verified on the selected `Serial3` pins.
+| Current HC-12 wiring audit result | Decision |
+|---|---|
+| HC-12 is independent from GPS `Serial2` | Proceed with integrated GPS on `Serial2` plus HC-12 telemetry after diagnostics confirm both paths can coexist. |
+| HC-12 shares GPS `Serial2` | Do not use GPS and HC-12 simultaneously. Use USB/onboard mission flow for GPS-dependent work and mark HC-12 operation blocked by fixed hardware. |
 
 Next software milestone:
 
-- Add a GPS diagnostic integrated firmware mode after HC-12 is verified on
-  `Serial3` and GPS remains verified on `Serial2`.
+- Add an integrated GPS `Serial2` diagnostic firmware mode.
+- Audit current HC-12 wiring.
+- Run receive-only station telemetry testing only if safe.
+- Keep station-side path planning dry-run only.
 - The diagnostic mode should report selected GPS UART, raw character counts,
   TinyGPS++ processed characters, fix state, sats, HDOP, lat/lon, and GPS age.
 - It must not implement autonomous movement.

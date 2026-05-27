@@ -38,17 +38,17 @@ Rover responsibilities:
   `9600` baud, with readable NMEA and GPS fix.
 - Current architecture issue: the confirmed physical GPS path and integrated
   HC-12 path both point at `Serial2`.
-- Previous Option B decision is superseded.
-- Final target mapping after hardware verification:
-  - `GPS_SERIAL=Serial2`
-  - `HC12_SERIAL=Serial3`
-- GPS should stay on the current central OpenRB connector.
-- HC-12 appears to be mounted under or behind the OpenRB board and must be
-  moved to verified physical `Serial3` RX/TX pins.
+- Previous Option A and Option B rewiring plans are superseded by the Fixed
+  Wiring Plan.
+- Fixed Wiring Plan: GPS cannot be moved, HC-12 cannot be moved, and the rover
+  must proceed with the current physical wiring.
+- GPS must stay on the current central OpenRB connector and is confirmed as
+  `Serial2` at `9600`.
+- HC-12 appears to be mounted under or behind the OpenRB board; its current
+  UART wiring must be audited before assuming it shares or does not share
+  `Serial2`.
 - Purple module appears to be an IMU on an I2C-style connection; do not treat
   it as UART.
-- Open issue: actual `Serial3` RX/TX pin mapping is unresolved and must be
-  found with loopback and pin-finder tests before changing integrated firmware.
 - OpenRB USB debug: `115200` baud.
 - Station serial default: `/dev/ttyACM0`, override with `--port`.
 - RC receiver PPM input: OpenRB `D6`.
@@ -58,12 +58,20 @@ Rover responsibilities:
 Do not change pin mappings, serial ports, or channel assumptions without
 updating `docs/rc_channel_map.md`, `docs/manual_control.md`, and this document.
 
-UART decision:
+UART decision table:
 
-- Option A is selected based on actual hardware wiring.
-- Keep GPS on the current central connector / `Serial2`.
-- Move HC-12 data lines to verified `Serial3` RX/TX.
-- Run HC-12 Serial3 echo test before updating integrated firmware mappings.
+| Current HC-12 wiring audit result | Decision |
+|---|---|
+| HC-12 is independent from GPS `Serial2` | Proceed with integrated GPS on `Serial2` plus HC-12 telemetry after diagnostics confirm both paths can coexist. |
+| HC-12 shares GPS `Serial2` | Do not use GPS and HC-12 simultaneously. Use USB/onboard mission flow for GPS-dependent work and mark HC-12 operation blocked by fixed hardware. |
+
+Next milestone:
+
+- Add an integrated GPS `Serial2` diagnostic firmware mode.
+- Audit current HC-12 wiring from code and non-motion diagnostics.
+- Run receive-only station telemetry testing only if it is safe and cannot
+  weaken STOP, heartbeat, failsafe, manual override, or RC safety.
+- Continue station-side path planning as dry-run only.
 
 ## Implemented Components
 

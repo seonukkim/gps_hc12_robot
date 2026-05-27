@@ -1,9 +1,19 @@
 #include <Servo.h>
 #include <TinyGPS++.h>
 
+#ifndef FIXED_WIRING_GPS_SERIAL2_DIAG
+#define FIXED_WIRING_GPS_SERIAL2_DIAG 0
+#endif
+
 #define ENABLE_GPS_TELEMETRY 1
+#if FIXED_WIRING_GPS_SERIAL2_DIAG
+#define HC12_LINK_ENABLED 0
+#define GPS_SERIAL Serial2
+#else
+#define HC12_LINK_ENABLED 1
 #define HC12_SERIAL Serial2
 #define GPS_SERIAL Serial3
+#endif
 
 constexpr const char *FIRMWARE_ID = "openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26";
 constexpr uint8_t PPM_PIN = 6;
@@ -113,6 +123,7 @@ uint8_t checksumXor(const String &body) {
 }
 
 void writeFrame(const char *type, uint32_t seq, const String &payload) {
+#if HC12_LINK_ENABLED
   String body = String(type) + "," + String(seq);
   if (payload.length() > 0) {
     body += "," + payload;
@@ -126,6 +137,11 @@ void writeFrame(const char *type, uint32_t seq, const String &payload) {
     HC12_SERIAL.print("0");
   }
   HC12_SERIAL.println(checksum, HEX);
+#else
+  (void)type;
+  (void)seq;
+  (void)payload;
+#endif
 }
 
 void motorStop() {
@@ -426,6 +442,12 @@ void debugPrintStatus() {
   Serial.print(lastLeftOutputCmd, 3);
   Serial.print(F(" right_cmd="));
   Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" fixed_wiring_gps_serial2_diag="));
+  Serial.print(FIXED_WIRING_GPS_SERIAL2_DIAG ? F("true") : F("false"));
+  Serial.print(F(" hc12_enabled="));
+  Serial.print(HC12_LINK_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" gps_chars="));
+  Serial.print(gps.charsProcessed());
   Serial.print(F(" gps_fix="));
   Serial.print(gps.location.isValid() ? F("true") : F("false"));
   Serial.print(F(" gps_lat="));
@@ -665,7 +687,9 @@ void processHC12Line(const String &line) {
 
 void setup() {
   Serial.begin(USB_BAUD);
+#if HC12_LINK_ENABLED
   HC12_SERIAL.begin(HC12_BAUD);
+#endif
 #if ENABLE_GPS_TELEMETRY
   GPS_SERIAL.begin(GPS_BAUD);
 #endif
@@ -680,7 +704,14 @@ void setup() {
   Serial.print("Firmware: ");
   Serial.println(FIRMWARE_ID);
   Serial.println("OpenRB robot controller starting.");
+#if FIXED_WIRING_GPS_SERIAL2_DIAG
+  Serial.println("FIXED_WIRING_GPS_SERIAL2_DIAG enabled.");
+  Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
+  Serial.println("Motor outputs are forced neutral; station and RC drive commands are ignored.");
+  Serial.println("GPS diagnostic uses current fixed wiring: OpenRB-150 Serial2 at 9600 baud.");
+#else
   Serial.println("GPS telemetry uses OpenRB-150 Serial3 (D13/RX) at 9600 baud.");
+#endif
   Serial.println("Motor tests are wheel-off-ground only.");
   Serial.println("RC mode input uses receiver PPM CH5; PPM CH7 is reserved/unused.");
   Serial.println("CH5 high enters AUTO_READY only; drive stays STOP until explicit AUTO.");
@@ -694,6 +725,7 @@ void loop() {
   }
 #endif
 
+#if HC12_LINK_ENABLED
   while (HC12_SERIAL.available() > 0) {
     char c = static_cast<char>(HC12_SERIAL.read());
     if (c == '\n') {
@@ -703,6 +735,7 @@ void loop() {
       hc12Line += c;
     }
   }
+#endif
 
   uint16_t steeringUs = 0;
   uint16_t throttleUs = 0;
@@ -715,6 +748,16 @@ void loop() {
   bool stationManualFresh = stationManualValid();
   bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;
   bool rcManualActive = rcValid && !autoSwitchOn;
+
+#if FIXED_WIRING_GPS_SERIAL2_DIAG
+  clearAutoCommand();
+  clearStationManualCommand();
+  currentControlSource = CONTROL_SOURCE_STOP;
+  currentMode = rcValid ? DISARMED : FAILSAFE;
+  motorStop();
+  debugPrintStatus();
+  return;
+#endif
 
   if (autoCommandActive && !stationLinkValid()) {
     currentMode = LINK_LOST;

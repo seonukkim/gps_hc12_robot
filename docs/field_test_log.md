@@ -246,9 +246,9 @@ Next milestone:
 - Next software milestone should be a GPS diagnostic integrated firmware mode,
   not autonomous movement.
 
-## 2026-05-26: Final UART Plan Switched To Option A
+## 2026-05-26: Historical UART Plan Switched To Option A
 
-Final decision:
+Historical decision, now superseded by Fixed Wiring Plan:
 
 - Keep GPS on the current central OpenRB connector.
 - Treat the current central connector as the confirmed GPS `Serial2` path.
@@ -267,7 +267,7 @@ Superseded:
 - Do not treat the Serial3 D13/D14 zero-byte GPS tests as GPS failure; the GPS
   was not wired there.
 
-Next hardware milestone:
+Historical next hardware milestone, no longer current:
 
 - Identify actual Serial3 RX/TX physical pins.
 - Run Serial3 TX-to-RX loopback.
@@ -275,11 +275,59 @@ Next hardware milestone:
 - Run HC-12 Serial3 echo test.
 - Only after that, update `openrb_robot_controller` mapping.
 
+Current correction:
+
+- Do not execute this rewiring plan under the Fixed Wiring Plan.
+- Do not move GPS.
+- Do not move HC-12.
+
 Safety boundary:
 
 - Do not modify motor control.
 - Do not implement autonomy.
 - Do not weaken STOP, heartbeat timeout, failsafe, or manual control.
+
+## 2026-05-27: Fixed Wiring Plan
+
+Final decision:
+
+- GPS cannot be moved.
+- HC-12 cannot be moved.
+- Proceed with current physical wiring.
+- GPS stays on the current central OpenRB connector.
+- The current central connector is confirmed as `Serial2` at `9600`.
+- GPS NMEA receive and `fix=true` are confirmed.
+- HC-12 appears mounted under or behind the OpenRB board; audit its current
+  data-line wiring before assuming it shares or does not share GPS `Serial2`.
+- The purple module appears to be an IMU on an I2C-style connection; do not
+  treat it as UART.
+
+Superseded:
+
+- Previous Option A and Option B UART-rewiring plans are superseded.
+- Do not move GPS.
+- Do not move HC-12.
+
+Decision table:
+
+| Current HC-12 wiring audit result | Decision |
+|---|---|
+| HC-12 is independent from GPS `Serial2` | Proceed with integrated GPS on `Serial2` plus HC-12 telemetry after diagnostics confirm both paths can coexist. |
+| HC-12 shares GPS `Serial2` | Do not use GPS and HC-12 simultaneously. Use USB/onboard mission flow for GPS-dependent work and mark HC-12 operation blocked by fixed hardware. |
+
+Next milestone:
+
+- Integrated GPS `Serial2` diagnostic firmware mode.
+- Current HC-12 wiring audit.
+- Receive-only station telemetry test if safe.
+- Station-side path planning dry-run.
+
+Safety boundary:
+
+- Do not modify motor control.
+- Do not implement autonomy.
+- Do not weaken STOP, heartbeat timeout, failsafe, manual override, or RC
+  safety.
 
 ## Known Manual Direction Attempts
 

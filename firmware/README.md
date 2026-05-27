@@ -25,6 +25,16 @@ Compile with Arduino CLI:
 arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 firmware/openrb_robot_controller
 ```
 
+Compile the fixed-wiring GPS Serial2 diagnostic build:
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-diag --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_DIAG=1' firmware/openrb_robot_controller
+```
+
+In this diagnostic build, GPS uses `Serial2` at `9600`, HC-12 commands are
+disabled/ignored to avoid a `Serial2` conflict, and motor outputs are forced
+neutral while USB debug reports GPS and RC status.
+
 Upload to the connected OpenRB USB serial port:
 
 ```bash
@@ -50,12 +60,12 @@ commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
 
 ## Serial3 Pin Verification
 
-Use these standalone sketches before moving GPS to `Serial3`:
+These standalone sketches are retained as historical/safe UART pin tools:
 
 ```text
 firmware/pin_finder_test/pin_finder_test.ino
 firmware/serial3_loopback_test/serial3_loopback_test.ino
 ```
 
-They do not attach motor outputs. Full wiring and compile/upload commands are
-in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
+Under the Fixed Wiring Plan, do not move GPS or HC-12. They do not attach motor
+outputs.

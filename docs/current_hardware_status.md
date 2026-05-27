@@ -3,9 +3,9 @@
 > 2026-05-26 note: GPS UART receive is now confirmed on `Serial2` at `9600`
 > with the GPS connected to the central OpenRB connector. The earlier `Serial3`
 > `D13` / `D14` checks failed because the current wiring is not on those pins.
-> GPS fix also succeeded on this `Serial2` path. The final UART plan is now
-> Option A: keep GPS on `Serial2` and move HC-12 to verified `Serial3` pins
-> after Serial3 loopback and HC-12 echo testing.
+> GPS fix also succeeded on this `Serial2` path. Previous Option A and Option B
+> rewiring plans are superseded by the Fixed Wiring Plan: GPS cannot be moved,
+> HC-12 cannot be moved, and the current wiring must be audited.
 
 ## Confirmed working
 
@@ -21,6 +21,8 @@
 - GPS FIX: working on the current `Serial2` probe path
 - Purple module: appears to be an IMU on an I2C-style connection; not a UART
   path
+- Fixed Wiring Plan: GPS remains on the central connector / `Serial2`; HC-12
+  remains physically mounted as-is until its current wiring is audited
 
 ## Confirmed RC debug state
 
@@ -56,7 +58,7 @@ Interpretation:
 - GPS UART communication is working.
 - GPS satellite fix is working on the `Serial2` probe path.
 - GPS should stay on the current central connector.
-- Next action is verifying HC-12 on `Serial3`, not more GPS UART probing.
+- Next action is auditing current HC-12 wiring, not rewiring either module.
 
 ## Historical GPS Debug State
 
@@ -81,7 +83,9 @@ Observed from USBDBG:
 Current status:
 
 - Central OpenRB connector is confirmed as `Serial2`.
-- `Serial3` physical RX/TX pin mapping is unresolved.
+- HC-12 appears mounted under or behind the OpenRB board and cannot be moved
+  right now.
+- Whether HC-12 shares GPS `Serial2` is not yet proven.
 - Historical `Serial3` D13/D14 wiring notes in older docs must be treated as a
   different wiring setup until revalidated.
 - Purple module appears to be I2C-style IMU wiring and should not be treated as
@@ -92,24 +96,28 @@ Current status:
 - Integrated controller HC-12 serial: `Serial2`
 - Integrated controller GPS serial: `Serial3`
 - GPS probe confirmed current physical GPS path: `Serial2` at `9600`
-- UART allocation conflict: current GPS wiring and integrated HC-12 both point
-  at `Serial2`
-- Previous selected resolution Option B is superseded.
-- Final target mapping after hardware verification:
-  - `GPS_SERIAL=Serial2`
-  - `HC12_SERIAL=Serial3`
+- Possible UART allocation conflict: GPS is confirmed on `Serial2`; HC-12 may
+  or may not share that path and must be audited before assumptions are made
+- Previous Option A and Option B rewiring plans are superseded by the Fixed
+  Wiring Plan
 - USB debug baud: `115200`
+
+## Fixed Wiring Decision Table
+
+| Current HC-12 wiring audit result | Decision |
+|---|---|
+| HC-12 is independent from GPS `Serial2` | Proceed with integrated GPS on `Serial2` plus HC-12 telemetry after diagnostics confirm both paths can coexist. |
+| HC-12 shares GPS `Serial2` | Do not use GPS and HC-12 simultaneously. Use USB/onboard mission flow for GPS-dependent work and mark HC-12 operation blocked by fixed hardware. |
 
 ## Pending
 
-- Locate actual `Serial3` RX/TX pins using loopback and pin-finder tests.
-- Run Serial3 TX-to-RX loopback.
-- Move HC-12 data lines to verified `Serial3` RX/TX.
-- Run an HC-12 Serial3 echo test.
-- Only then update `openrb_robot_controller` mapping.
-- Next software milestone: add a non-motion GPS diagnostic integrated firmware
-  mode after HC-12 is verified on `Serial3` and GPS remains verified on
-  `Serial2`.
+- Add an integrated GPS `Serial2` diagnostic firmware mode.
+- Audit current HC-12 wiring from code, board inspection, and non-motion
+  diagnostics.
+- If safe, run receive-only station telemetry testing.
+- Keep station-side path planning dry-run only.
+- Do not update `openrb_robot_controller` motor behavior, autonomy, STOP,
+  heartbeat, failsafe, manual override, or RC safety.
 - Station-side HC-12-USB device is not confirmed.
 - `/dev/ttyUSB*` is not visible yet on the station/development side.
 - Need to confirm whether station HC-12-USB is installed and connected to MPC.
