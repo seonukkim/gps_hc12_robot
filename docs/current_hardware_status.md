@@ -25,6 +25,10 @@
 - Integrated GPS `Serial2` diagnostic build: confirmed `gps_chars` increase,
   `gps_fix=true`, valid latitude/longitude, valid satellites/HDOP, HC-12
   disabled, and motors neutral
+- Unified fixed-wiring RC + GPS autonomy dry-run build: compiles with
+  `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1`; GPS uses `Serial2`, HC-12 is
+  disabled, RC MANUAL can drive, and AUTO forces neutral while computing
+  readiness only
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
@@ -179,6 +183,10 @@ Current status:
 
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
   debug with motors neutral and HC-12 ignored.
+- Use the unified RC + GPS dry-run build for the next safe integration step:
+  validate RC MANUAL, then switch to AUTO and confirm `left_cmd=0`,
+  `right_cmd=0`, `autonomy_dryrun=true`, `gps_ready`, `target_ready`,
+  `autonomy_ready`, target distance, and target bearing.
 - Audit current HC-12 wiring from code, board inspection, and non-motion
   diagnostics.
 - If safe, run receive-only station telemetry testing.
@@ -189,8 +197,8 @@ Current status:
   - Auto ON: onboard GPS mission/autonomy after separate safety design
   - HC-12 unused in that mode until hardware can be revised or proven
     independent from GPS `Serial2`
-- Do not update `openrb_robot_controller` motor behavior, autonomy, STOP,
-  heartbeat, failsafe, manual override, or RC safety.
+- Do not add real waypoint following or weaken STOP, heartbeat, failsafe,
+  manual override, RC safety, or wheel-off-ground motor-test rules.
 - Station-side HC-12-USB device is not confirmed.
 - `/dev/ttyUSB*` is not visible yet on the station/development side.
 - Need to confirm whether station HC-12-USB is installed and connected to MPC.

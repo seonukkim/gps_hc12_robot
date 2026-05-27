@@ -93,6 +93,7 @@ HC-12, or motor behavior from the wrong mode.
 |---|---|---|---|---|---|---|
 | Default rover controller | `firmware/openrb_robot_controller` | OpenRB-150 | RC manual and HC-12 protocol baseline | Default firmware reads GPS from `Serial3`; under current fixed wiring, GPS `Serial2` is not available here and `gps_chars=0` is expected | enabled | normal safety-gated rover behavior |
 | Fixed-wiring GPS Serial2 diagnostic | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | OpenRB-150 | Integrated GPS-on-`Serial2` USB debug | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | forced neutral; manual driving does not work by design |
+| Fixed-wiring RC + GPS autonomy dry-run | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | OpenRB-150 | RC manual plus GPS readiness/distance/bearing dry-run | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO forces neutral and computes readiness only |
 | Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
 | Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
 | Pin finder test | `firmware/pin_finder_test` | OpenRB-150 | Historical physical pin finder | not a GPS test | not used | no motor outputs |
@@ -152,6 +153,40 @@ Expected:
 - HC-12 is disabled/ignored
 - motors are forced neutral
 - manual driving does not work in this diagnostic build by design
+
+### Fixed-Wiring RC + GPS Autonomy Dry-Run
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1' firmware/openrb_robot_controller
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun firmware/openrb_robot_controller
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected:
+
+- GPS uses fixed `Serial2` wiring at `9600`
+- HC-12 is disabled/ignored
+- RC MANUAL mode preserves current manual driving behavior and reports
+  `control_source=RC_MANUAL`
+- RC AUTO switch position does not move the rover; it forces `left_cmd=0` and
+  `right_cmd=0`, prints `autonomy_dryrun=true`, target placeholder fields,
+  distance/bearing to target, and `gps_ready`, `target_ready`,
+  `autonomy_ready`
+- placeholder target is dry-run only:
+  `35.571120,129.186050`
+- no real waypoint following is implemented
 
 ### Standalone GPS Probe
 

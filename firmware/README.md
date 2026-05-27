@@ -53,6 +53,30 @@ Interpretation checklist:
 - Protect electronics and antenna connectors from rain even if the GPS can fix
   during rainy open-sky testing.
 
+Compile the unified fixed-wiring RC + GPS autonomy dry-run build:
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1' firmware/openrb_robot_controller
+```
+
+In this dry-run build, GPS uses `Serial2` at `9600`, HC-12 is disabled/ignored,
+RC MANUAL mode keeps current manual driving behavior, and RC AUTO mode forces
+neutral motor outputs while printing GPS, placeholder target, distance, bearing,
+and readiness fields. This is not real waypoint following.
+
+Expected dry-run USB debug additions:
+
+```text
+autonomy_dryrun=true target=35.571120,129.186050 target_distance_m=... target_bearing_deg=... gps_ready=... target_ready=... autonomy_ready=...
+```
+
+When uploading a compile-time variant, upload the matching build directory. For
+example, the dry-run build uses:
+
+```bash
+arduino-cli upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun firmware/openrb_robot_controller
+```
+
 Upload to the connected OpenRB USB serial port:
 
 ```bash

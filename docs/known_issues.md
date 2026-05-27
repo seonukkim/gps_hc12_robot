@@ -209,6 +209,22 @@ Autonomous GPS-dependent motion is not implemented. Before adding it:
 - define rover-side rejection behavior
 - log GPS fix state alongside command requests
 
+## RC + GPS Dry-Run Is Not Real Autonomy
+
+The build flag `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` is a safe
+integration step, not waypoint following.
+
+Known boundaries:
+
+- HC-12 is disabled/ignored in this mode.
+- RC MANUAL mode may drive using the existing RC manual behavior.
+- AUTO mode must force `left_cmd=0` and `right_cmd=0`.
+- `autonomy_ready=true` only means RC, GPS, and target readiness checks passed.
+- The placeholder target `35.571120,129.186050` is for distance/bearing
+  calculation only.
+- Do not convert this mode into motor-driving autonomy without a separate
+  safety design and test plan.
+
 ## Heading / BMI160 Is Not Integrated
 
 The rover likely needs heading from GPS plus BMI160 IMU, but BMI160 support is

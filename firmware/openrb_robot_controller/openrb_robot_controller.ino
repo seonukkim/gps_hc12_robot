@@ -1,12 +1,17 @@
 #include <Servo.h>
 #include <TinyGPS++.h>
+#include <math.h>
 
 #ifndef FIXED_WIRING_GPS_SERIAL2_DIAG
 #define FIXED_WIRING_GPS_SERIAL2_DIAG 0
 #endif
 
+#ifndef FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+#define FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN 0
+#endif
+
 #define ENABLE_GPS_TELEMETRY 1
-#if FIXED_WIRING_GPS_SERIAL2_DIAG
+#if FIXED_WIRING_GPS_SERIAL2_DIAG || FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
 #define HC12_LINK_ENABLED 0
 #define GPS_SERIAL Serial2
 #else
@@ -22,6 +27,11 @@ constexpr uint8_t ESC_RIGHT_PIN = 5;
 constexpr long HC12_BAUD = 9600;
 constexpr long GPS_BAUD = 9600;
 constexpr long USB_BAUD = 115200;
+
+constexpr bool DRYRUN_TARGET_AVAILABLE = true;
+constexpr double DRYRUN_TARGET_LAT = 35.571120;
+constexpr double DRYRUN_TARGET_LON = 129.186050;
+constexpr uint32_t DRYRUN_GPS_READY_MAX_AGE_MS = 3000;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
 // Printed transmitter labels are 1-based (CH1-CH8), while ppmChannels[] uses 0-based indexes.
@@ -180,6 +190,52 @@ float clampUnit(float value) {
 float absFloat(float value) {
   return value < 0.0f ? -value : value;
 }
+
+#if FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+double degreesToRadians(double degrees) {
+  return degrees * 0.017453292519943295;
+}
+
+double radiansToDegrees(double radians) {
+  return radians * 57.29577951308232;
+}
+
+double normalizeBearingDegrees(double degrees) {
+  while (degrees < 0.0) {
+    degrees += 360.0;
+  }
+  while (degrees >= 360.0) {
+    degrees -= 360.0;
+  }
+  return degrees;
+}
+
+double dryrunDistanceMeters(double fromLat, double fromLon, double toLat, double toLon) {
+  constexpr double earthRadiusMeters = 6371000.0;
+  double lat1 = degreesToRadians(fromLat);
+  double lat2 = degreesToRadians(toLat);
+  double dLat = degreesToRadians(toLat - fromLat);
+  double dLon = degreesToRadians(toLon - fromLon);
+  double sinHalfLat = sin(dLat * 0.5);
+  double sinHalfLon = sin(dLon * 0.5);
+  double a = sinHalfLat * sinHalfLat + cos(lat1) * cos(lat2) * sinHalfLon * sinHalfLon;
+  double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+  return earthRadiusMeters * c;
+}
+
+double dryrunBearingDegrees(double fromLat, double fromLon, double toLat, double toLon) {
+  double lat1 = degreesToRadians(fromLat);
+  double lat2 = degreesToRadians(toLat);
+  double dLon = degreesToRadians(toLon - fromLon);
+  double y = sin(dLon) * cos(lat2);
+  double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
+  return normalizeBearingDegrees(radiansToDegrees(atan2(y, x)));
+}
+
+bool dryrunGpsReady() {
+  return gps.location.isValid() && gps.location.age() <= DRYRUN_GPS_READY_MAX_AGE_MS;
+}
+#endif
 
 void applyDriveCommand(float left, float right) {
   left = clampUnit(left);
@@ -476,10 +532,43 @@ void debugPrintStatus() {
   }
   Serial.print(F(" gps_age_ms="));
   if (gps.location.isValid()) {
-    Serial.println(gps.location.age());
+    Serial.print(gps.location.age());
   } else {
-    Serial.println(F("NA"));
+    Serial.print(F("NA"));
   }
+#if FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+  bool gpsReady = dryrunGpsReady();
+  bool targetReady = DRYRUN_TARGET_AVAILABLE;
+  bool autonomyReady = rcValid && autoSwitchOn && gpsReady && targetReady;
+  Serial.print(F(" autonomy_dryrun=true"));
+  Serial.print(F(" target="));
+  if (targetReady) {
+    Serial.print(DRYRUN_TARGET_LAT, 6);
+    Serial.print(F(","));
+    Serial.print(DRYRUN_TARGET_LON, 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" target_distance_m="));
+  if (targetReady && gps.location.isValid()) {
+    Serial.print(dryrunDistanceMeters(gps.location.lat(), gps.location.lng(), DRYRUN_TARGET_LAT, DRYRUN_TARGET_LON), 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" target_bearing_deg="));
+  if (targetReady && gps.location.isValid()) {
+    Serial.print(dryrunBearingDegrees(gps.location.lat(), gps.location.lng(), DRYRUN_TARGET_LAT, DRYRUN_TARGET_LON), 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_ready="));
+  Serial.print(gpsReady ? F("true") : F("false"));
+  Serial.print(F(" target_ready="));
+  Serial.print(targetReady ? F("true") : F("false"));
+  Serial.print(F(" autonomy_ready="));
+  Serial.print(autonomyReady ? F("true") : F("false"));
+#endif
+  Serial.println();
 }
 
 void sendStatus(uint32_t refSeq) {
@@ -709,6 +798,12 @@ void setup() {
   Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
   Serial.println("Motor outputs are forced neutral; station and RC drive commands are ignored.");
   Serial.println("GPS diagnostic uses current fixed wiring: OpenRB-150 Serial2 at 9600 baud.");
+#elif FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+  Serial.println("FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN enabled.");
+  Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
+  Serial.println("GPS uses current fixed wiring: OpenRB-150 Serial2 at 9600 baud.");
+  Serial.println("RC MANUAL mode can drive normally; AUTO mode is computation-only with motor outputs neutral.");
+  Serial.println("No autonomous waypoint following is implemented in this dry-run build.");
 #else
   Serial.println("GPS telemetry uses OpenRB-150 Serial3 (D13/RX) at 9600 baud.");
 #endif
@@ -755,6 +850,30 @@ void loop() {
   currentControlSource = CONTROL_SOURCE_STOP;
   currentMode = rcValid ? DISARMED : FAILSAFE;
   motorStop();
+  debugPrintStatus();
+  return;
+#endif
+
+#if FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+  clearAutoCommand();
+  clearStationManualCommand();
+  if (!rcValid) {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = FAILSAFE;
+    motorStop();
+  } else if (rcManualActive) {
+    currentMode = MANUAL;
+    currentControlSource = CONTROL_SOURCE_RC_MANUAL;
+    applyManualOverride(steeringUs, throttleUs);
+  } else if (autoSwitchOn) {
+    currentMode = AUTO_READY;
+    currentControlSource = CONTROL_SOURCE_STOP;
+    motorStop();
+  } else {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = DISARMED;
+    motorStop();
+  }
   debugPrintStatus();
   return;
 #endif
