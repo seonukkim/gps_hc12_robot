@@ -29,6 +29,10 @@
   `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1`; GPS uses `Serial2`, HC-12 is
   disabled, RC MANUAL can drive, and AUTO forces neutral while computing
   readiness only
+- Unified dry-run validation: MANUAL mode works with
+  `control_source=RC_MANUAL` and stick-controlled `left_cmd` / `right_cmd`;
+  AUTO mode prints `autonomy_dryrun=true`, GPS fields, target
+  distance/bearing, keeps `left_cmd=0` / `right_cmd=0`, and does not move motors
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
@@ -183,10 +187,9 @@ Current status:
 
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
   debug with motors neutral and HC-12 ignored.
-- Use the unified RC + GPS dry-run build for the next safe integration step:
-  validate RC MANUAL, then switch to AUTO and confirm `left_cmd=0`,
-  `right_cmd=0`, `autonomy_dryrun=true`, `gps_ready`, `target_ready`,
-  `autonomy_ready`, target distance, and target bearing.
+- Unified RC + GPS dry-run validation is complete. This is the first mode where
+  MANUAL and GPS dry-run coexist in one firmware. AUTO is still
+  computation-only and real motion is not enabled yet.
 - Audit current HC-12 wiring from code, board inspection, and non-motion
   diagnostics.
 - If safe, run receive-only station telemetry testing.

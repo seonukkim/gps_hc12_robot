@@ -188,6 +188,17 @@ Expected:
   `35.571120,129.186050`
 - no real waypoint following is implemented
 
+Validated:
+
+- This is the first firmware mode where RC MANUAL driving and fixed-wiring GPS
+  dry-run coexist in one build.
+- MANUAL mode was tested with `control_source=RC_MANUAL`, and stick input
+  changed `left_cmd` / `right_cmd`.
+- AUTO mode was tested with `autonomy_dryrun=true`, GPS fields,
+  target distance/bearing fields, and `left_cmd=0` / `right_cmd=0`.
+- With the antenna outside/open sky, `gps_fix=true` was observed.
+- AUTO is still computation-only. Real motion is not enabled yet.
+
 ### Standalone GPS Probe
 
 Compile for confirmed fixed GPS wiring:

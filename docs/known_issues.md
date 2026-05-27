@@ -214,6 +214,17 @@ Autonomous GPS-dependent motion is not implemented. Before adding it:
 The build flag `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` is a safe
 integration step, not waypoint following.
 
+Validated behavior:
+
+- This is the first firmware mode where MANUAL and GPS dry-run coexist in one
+  firmware.
+- MANUAL mode works with `control_source=RC_MANUAL`, and stick input changes
+  `left_cmd` / `right_cmd`.
+- AUTO mode prints `autonomy_dryrun=true`, GPS fields, and target
+  distance/bearing fields.
+- AUTO mode keeps `left_cmd=0` and `right_cmd=0`.
+- No motor movement occurs in AUTO dry-run.
+
 Known boundaries:
 
 - HC-12 is disabled/ignored in this mode.
@@ -222,6 +233,8 @@ Known boundaries:
 - `autonomy_ready=true` only means RC, GPS, and target readiness checks passed.
 - The placeholder target `35.571120,129.186050` is for distance/bearing
   calculation only.
+- AUTO is still computation-only.
+- Real motion is not enabled yet.
 - Do not convert this mode into motor-driving autonomy without a separate
   safety design and test plan.
 

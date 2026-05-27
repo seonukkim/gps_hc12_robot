@@ -39,6 +39,31 @@ autonomy_ready=...
 The placeholder target is only used to compute distance and bearing from the
 current GPS position. It must not cause motor movement.
 
+## Validation Result
+
+The unified fixed-wiring dry-run firmware was tested with
+`FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1`.
+
+Observed:
+
+- `GPS_SERIAL=Serial2`.
+- HC-12 was disabled/ignored.
+- MANUAL mode worked with RC control.
+- `control_source=RC_MANUAL` in MANUAL mode.
+- Stick input changed `left_cmd` and `right_cmd`.
+- AUTO mode printed `autonomy_dryrun=true`.
+- AUTO mode printed GPS fields and target distance/bearing fields.
+- With the antenna outside/open sky, `gps_fix=true` was observed.
+- AUTO mode kept `left_cmd=0` and `right_cmd=0`.
+- No motor movement occurred in AUTO dry-run.
+
+Rule:
+
+- This is the first firmware mode where MANUAL and GPS dry-run coexist in one
+  firmware.
+- AUTO is still computation-only.
+- Real motion is not enabled yet.
+
 ## Readiness Logic
 
 - `gps_ready=true` when GPS has a valid, recent location.

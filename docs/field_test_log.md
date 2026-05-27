@@ -430,6 +430,41 @@ Next action:
 - Use the diagnostic build only for GPS `Serial2` debug with motors neutral.
 - Do not implement autonomy from this result alone.
 
+## 2026-05-27: Unified Fixed-Wiring RC + GPS Dry-Run Validation
+
+Firmware marker:
+
+```text
+openrb_robot_controller with FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1
+```
+
+Observed configuration:
+
+- `GPS_SERIAL=Serial2`
+- HC-12 disabled/ignored
+- GPS antenna outside/open sky produced `gps_fix=true`
+
+MANUAL mode observed:
+
+- RC manual control works.
+- `control_source=RC_MANUAL`.
+- Stick input changes `left_cmd` and `right_cmd`.
+
+AUTO mode observed:
+
+- `autonomy_dryrun=true`.
+- GPS fields are printed.
+- Target distance/bearing fields are printed.
+- `left_cmd=0` and `right_cmd=0`.
+- No motor movement in AUTO dry-run.
+
+Rule:
+
+- This is the first firmware mode where MANUAL and GPS dry-run coexist in one
+  firmware.
+- AUTO is still computation-only.
+- Real motion is not enabled yet.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:
