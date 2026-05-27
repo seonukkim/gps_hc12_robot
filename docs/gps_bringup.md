@@ -26,6 +26,10 @@ Final status:
 - GPS module baudrate is confirmed as `9600`.
 - Valid NMEA is received.
 - GPS fix eventually became valid.
+- Integrated GPS `Serial2` diagnostic sky-fix validation succeeded after moving
+  the external GPS antenna farther outside into open sky.
+- Previous `gps_sats=0` and `gps_hdop=99.99` was poor satellite acquisition
+  from indoor/window-side placement, not UART or firmware failure.
 - Final UART decision: Fixed Wiring Plan.
 - Keep GPS on the current central OpenRB connector as `Serial2`.
 - Keep HC-12 physically as-is and audit its current wiring before assuming
@@ -216,6 +220,16 @@ Check these before changing firmware assumptions:
 - `tinygps_chars=0` while `chars_1s>0`: raw bytes are arriving but may not be
   NMEA text, may be wrong baud gibberish, or may be a binary-only GPS output.
 
+GPS sky-fix checklist:
+
+- `gps_chars` increasing means UART receive and baudrate are OK.
+- `gps_sats=0` and `gps_hdop=99.99` mean no satellite acquisition yet.
+- Move the antenna outside/open sky before suspecting code.
+- Window-side indoor placement may receive NMEA but still fail to acquire
+  satellites.
+- Rain did not prevent fix when the antenna had open-sky exposure, but protect
+  electronics and antenna connectors from water.
+
 Current decision from the successful probe:
 
 - `Serial2` at `9600` with readable `$GP...` NMEA means the GPS UART is working.
@@ -369,6 +383,15 @@ Diagnostic behavior:
   - `gps_hdop`
   - `gps_age_ms`
   - `gps_chars`
+
+Latest sky-fix validation:
+
+- `fixed_wiring_gps_serial2_diag=true`
+- `hc12_enabled=false`
+- `gps_chars` increased continuously
+- `gps_fix=true` after moving the external antenna farther outside/open sky
+- `gps_lat`, `gps_lon`, `gps_sats`, and `gps_hdop` became valid
+- motors remained disarmed/neutral
 
 Default build expectation under fixed wiring:
 

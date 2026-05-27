@@ -264,7 +264,9 @@ The `FIXED_WIRING_GPS_SERIAL2_DIAG` build has now been sky-tested:
 - motors remained disarmed/neutral
 
 This confirms GPS works through the fixed `Serial2` wiring inside integrated
-firmware when HC-12 is disabled for the diagnostic mode.
+firmware when HC-12 is disabled for the diagnostic mode. The successful fix
+occurred after moving the external GPS antenna farther outside into clearer sky
+view.
 
 ### GPS Data But No Fix
 
@@ -275,6 +277,16 @@ outdoors with open sky view and wait before changing firmware.
 
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.
+
+GPS sky-fix checklist:
+
+- `gps_chars` increasing means the selected UART and baudrate are working.
+- `gps_sats=0` and `gps_hdop=99.99` mean no satellite acquisition yet, not a
+  UART or firmware failure by themselves.
+- Move the antenna outside or into open sky before suspecting code.
+- Rain did not prevent fix during the observed test once the antenna had clear
+  sky exposure, but electronics, USB adapters, and antenna connectors must be
+  protected from water.
 
 ## Software Architecture
 

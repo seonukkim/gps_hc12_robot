@@ -35,6 +35,24 @@ In this diagnostic build, GPS uses `Serial2` at `9600`, HC-12 commands are
 disabled/ignored to avoid a `Serial2` conflict, and motor outputs are forced
 neutral while USB debug reports GPS and RC status.
 
+Latest GPS sky-fix validation:
+
+- `fixed_wiring_gps_serial2_diag=true`
+- `hc12_enabled=false`
+- `gps_chars` increased continuously
+- `gps_fix=true` after moving the external GPS antenna farther outside into
+  open sky
+- `gps_lat`, `gps_lon`, `gps_sats`, and `gps_hdop` became valid
+- motors remained disarmed/neutral
+
+Interpretation checklist:
+
+- `gps_chars` increasing means the GPS UART path is OK.
+- `gps_sats=0` and `gps_hdop=99.99` mean no satellite acquisition yet.
+- Move the antenna outside/open sky before suspecting firmware.
+- Protect electronics and antenna connectors from rain even if the GPS can fix
+  during rainy open-sky testing.
+
 Upload to the connected OpenRB USB serial port:
 
 ```bash

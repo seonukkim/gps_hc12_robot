@@ -86,7 +86,8 @@ Status:
   - `fixed_wiring_gps_serial2_diag=true`
   - `hc12_enabled=false`
   - `gps_chars` increased continuously
-  - `gps_fix=true`
+  - `gps_fix=true` after moving the external GPS antenna farther outside into
+    open sky
   - latitude/longitude, satellites, and HDOP became valid
   - motors remained disarmed/neutral
 - The integrated rover firmware currently defines:
@@ -162,14 +163,20 @@ Status:
 - Indoor/window-side tests may show increasing `gps_chars`, valid NMEA
   sentences, and TinyGPS++ character counts, but still fail to acquire enough
   satellites.
+- `gps_sats=0` and `gps_hdop=99.99` are consistent with no satellite
+  acquisition, not UART or firmware failure by themselves.
 - Outdoor/open-sky antenna placement produced `gps_fix=true` in the
   `FIXED_WIRING_GPS_SERIAL2_DIAG` build.
+- Rain did not prevent fix when the antenna had open-sky exposure, but the
+  electronics, USB adapters, and antenna connectors must be protected from
+  water.
 
 Decision rule:
 
 - `gps_chars=0`: wiring, selected UART, baudrate, power, or GPS output problem.
 - `gps_chars>0` with `gps_fix=false`: GPS data is arriving, but satellite fix
   quality is not sufficient yet.
+- `gps_sats=0` and `gps_hdop=99.99`: no satellite acquisition yet.
 - For first fix, place the GPS antenna outdoors with open sky view and wait
   before debugging firmware.
 

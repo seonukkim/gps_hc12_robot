@@ -391,7 +391,7 @@ Observed USBDBG:
 fixed_wiring_gps_serial2_diag=true
 hc12_enabled=false
 gps_chars increased continuously
-gps_fix=true
+gps_fix=true after moving the external GPS antenna farther outside/open sky
 gps_lat/gps_lon appeared
 gps_sats valid
 gps_hdop valid
@@ -409,9 +409,20 @@ Interpretation:
   when `FIXED_WIRING_GPS_SERIAL2_DIAG=1` is enabled.
 - The previous default-build `gps_chars=0` result is still expected and is not
   GPS failure; default firmware reads GPS from `Serial3`.
+- The previous `gps_sats=0` and `gps_hdop=99.99` result was poor
+  indoor/window-side satellite reception, not UART or firmware failure.
 - Outdoor/open-sky placement is required for reliable first fix. Indoor or
   window-side tests may receive NMEA bytes while failing to acquire enough
   satellites for `gps_fix=true`.
+- Rain did not prevent fix when the antenna had open-sky exposure, but
+  electronics and antenna connectors must be protected from water.
+
+Checklist:
+
+- `gps_chars` increasing means UART is OK.
+- `gps_sats=0` and `gps_hdop=99.99` means no satellite acquisition.
+- Move the antenna outside/open sky before suspecting code.
+- Protect electronics and antenna connectors from rain.
 
 Next action:
 

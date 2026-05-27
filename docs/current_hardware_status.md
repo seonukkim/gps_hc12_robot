@@ -25,6 +25,9 @@
 - Integrated GPS `Serial2` diagnostic build: confirmed `gps_chars` increase,
   `gps_fix=true`, valid latitude/longitude, valid satellites/HDOP, HC-12
   disabled, and motors neutral
+- GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
+  indoor/window-side reception, not UART or firmware failure; moving the
+  external antenna farther outside into open sky produced fix
 - Purple module: appears to be an IMU on an I2C-style connection; not a UART
   path
 - Fixed Wiring Plan: GPS remains on the central connector / `Serial2`; HC-12
@@ -119,6 +122,9 @@ Interpretation:
   diagnostic build.
 - Outdoor/open-sky placement is required for reliable first fix. Indoor or
   window-side tests can show increasing `gps_chars` while `gps_fix=false`.
+- `gps_sats=0` and `gps_hdop=99.99` mean no satellite acquisition yet.
+- Rain did not prevent the observed fix once the antenna had open-sky exposure,
+  but electronics and antenna connectors must be protected from water.
 
 ## Historical GPS Debug State
 
