@@ -18,13 +18,13 @@ extends to the left side of the A-to-B baseline in the local metric frame.
 ## Command
 
 ```bash
-uv run python tools/station_coverage_plan.py \
-  --a-lat 35.571070 --a-lon 129.186000 \
-  --b-lat 35.571070 --b-lon 129.186300 \
+uv run python scripts/station/plan_coverage_path.py \
+  --point-a 35.571070,129.186000 \
+  --point-b 35.571070,129.186300 \
   --sweep-width-m 20.0 \
   --lane-spacing-m 5.0 \
   --speed-mps 0.4 \
-  --mission-id test_area_001
+  --mission-name test_area_001
 ```
 
 Default output directory:
@@ -36,9 +36,9 @@ outputs/missions/
 Generated files:
 
 ```text
-outputs/missions/test_area_001.json
-outputs/missions/test_area_001.csv
-outputs/missions/test_area_001.png
+outputs/missions/test_area_001/mission.json
+outputs/missions/test_area_001/mission.csv
+outputs/missions/test_area_001/preview.png
 ```
 
 ## Geometry
@@ -60,14 +60,41 @@ being written to JSON and CSV.
 
 The JSON file contains:
 
+- metadata;
 - input points and planning parameters;
 - `dry_run=true`;
 - `sends_rover_commands=false`;
+- local origin;
 - local frame description;
+- coverage boundary;
 - lane/waypoint summary;
 - explicit safety notes;
 - generated waypoints with lat/lon, local `x_m` / `y_m`, lane index, order, and
   optional `speed_mps`.
+
+## Mission CSV
+
+The CSV file includes at least:
+
+- `index`
+- `lat`
+- `lon`
+- `x_m`
+- `y_m`
+- `segment_type`
+
+The extra columns `lane`, `offset_m`, and `speed_mps` are included for dry-run
+inspection.
+
+## Preview PNG
+
+The preview image shows:
+
+- point A;
+- point B;
+- generated lanes;
+- waypoint order labels;
+- the sweep boundary rectangle.
 
 ## Safety Rules
 
@@ -78,4 +105,3 @@ The JSON file contains:
   only.
 - Real waypoint following requires a separate safety design, heading source,
   GPS validity policy, STOP behavior, and wheel-off-ground validation.
-

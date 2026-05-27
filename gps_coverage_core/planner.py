@@ -41,6 +41,80 @@ def _coerce_point(point: Mapping[str, Any] | Any, name: str) -> tuple[float, flo
         raise TypeError(f"{name} must provide lat/lon values") from exc
 
 
+def lane_offsets_for_sweep_width(sweep_width_m: float, lane_spacing_m: float) -> list[float]:
+    """Return lane offsets that include the near and far edges of the sweep width."""
+    if sweep_width_m <= 0:
+        raise ValueError("sweep_width_m must be positive")
+    if lane_spacing_m <= 0:
+        raise ValueError("lane_spacing_m must be positive")
+
+    offsets = [0.0]
+    next_offset = lane_spacing_m
+    while next_offset < sweep_width_m and not math.isclose(
+        next_offset, sweep_width_m, abs_tol=1e-9
+    ):
+        offsets.append(next_offset)
+        next_offset += lane_spacing_m
+
+    if not math.isclose(offsets[-1], sweep_width_m, abs_tol=1e-9):
+        offsets.append(sweep_width_m)
+
+    return offsets
+
+
+def generate_coverage_path(
+    point_a: Mapping[str, Any] | Any,
+    point_b: Mapping[str, Any] | Any,
+    sweep_width_m: float,
+    lane_spacing_m: float,
+    speed_mps: float | None = None,
+) -> list[dict[str, float | int]]:
+    """Generate a dry-run boustrophedon coverage path for an A/B baseline and sweep width."""
+    if speed_mps is not None and speed_mps <= 0:
+        raise ValueError("speed_mps must be positive when provided")
+
+    lat_a, lon_a = _coerce_point(point_a, "point_a")
+    lat_b, lon_b = _coerce_point(point_b, "point_b")
+
+    bx_m, by_m = latlon_to_xy(lat_b, lon_b, lat_a, lon_a)
+    lane_length_m = math.hypot(bx_m, by_m)
+    if math.isclose(lane_length_m, 0.0, abs_tol=1e-9):
+        raise ValueError("point_a and point_b must not be identical")
+
+    ux = bx_m / lane_length_m
+    uy = by_m / lane_length_m
+    perp_x = -uy
+    perp_y = ux
+
+    waypoints: list[dict[str, float | int]] = []
+    order = 0
+    for lane, offset_m in enumerate(lane_offsets_for_sweep_width(sweep_width_m, lane_spacing_m)):
+        offset_x = perp_x * offset_m
+        offset_y = perp_y * offset_m
+
+        lane_start = (offset_x, offset_y)
+        lane_end = (bx_m + offset_x, by_m + offset_y)
+        endpoints = (lane_start, lane_end) if lane % 2 == 0 else (lane_end, lane_start)
+
+        for x_m, y_m in endpoints:
+            lat, lon = xy_to_latlon(x_m, y_m, lat_a, lon_a)
+            waypoint: dict[str, float | int] = {
+                "order": order,
+                "lane": lane,
+                "lat": lat,
+                "lon": lon,
+                "x_m": x_m,
+                "y_m": y_m,
+                "offset_m": offset_m,
+            }
+            if speed_mps is not None:
+                waypoint["speed_mps"] = speed_mps
+            waypoints.append(waypoint)
+            order += 1
+
+    return waypoints
+
+
 def generate_lawnmower_path(
     point_a: Mapping[str, Any] | Any,
     point_b: Mapping[str, Any] | Any,

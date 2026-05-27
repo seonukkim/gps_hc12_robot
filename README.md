@@ -446,21 +446,21 @@ settings. This writes JSON, CSV, and PNG files under `outputs/missions/` and
 sends no rover commands:
 
 ```bash
-uv run python tools/station_coverage_plan.py \
-  --a-lat 35.571070 --a-lon 129.186000 \
-  --b-lat 35.571070 --b-lon 129.186300 \
+uv run python scripts/station/plan_coverage_path.py \
+  --point-a 35.571070,129.186000 \
+  --point-b 35.571070,129.186300 \
   --sweep-width-m 20.0 \
   --lane-spacing-m 5.0 \
   --speed-mps 0.4 \
-  --mission-id test_area_001
+  --mission-name test_area_001
 ```
 
 Outputs:
 
 ```text
-outputs/missions/test_area_001.json
-outputs/missions/test_area_001.csv
-outputs/missions/test_area_001.png
+outputs/missions/test_area_001/mission.json
+outputs/missions/test_area_001/mission.csv
+outputs/missions/test_area_001/preview.png
 ```
 
 See [docs/station_path_planning.md](docs/station_path_planning.md). Path

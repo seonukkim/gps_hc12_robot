@@ -3,7 +3,9 @@ import math
 import pytest
 
 from gps_coverage_core.planner import (
+    generate_coverage_path,
     generate_lawnmower_path,
+    lane_offsets_for_sweep_width,
     latlon_to_xy,
     xy_to_latlon,
 )
@@ -72,3 +74,39 @@ def test_invalid_spacing_raises_value_error() -> None:
 def test_identical_points_raise_value_error() -> None:
     with pytest.raises(ValueError, match="must not be identical"):
         generate_lawnmower_path(POINT_A, POINT_A, spacing_m=5.0)
+
+
+def test_lane_offsets_include_far_sweep_edge() -> None:
+    assert lane_offsets_for_sweep_width(12.0, 5.0) == pytest.approx(
+        [0.0, 5.0, 10.0, 12.0]
+    )
+
+
+def test_coverage_path_uses_sweep_width_and_alternates_direction() -> None:
+    path = generate_coverage_path(
+        POINT_A,
+        POINT_B,
+        sweep_width_m=12.0,
+        lane_spacing_m=5.0,
+        speed_mps=0.4,
+    )
+    lanes = _lanes(path)
+
+    assert len(path) == 8
+    assert set(lanes) == {0, 1, 2, 3}
+    assert [waypoint["order"] for waypoint in path] == list(range(len(path)))
+    assert all(waypoint["speed_mps"] == pytest.approx(0.4) for waypoint in path)
+    assert float(lanes[0][0]["x_m"]) < float(lanes[0][1]["x_m"])
+    assert float(lanes[1][0]["x_m"]) > float(lanes[1][1]["x_m"])
+    assert float(lanes[3][0]["offset_m"]) == pytest.approx(12.0)
+
+
+def test_coverage_path_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="sweep_width_m must be positive"):
+        generate_coverage_path(POINT_A, POINT_B, sweep_width_m=0.0, lane_spacing_m=5.0)
+
+    with pytest.raises(ValueError, match="lane_spacing_m must be positive"):
+        generate_coverage_path(POINT_A, POINT_B, sweep_width_m=10.0, lane_spacing_m=0.0)
+
+    with pytest.raises(ValueError, match="speed_mps must be positive"):
+        generate_coverage_path(POINT_A, POINT_B, 10.0, 5.0, speed_mps=0.0)
