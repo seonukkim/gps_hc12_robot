@@ -54,6 +54,28 @@ Next wiring action:
 - Add an integrated GPS `Serial2` diagnostic firmware mode.
 - Run receive-only station telemetry testing only if safe.
 
+## Do Not Repeat
+
+- Do not expect GPS bytes in the default `openrb_robot_controller` build under
+  current fixed wiring; default firmware still reads GPS from `Serial3`.
+- Do not expect manual driving in the `FIXED_WIRING_GPS_SERIAL2_DIAG` build;
+  it disables/ignores HC-12 and forces motor outputs neutral by design.
+- Do not connect both OpenRB USB and station USB-serial during OpenRB upload if
+  `arduino-cli` selects the wrong upload port.
+- If upload fails because it selected `/dev/cu.usbserial-02444963`, unplug the
+  station USB-serial and upload with only OpenRB connected.
+
+## Next Architecture
+
+- Fixed wiring means GPS remains on `Serial2`.
+- A future onboard mode should use the RC switch:
+  - Auto OFF: RC manual drive
+  - Auto ON: onboard GPS mission/autonomy after a separate safety design
+- HC-12 is not used in that future mode until hardware can be revised or proven
+  independent from GPS `Serial2`.
+- Station-side path planning remains dry-run until autonomy is explicitly
+  implemented and safety-gated.
+
 ## Voltage / Logic
 
 - Confirm `5V` / `3.3V` logic compatibility before powering the link.

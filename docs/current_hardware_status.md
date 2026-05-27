@@ -1,11 +1,13 @@
 # Current Hardware Status
 
-> 2026-05-26 note: GPS UART receive is now confirmed on `Serial2` at `9600`
+> 2026-05-27 note: GPS UART receive is now confirmed on `Serial2` at `9600`
 > with the GPS connected to the central OpenRB connector. The earlier `Serial3`
 > `D13` / `D14` checks failed because the current wiring is not on those pins.
-> GPS fix also succeeded on this `Serial2` path. Previous Option A and Option B
-> rewiring plans are superseded by the Fixed Wiring Plan: GPS cannot be moved,
-> HC-12 cannot be moved, and the current wiring must be audited.
+> GPS fix also succeeded on this `Serial2` path, including the integrated
+> `FIXED_WIRING_GPS_SERIAL2_DIAG` build with HC-12 disabled and motors neutral.
+> Previous Option A and Option B rewiring plans are superseded by the Fixed
+> Wiring Plan: GPS cannot be moved, HC-12 cannot be moved, and the current
+> wiring must be audited.
 
 ## Confirmed working
 
@@ -18,13 +20,44 @@
 - GPS module baudrate: confirmed `9600`
 - GPS NMEA output: working; `$GPRMC`, `$GPVTG`, `$GPGGA`, `$GPGSV`, and
   `$GPGLL` observed
-- GPS FIX: working on the current `Serial2` probe path
+- GPS FIX: working on the current `Serial2` probe path and in the integrated
+  GPS `Serial2` diagnostic build
+- Integrated GPS `Serial2` diagnostic build: confirmed `gps_chars` increase,
+  `gps_fix=true`, valid latitude/longitude, valid satellites/HDOP, HC-12
+  disabled, and motors neutral
 - Purple module: appears to be an IMU on an I2C-style connection; not a UART
   path
 - Fixed Wiring Plan: GPS remains on the central connector / `Serial2`; HC-12
   remains physically mounted as-is until its current wiring is audited
 
 ## Confirmed RC debug state
+
+Latest default firmware restore check:
+
+```text
+fixed_wiring_gps_serial2_diag=false
+hc12_enabled=true
+gps_chars=0
+mode=AUTO_READY
+auto_sw=true
+mode_us≈2000
+station_deadman=false
+control_source=STOP
+```
+
+Interpretation:
+
+- Default `openrb_robot_controller` was restored successfully.
+- `gps_chars=0` is expected in the default build under current fixed wiring
+  because default firmware still reads GPS from `Serial3` while GPS is fixed on
+  `Serial2`.
+- Manual driving appears stopped because the RC mode switch is currently in
+  AUTO. To validate manual control, switch RC mode out of AUTO and verify
+  `control_source=RC_MANUAL`.
+- `FIXED_WIRING_GPS_SERIAL2_DIAG` is for GPS testing only; manual driving does
+  not work in that diagnostic build by design.
+
+Historical manual-state example:
 
 Observed from USBDBG:
 
@@ -59,6 +92,33 @@ Interpretation:
 - GPS satellite fix is working on the `Serial2` probe path.
 - GPS should stay on the current central connector.
 - Next action is auditing current HC-12 wiring, not rewiring either module.
+
+## Latest Integrated GPS Diagnostic State
+
+Observed from `openrb_robot_controller` with
+`FIXED_WIRING_GPS_SERIAL2_DIAG=1`:
+
+```text
+fixed_wiring_gps_serial2_diag=true
+hc12_enabled=false
+gps_chars increased continuously
+gps_fix=true
+gps_lat/gps_lon appeared
+gps_sats valid
+gps_hdop valid
+```
+
+Safety observation:
+
+- Motors remained disarmed/neutral.
+- Manual driving does not work in this build by design.
+
+Interpretation:
+
+- The integrated controller can read GPS from the fixed `Serial2` wiring in the
+  diagnostic build.
+- Outdoor/open-sky placement is required for reliable first fix. Indoor or
+  window-side tests can show increasing `gps_chars` while `gps_fix=false`.
 
 ## Historical GPS Debug State
 
@@ -111,11 +171,18 @@ Current status:
 
 ## Pending
 
-- Add an integrated GPS `Serial2` diagnostic firmware mode.
+- Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
+  debug with motors neutral and HC-12 ignored.
 - Audit current HC-12 wiring from code, board inspection, and non-motion
   diagnostics.
 - If safe, run receive-only station telemetry testing.
 - Keep station-side path planning dry-run only.
+- Future fixed-wiring architecture should support GPS `Serial2` plus RC mode
+  switch behavior:
+  - Auto OFF: RC manual drive
+  - Auto ON: onboard GPS mission/autonomy after separate safety design
+  - HC-12 unused in that mode until hardware can be revised or proven
+    independent from GPS `Serial2`
 - Do not update `openrb_robot_controller` motor behavior, autonomy, STOP,
   heartbeat, failsafe, manual override, or RC safety.
 - Station-side HC-12-USB device is not confirmed.

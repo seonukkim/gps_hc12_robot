@@ -370,6 +370,37 @@ Diagnostic behavior:
   - `gps_age_ms`
   - `gps_chars`
 
+Default build expectation under fixed wiring:
+
+- `fixed_wiring_gps_serial2_diag=false`
+- `hc12_enabled=true`
+- `gps_chars=0` is expected because default firmware reads GPS from `Serial3`
+  while the fixed GPS wiring is on `Serial2`
+- If USBDBG shows `mode=AUTO_READY`, `auto_sw=true`, `mode_us≈2000`, and
+  `control_source=STOP`, manual drive is stopped by the RC mode switch state.
+  Switch RC mode out of AUTO before validating `control_source=RC_MANUAL`.
+
+Do not repeat:
+
+- Do not treat default-build `gps_chars=0` as GPS failure under current fixed
+  wiring.
+- Do not expect manual driving in `FIXED_WIRING_GPS_SERIAL2_DIAG`; this mode is
+  GPS diagnostic only and forces motor outputs neutral.
+- Do not connect both OpenRB USB and station USB-serial during OpenRB upload if
+  `arduino-cli` selects the wrong upload port.
+- If upload fails because it selected `/dev/cu.usbserial-02444963`, unplug the
+  station USB-serial and upload with only OpenRB connected.
+
+Next architecture:
+
+- Future fixed-wiring mode should combine GPS `Serial2` with RC switch control:
+  - Auto OFF: RC manual drive
+  - Auto ON: onboard GPS mission/autonomy after separate safety design
+- HC-12 is not used in this future mode until hardware can be revised or proven
+  independent from GPS `Serial2`.
+- Station-side path planning remains dry-run until autonomy is explicitly
+  implemented and safety-gated.
+
 Default integrated controller compile:
 
 ```bash

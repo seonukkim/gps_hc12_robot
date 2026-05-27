@@ -55,9 +55,10 @@ station HC-12 operation.
 - Adhesion concept: magnetic wheels, pending design and validation.
 - Rover controller: OpenRB-150.
 - Manual control: RC receiver with PPM input; RC manual mode has been verified.
-- GPS: GPS module on OpenRB `Serial3`, `9600` baud; GPS FIX has been verified.
+- GPS: fixed on the central OpenRB connector, confirmed as `Serial2` at
+  `9600` baud; GPS FIX has been verified.
 - Radio link: HC-12 UART is the intended station-to-rover link. Station-side
-  HC-12 USB confirmation is still pending.
+  HC-12 USB confirmation and current rover-side wiring audit are still pending.
 - Actuation: ESC/motor outputs are managed by rover firmware. Bench motor tests
   must remain wheel-off-ground.
 - Station/development OS: Ubuntu 24.04. WSL2 Ubuntu 24.04 and Jetson are target
@@ -65,6 +66,215 @@ station HC-12 operation.
 
 See [docs/current_hardware_status.md](docs/current_hardware_status.md),
 [docs/wiring.md](docs/wiring.md), and [firmware/README.md](firmware/README.md).
+
+## Legacy HC-12 References
+
+Legacy HC-12 scripts and notes from `~/Desktop/project-lab/hc12` have been
+audited under [references/legacy_hc12](references/legacy_hc12). They are
+reference material only, not production station or rover code.
+
+The useful legacy patterns are mostly `9600` baud PC `readline()` loops,
+Arduino/Nano `SoftwareSerial` bridges, RP2040 UART bridge notes, and old
+OpenRB/Mega-style `Serial3` transmit experiments. Known problems include
+hardcoded `COM4` or `/dev/cu.usbserial-*` ports, blocking loops, inconsistent
+variable names, old unverified UART assumptions, and examples that directly
+drive motors without this rover's STOP/failsafe model.
+
+Do not copy those examples into active firmware or station tools blindly. Use
+them only to inform new receive-only HC-12 diagnostics after the current fixed
+wiring and safety constraints are rechecked.
+
+## Firmware Modes
+
+The OpenRB firmware modes are intentionally separated. Do not infer GPS,
+HC-12, or motor behavior from the wrong mode.
+
+| Mode | Sketch / build | Upload target | Intended use | GPS behavior | HC-12 behavior | Motor behavior |
+|---|---|---|---|---|---|---|
+| Default rover controller | `firmware/openrb_robot_controller` | OpenRB-150 | RC manual and HC-12 protocol baseline | Default firmware reads GPS from `Serial3`; under current fixed wiring, GPS `Serial2` is not available here and `gps_chars=0` is expected | enabled | normal safety-gated rover behavior |
+| Fixed-wiring GPS Serial2 diagnostic | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | OpenRB-150 | Integrated GPS-on-`Serial2` USB debug | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | forced neutral; manual driving does not work by design |
+| Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
+| Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
+| Pin finder test | `firmware/pin_finder_test` | OpenRB-150 | Historical physical pin finder | not a GPS test | not used | no motor outputs |
+
+### Default Rover Controller
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-default firmware/openrb_robot_controller
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-default firmware/openrb_robot_controller
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected under current fixed wiring:
+
+- `fixed_wiring_gps_serial2_diag=false`
+- `hc12_enabled=true`
+- `gps_chars=0` because default firmware still reads GPS from `Serial3`
+- Manual driving requires RC mode switch out of AUTO; if USBDBG shows
+  `mode=AUTO_READY`, `auto_sw=true`, and `control_source=STOP`, switch RC mode
+  back to manual before validating `control_source=RC_MANUAL`
+
+### Fixed-Wiring GPS Serial2 Diagnostic
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-diag --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_DIAG=1' firmware/openrb_robot_controller
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-diag firmware/openrb_robot_controller
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected:
+
+- GPS uses fixed `Serial2` wiring at `9600`
+- HC-12 is disabled/ignored
+- motors are forced neutral
+- manual driving does not work in this diagnostic build by design
+
+### Standalone GPS Probe
+
+Compile for confirmed fixed GPS wiring:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/gps-probe-s2-9600 --build-property 'compiler.cpp.extra_flags=-DGPS_PROBE_MODE=2 -DGPS_PROBE_BAUD=9600' firmware/gps_uart_probe
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/gps-probe-s2-9600 firmware/gps_uart_probe
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+### Serial3 Loopback Test
+
+Historical UART pin test. Under the Fixed Wiring Plan, do not move GPS or
+HC-12 unless there is an explicit hardware bench-test reason.
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-serial3-loopback-9600 --build-property 'compiler.cpp.extra_flags=-DSERIAL3_LOOPBACK_BAUD=9600' firmware/serial3_loopback_test
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-serial3-loopback-9600 firmware/serial3_loopback_test
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+### Pin Finder Test
+
+Historical physical pin finder. Under the Fixed Wiring Plan, do not move GPS or
+HC-12 unless there is an explicit hardware bench-test reason.
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-pin-finder-d13-d14 firmware/pin_finder_test
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-pin-finder-d13-d14 firmware/pin_finder_test
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+### Do Not Repeat
+
+- Do not expect GPS in the default controller build under current fixed wiring;
+  `gps_chars=0` is expected there because default firmware still reads GPS from
+  `Serial3`.
+- Do not expect manual driving in `FIXED_WIRING_GPS_SERIAL2_DIAG`; motors are
+  neutral and HC-12 is disabled by design.
+- Do not connect both OpenRB USB and station USB-serial during OpenRB upload if
+  `arduino-cli` selects the wrong upload port.
+- If upload fails because it selected `/dev/cu.usbserial-02444963`, unplug the
+  station USB-serial and upload with only OpenRB connected.
+
+### Next Architecture
+
+For current fixed wiring, the future architecture should be a GPS `Serial2` +
+RC-controlled onboard mode:
+
+- Auto OFF: RC manual drive.
+- Auto ON: onboard GPS mission/autonomy, after explicit safety design and tests.
+- HC-12 is not used in this mode until hardware can be revised or proven
+  independent from GPS `Serial2`.
+- Station-side path planning remains dry-run until autonomy is explicitly
+  implemented and safety-gated.
+
+## Troubleshooting
+
+### GPS In Default Rover Controller
+
+Under current fixed wiring, do not treat default-build `gps_chars=0` as GPS
+failure. The default rover controller still reads GPS from `Serial3`, while the
+actual fixed GPS wiring is on `Serial2`. This build is kept as the HC-12/manual
+baseline.
+
+### GPS Serial2 Diagnostic Sky Test
+
+The `FIXED_WIRING_GPS_SERIAL2_DIAG` build has now been sky-tested:
+
+- `fixed_wiring_gps_serial2_diag=true`
+- `hc12_enabled=false`
+- `gps_chars` increased continuously
+- `gps_fix=true`
+- `gps_lat` / `gps_lon`, `gps_sats`, and `gps_hdop` became valid
+- motors remained disarmed/neutral
+
+This confirms GPS works through the fixed `Serial2` wiring inside integrated
+firmware when HC-12 is disabled for the diagnostic mode.
+
+### GPS Data But No Fix
+
+If `gps_chars>0` but `gps_fix=false`, GPS UART data is arriving but satellite
+fix quality is not sufficient yet. Indoor or window-side tests may receive NMEA
+bytes without acquiring a valid fix. For first fix, place the GPS antenna
+outdoors with open sky view and wait before changing firmware.
+
+If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
+configuration first.
 
 ## Software Architecture
 

@@ -82,6 +82,13 @@ Status:
   - `lon` around `129.1860`
   - `sats` around `5`
   - `hdop` around `1.61-1.62`
+- Integrated GPS `Serial2` diagnostic sky test succeeded:
+  - `fixed_wiring_gps_serial2_diag=true`
+  - `hc12_enabled=false`
+  - `gps_chars` increased continuously
+  - `gps_fix=true`
+  - latitude/longitude, satellites, and HDOP became valid
+  - motors remained disarmed/neutral
 - The integrated rover firmware currently defines:
 
 ```cpp
@@ -127,6 +134,44 @@ Next software milestone:
 - It must not implement autonomous movement.
 - It must not weaken manual control, STOP override, heartbeat timeout, or
   failsafe behavior.
+
+Do not repeat:
+
+- Do not treat `gps_chars=0` in the default controller build as GPS failure
+  under current fixed wiring. Default firmware still reads GPS from `Serial3`.
+- Do not expect manual driving in `FIXED_WIRING_GPS_SERIAL2_DIAG`; this mode is
+  for GPS testing only, disables/ignores HC-12, and forces motors neutral.
+- Do not connect both OpenRB USB and station USB-serial during OpenRB upload if
+  `arduino-cli` selects the wrong upload port.
+- If upload fails because it selected `/dev/cu.usbserial-02444963`, unplug the
+  station USB-serial and upload with only OpenRB connected.
+
+Next architecture:
+
+- For fixed wiring, implement a future GPS `Serial2` plus RC switch mode:
+  - Auto OFF: RC manual drive
+  - Auto ON: onboard GPS mission/autonomy after separate safety design
+- HC-12 is not used in that mode until hardware can be revised or proven
+  independent from GPS `Serial2`.
+
+## GPS Indoor Or Window-Side Fix Can Fail
+
+Status:
+
+- GPS UART bytes can arrive correctly while GPS fix remains false.
+- Indoor/window-side tests may show increasing `gps_chars`, valid NMEA
+  sentences, and TinyGPS++ character counts, but still fail to acquire enough
+  satellites.
+- Outdoor/open-sky antenna placement produced `gps_fix=true` in the
+  `FIXED_WIRING_GPS_SERIAL2_DIAG` build.
+
+Decision rule:
+
+- `gps_chars=0`: wiring, selected UART, baudrate, power, or GPS output problem.
+- `gps_chars>0` with `gps_fix=false`: GPS data is arriving, but satellite fix
+  quality is not sufficient yet.
+- For first fix, place the GPS antenna outdoors with open sky view and wait
+  before debugging firmware.
 
 ## Station HC-12 Device Still Needs Confirmation
 

@@ -329,6 +329,96 @@ Safety boundary:
 - Do not weaken STOP, heartbeat timeout, failsafe, manual override, or RC
   safety.
 
+## 2026-05-27: Default Firmware Restored And Mode Expectations
+
+Observed default firmware USBDBG:
+
+```text
+fixed_wiring_gps_serial2_diag=false
+hc12_enabled=true
+gps_chars=0
+mode=AUTO_READY
+auto_sw=true
+mode_us≈2000
+station_deadman=false
+control_source=STOP
+```
+
+Interpretation:
+
+- Default `openrb_robot_controller` was restored successfully.
+- `gps_chars=0` is expected in the default build because default firmware still
+  reads GPS from `Serial3`, while the fixed GPS wiring is on `Serial2`.
+- This should not be treated as GPS failure.
+- Manual control appears stopped because the RC mode switch is currently
+  AUTO_READY. To validate manual control, switch RC mode out of AUTO and verify
+  `control_source=RC_MANUAL`.
+- `FIXED_WIRING_GPS_SERIAL2_DIAG` is for GPS testing only:
+  - `GPS_SERIAL=Serial2`
+  - HC-12 disabled/ignored
+  - motors forced neutral
+  - manual driving does not work by design
+
+Do not repeat:
+
+- Do not expect GPS in the default build under current fixed wiring.
+- Do not expect manual driving in the GPS diagnostic build.
+- Do not connect both OpenRB USB and station USB-serial during OpenRB upload if
+  `arduino-cli` selects the wrong upload port.
+- If upload fails because it selected `/dev/cu.usbserial-02444963`, unplug the
+  station USB-serial and upload with only OpenRB connected.
+
+Next architecture:
+
+- For current fixed wiring, implement future GPS `Serial2` plus RC switch mode.
+- Auto OFF: RC manual drive.
+- Auto ON: onboard GPS mission/autonomy after separate safety design.
+- HC-12 is not used in this mode until hardware can be revised or proven
+  independent from GPS `Serial2`.
+- Station-side path planning remains dry-run.
+
+## 2026-05-27: GPS Serial2 Diagnostic Sky-Fix Success
+
+Firmware marker:
+
+```text
+openrb_robot_controller with FIXED_WIRING_GPS_SERIAL2_DIAG=1
+```
+
+Observed USBDBG:
+
+```text
+fixed_wiring_gps_serial2_diag=true
+hc12_enabled=false
+gps_chars increased continuously
+gps_fix=true
+gps_lat/gps_lon appeared
+gps_sats valid
+gps_hdop valid
+```
+
+Observed safety state:
+
+- HC-12 was disabled/ignored by the diagnostic build.
+- Motors remained disarmed/neutral.
+- No manual driving was expected or attempted in this diagnostic build.
+
+Interpretation:
+
+- Integrated firmware can read the fixed GPS wiring on `Serial2` at `9600`
+  when `FIXED_WIRING_GPS_SERIAL2_DIAG=1` is enabled.
+- The previous default-build `gps_chars=0` result is still expected and is not
+  GPS failure; default firmware reads GPS from `Serial3`.
+- Outdoor/open-sky placement is required for reliable first fix. Indoor or
+  window-side tests may receive NMEA bytes while failing to acquire enough
+  satellites for `gps_fix=true`.
+
+Next action:
+
+- Keep default firmware for HC-12/manual-control baseline.
+- Use the diagnostic build only for GPS `Serial2` debug with motors neutral.
+- Do not implement autonomy from this result alone.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:
