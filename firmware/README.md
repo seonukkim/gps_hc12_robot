@@ -165,19 +165,33 @@ commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
 ## I2C Scanner Test
 
 Use this standalone sketch to verify whether a device responds on the OpenRB
-hardware `Wire` I2C bus:
+default hardware `Wire` I2C bus:
 
 ```text
 firmware/i2c_scanner_test/i2c_scanner_test.ino
 ```
 
+OpenRB-150 variant files confirm the current fixed IMU wiring matches the
+board's default `Wire` pins:
+
+- Arduino D11 = SDA = PA08
+- Arduino D12 = SCL = PA09
+- `PIN_WIRE_SDA = 11`
+- `PIN_WIRE_SCL = 12`
+
 It uses `Wire`, USB Serial at `115200`, scans addresses `0x03` through `0x77`,
-and does not attach motors or Servo outputs. This scanner is only valid for the
-board's default hardware I2C pins. It is inconclusive for the current fixed IMU
-wiring on D11/D12. Addresses such as `0x68`, `0x69`, or `0x76` are common for
-some IMU/sensor modules, but address alone is not a device identification. The
-scanner prints a startup banner, Wire checkpoints, and `scan_pass=N
-found_count=M` every 2 seconds.
+and does not attach motors or Servo outputs. The scanner prints startup lines
+before `Wire.begin()`, reads D11/D12 pullup states before and after
+`Wire.begin()`, and prints `scan_pass`, `found_count`, found addresses, and
+`stable_valid_address` every 2 seconds. Addresses such as `0x68`, `0x69`, or
+`0x76` are common for some IMU/sensor modules, but address alone is not a
+device identification.
+
+A valid IMU result requires one stable address. If all addresses or more than 8
+addresses are found, treat the pass as invalid (`INVALID_SCAN_TOO_MANY_ADDRESSES`)
+and do not treat it as success. If D11/D12 read LOW with pullups enabled, treat
+that as an electrical or bus issue such as power, GND, pullups, or a stuck bus;
+do not treat it as a pin mapping issue.
 
 Compile:
 
@@ -203,7 +217,9 @@ messages were missed.
 
 ## D11/D12 Bit-Bang I2C Scanner
 
-Use this standalone sketch for the current fixed IMU wiring:
+Use this standalone sketch only as a secondary diagnostic. The current fixed IMU
+wiring is on OpenRB default `Wire` pins, so `firmware/i2c_scanner_test` is the
+primary scanner.
 
 ```text
 firmware/i2c_d11_d12_bitbang_scanner/i2c_d11_d12_bitbang_scanner.ino
@@ -241,8 +257,11 @@ Latest observed result:
   `SDA stuck low`, `SCL stuck low`, `raw_found_count=0`, `valid_found_count=0`,
   and `stable_valid_address=NA`.
 - IMU presence remains unverified.
-- Next diagnostic is a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
-- If SERCOM2 also fails, continue GPS+RC workflow without IMU support.
+- Because D11/D12 are OpenRB default `Wire` pins, the next diagnostic is the
+  robust default `Wire` scanner in `firmware/i2c_scanner_test`, not a custom
+  SERCOM2 scanner.
+- If the robust default `Wire` scanner also fails, continue GPS+RC workflow
+  without IMU support.
 
 Compile:
 

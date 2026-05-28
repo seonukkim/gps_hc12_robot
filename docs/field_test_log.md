@@ -705,7 +705,7 @@ Observed bit-bang scanner results:
   - `valid_found_count=0`
   - `stable_valid_address=NA`
 
-Interpretation:
+Initial interpretation:
 
 - IMU is not verified.
 - All-address detection was invalid and must not be treated as success.
@@ -715,10 +715,20 @@ Interpretation:
 - Do not rely on IMU data for autonomy yet.
 - Do not move IMU wires casually.
 
-Next action:
+Updated variant-file finding:
 
-- Create or run a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
-- If that also fails, continue GPS+RC workflow without IMU support.
+- OpenRB-150 variant files confirm:
+  - Arduino D11 = SDA = PA08
+  - Arduino D12 = SCL = PA09
+  - `PIN_WIRE_SDA = 11`
+  - `PIN_WIRE_SCL = 12`
+  - `Wire` is constructed using those pins
+- Therefore, do not create a custom SERCOM2 scanner yet.
+- The correct next diagnostic is a robust default `Wire` scanner for D11/D12.
+- D11/D12 stuck-low should be treated as an electrical or bus issue, such as
+  power, GND, pullups, or a stuck device, not as a pin mapping issue.
+- If the robust default `Wire` scanner also fails, continue GPS+RC workflow
+  without IMU support.
 - Do not enable motion based on IMU assumptions.
 
 ## Known Manual Direction Attempts

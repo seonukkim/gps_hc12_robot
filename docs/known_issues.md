@@ -224,12 +224,17 @@ Status:
 
 - The IMU wiring cannot be moved casually.
 - Current fixed wiring is believed to be:
-  - IMU SDA: OpenRB D11 / PA08 / SDA(SC2)
-  - IMU SCL: OpenRB D12 / PA09 / SCL(SC2)
-- The normal `Wire.begin()` scanner uses the board's default hardware I2C pins.
-  It does not scan arbitrary D11/D12 pins and is inconclusive for this wiring.
-- Use `firmware/i2c_d11_d12_bitbang_scanner` to test the current fixed IMU
-  wiring.
+  - IMU SDA: OpenRB D11 / PA08
+  - IMU SCL: OpenRB D12 / PA09
+- OpenRB-150 variant files confirm:
+  - Arduino D11 = SDA = PA08
+  - Arduino D12 = SCL = PA09
+  - `PIN_WIRE_SDA = 11`
+  - `PIN_WIRE_SCL = 12`
+  - `Wire` is constructed using those pins
+- Use `firmware/i2c_scanner_test` as the primary diagnostic for the current
+  fixed IMU wiring because D11/D12 are the board's default `Wire` pins.
+- Use `firmware/i2c_d11_d12_bitbang_scanner` only as a secondary diagnostic.
 - If the scanner reports every address, or a very large number of addresses,
   treat it as scanner/bus failure such as ACK stuck low. It is not evidence of
   many I2C devices.
@@ -240,17 +245,18 @@ Status:
   `released_sda=LOW`, `released_scl=LOW`, `SDA stuck low`, `SCL stuck low`,
   `raw_found_count=0`, `valid_found_count=0`, and `stable_valid_address=NA`.
 - IMU presence remains unverified.
-- The D11/D12 PA08/PA09 wiring may require a SERCOM2 hardware I2C setup instead
-  of software bit-bang.
-- Another possible cause is IMU power, GND, pullup, or a bus-stuck fault.
-- Next diagnostic is a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
-- If SERCOM2 also fails, continue GPS+RC work without relying on IMU data.
+- D11/D12 stuck-low means an electrical or bus issue, not a pin mapping issue.
+- Possible causes include IMU power, GND, pullups, or a bus-stuck fault.
+- Next diagnostic is the robust default `Wire` scanner for D11/D12, not a
+  custom SERCOM2 scanner.
+- If the robust default `Wire` scanner also fails, continue GPS+RC work without
+  relying on IMU data.
 
 Do not repeat:
 
-- Do not ask to move IMU wires to hardware SDA/SCL as a routine software step.
+- Do not ask to move IMU wires as a routine software step.
 - Do not conclude the IMU is absent only because `firmware/i2c_scanner_test`
-  finds no devices on hardware `Wire` pins.
+  finds no devices; verify the startup output and D11/D12 line states first.
 - Do not treat all-address detection as valid.
 - Do not infer device type from I2C address alone.
 - Do not rely on IMU heading or acceleration for autonomy until a stable I2C
@@ -325,7 +331,7 @@ Known boundaries:
 The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is
 not implemented in the current repo and the fixed D11/D12 IMU wiring is not yet
 verified. Do not build waypoint following as if heading is already available.
-First verify the IMU with a SERCOM2 D11/D12 hardware I2C scan, then verify
+First verify the IMU with the robust default `Wire` D11/D12 scanner, then verify
 orientation and axis signs. If the IMU remains unavailable, continue GPS+RC
 workflow without IMU-dependent autonomy.
 

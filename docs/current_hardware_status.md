@@ -49,9 +49,9 @@
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
-- Purple module: fixed wiring is believed to be SDA on OpenRB D11 / PA08 /
-  SDA(SC2) and SCL on OpenRB D12 / PA09 / SCL(SC2); it may be an IMU, but IMU
-  I2C presence remains unverified
+- Purple module: fixed wiring is believed to be SDA on OpenRB D11 / PA08 and
+  SCL on OpenRB D12 / PA09; OpenRB-150 variant files confirm D11/D12 are the
+  board's default `Wire` pins, but IMU I2C presence remains unverified
 - Fixed Wiring Plan: GPS remains on the central connector / `Serial2`; HC-12
   remains physically mounted as-is until its current wiring is audited
 
@@ -202,22 +202,31 @@ Current status:
   different wiring setup until revalidated.
 - Purple module uses fixed D11/D12 I2C-style wiring and should not be treated as
   UART.
-- IMU SCL is believed to be connected to OpenRB D12 / PA09 / SCL(SC2).
-- IMU SDA is believed to be connected to OpenRB D11 / PA08 / SDA(SC2).
+- IMU SCL is believed to be connected to OpenRB D12 / PA09.
+- IMU SDA is believed to be connected to OpenRB D11 / PA08.
+- OpenRB-150 variant files confirm:
+  - Arduino D11 = SDA = PA08
+  - Arduino D12 = SCL = PA09
+  - `PIN_WIRE_SDA = 11`
+  - `PIN_WIRE_SCL = 12`
+  - `Wire` is constructed using `PIN_WIRE_SDA` and `PIN_WIRE_SCL`
 - Do not ask to move the IMU wires to hardware SDA/SCL.
-- The normal `Wire.begin()` scanner checks the board's default hardware I2C
-  pins and is inconclusive for the current D11/D12 wiring.
+- The default `Wire.begin()` scanner is the correct primary scanner for the
+  current D11/D12 wiring.
 - D11/D12 and swapped D12/D11 assignments can be tested with compile-time pin
-  override without moving wires.
+  override in the bit-bang scanner without moving wires, but that scanner is now
+  secondary.
 - All-address detection is scanner/bus failure, not evidence of many devices.
 - Hardened bit-bang tests with both SDA=D11/SCL=D12 and SDA=D12/SCL=D11
   repeatedly reported `released_sda=LOW`, `released_scl=LOW`, `SDA stuck low`,
   `SCL stuck low`, `raw_found_count=0`, `valid_found_count=0`, and
   `stable_valid_address=NA`.
+- D11/D12 stuck-low should be treated as an electrical or bus issue, such as
+  IMU power, GND, pullups, or a stuck device, not as a pin mapping issue.
 - IMU presence and exact device identity remain unverified.
-- Next diagnostic is a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
-- If the SERCOM2 scanner also fails, continue the GPS+RC workflow without IMU
-  support instead of blocking on IMU integration.
+- Next diagnostic is the robust default `Wire` scanner for D11/D12.
+- If the robust default `Wire` scanner also fails, continue the GPS+RC workflow
+  without IMU support instead of blocking on IMU integration.
 
 ## Firmware mapping
 
@@ -246,7 +255,7 @@ Current status:
   candidate-command safety, but floor waypoint driving is blocked by the GPS
   antenna/body-frame issue.
 - Next required validation before motion:
-  - SERCOM2 hardware I2C scan for D11/D12 PA08/PA09
+  - robust default `Wire` I2C scan for D11/D12
   - IMU orientation/axis check
   - GPS mounted/open-sky candidate retest
   - wheel-off-ground bench test only after safety gates and sensor assumptions
