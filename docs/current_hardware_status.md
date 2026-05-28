@@ -33,6 +33,19 @@
   `control_source=RC_MANUAL` and stick-controlled `left_cmd` / `right_cmd`;
   AUTO mode prints `autonomy_dryrun=true`, GPS fields, target
   distance/bearing, keeps `left_cmd=0` / `right_cmd=0`, and does not move motors
+- Final unified dry-run USBDBG identification:
+  `fixed_wiring_gps_serial2_diag=false`, `hc12_enabled=false`, and
+  `autonomy_dryrun=true`; this confirms the running build is the unified
+  MANUAL RC + AUTO GPS dry-run build, not default HC-12 mode and not GPS-only
+  diagnostic mode
+- Final unified dry-run AUTO observation: `mode=AUTO_READY`, `auto_sw=true`,
+  `control_source=STOP`, `left_cmd=0.000`, and `right_cmd=0.000`
+- Final unified dry-run MANUAL observation: `mode=MANUAL`, `auto_sw=false`,
+  `control_source=RC_MANUAL`, and RC stick input changes manual command and
+  left/right command fields
+- Final unified dry-run GPS observation: `gps_chars` increases continuously,
+  open-sky antenna placement produced `gps_fix=true`, and
+  `target_distance_m` / `target_bearing_deg` were computed
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
@@ -185,11 +198,13 @@ Current status:
 
 ## Pending
 
-- Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
-  debug with motors neutral and HC-12 ignored.
 - Unified RC + GPS dry-run validation is complete. This is the first mode where
   MANUAL and GPS dry-run coexist in one firmware. AUTO is still
   computation-only and real motion is not enabled yet.
+- Next autonomy milestone is single-waypoint controlled motion preparation, not
+  full coverage/lawnmower driving.
+- Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
+  debug with motors neutral and HC-12 ignored.
 - Audit current HC-12 wiring from code, board inspection, and non-motion
   diagnostics.
 - If safe, run receive-only station telemetry testing.

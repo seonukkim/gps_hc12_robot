@@ -4,6 +4,17 @@ This project does not have real autonomous waypoint following yet. The current
 autonomy work is limited to a safe fixed-wiring dry-run mode that combines RC
 manual driving with GPS readiness calculations.
 
+## Status
+
+Unified fixed-wiring RC + GPS dry-run validation is complete. The next
+autonomy milestone is single-waypoint controlled motion preparation, not full
+coverage/lawnmower driving.
+
+Full coverage driving from `mission.json` / `mission.csv` is intentionally not
+the next step. The rover must first prove one carefully bounded waypoint motion
+with explicit safety gates, GPS validity policy, heading plan, manual override,
+and wheel-off-ground checks.
+
 ## Current Fixed-Wiring Dry-Run Mode
 
 Compile-time flag:
@@ -84,21 +95,30 @@ real waypoint following.
 
 ## Validation Result
 
-The unified fixed-wiring dry-run firmware was tested with
+The unified fixed-wiring dry-run firmware is complete and was tested with
 `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1`.
 
 Observed:
 
+- USBDBG identified the build as unified dry-run, not default and not GPS-only
+  diagnostic:
+  - `fixed_wiring_gps_serial2_diag=false`
+  - `hc12_enabled=false`
+  - `autonomy_dryrun=true`
 - `GPS_SERIAL=Serial2`.
 - HC-12 was disabled/ignored.
 - MANUAL mode worked with RC control.
 - `control_source=RC_MANUAL` in MANUAL mode.
-- Stick input changed `left_cmd` and `right_cmd`.
+- Stick input changed `manual_steer_cmd`, `manual_throttle_cmd`, `left_cmd`,
+  and `right_cmd`.
 - AUTO mode printed `autonomy_dryrun=true`.
 - AUTO mode printed GPS fields, `target_lat`, `target_lon`, and target
   distance/bearing fields.
 - With the antenna outside/open sky, `gps_fix=true` was observed.
-- AUTO mode kept `left_cmd=0` and `right_cmd=0`.
+- Earlier `gps_sats=0` / `gps_hdop=99.99` was poor antenna placement, not UART
+  failure.
+- AUTO mode used `control_source=STOP` and kept `left_cmd=0` and
+  `right_cmd=0`.
 - No motor movement occurred in AUTO dry-run.
 
 Rule:
@@ -107,6 +127,8 @@ Rule:
   firmware.
 - AUTO is still computation-only.
 - Real motion is not enabled yet.
+- MANUAL remains the recovery/manual override path.
+- HC-12 remains disabled in this fixed-wiring GPS mode.
 
 ## Readiness Logic
 
@@ -128,6 +150,14 @@ move.
 - Motor tests remain wheel-off-ground.
 
 ## Future Real Autonomy Requirements
+
+Next milestone:
+
+- Prepare single-waypoint controlled motion only.
+- Keep the waypoint target small and explicit.
+- Require GPS readiness, heading/attitude plan, RC override, STOP/failsafe
+  checks, and wheel-off-ground validation before any ground-contact test.
+- Do not jump directly to full coverage/lawnmower execution.
 
 Before implementing waypoint following:
 

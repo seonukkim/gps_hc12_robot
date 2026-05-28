@@ -49,6 +49,7 @@ Observed dry-run result:
 - `lane_count=6`.
 - `waypoint_count=13`.
 - The preview showed corner-to-corner lawnmower/boustrophedon lanes.
+- Path preview is complete for the current station-side milestone.
 - No rover firmware was modified.
 - No commands were sent to the rover.
 
@@ -188,7 +189,9 @@ Interpretation rules:
 - Do not connect this tool to HC-12.
 - Do not send the generated waypoints to the rover yet.
 - This mission output is not yet executed by the rover.
-- Next step is onboard mission dry-run, not real motion.
+- The generated missions are not yet executed by the rover.
+- The next rover-side autonomy step is single-waypoint controlled motion
+  preparation, not full coverage/lawnmower driving.
 - Keep the fixed-wiring RC + GPS firmware in dry-run mode for readiness checks
   only.
 - Real waypoint following requires a separate safety design, heading source,

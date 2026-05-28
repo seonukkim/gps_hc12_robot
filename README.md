@@ -195,14 +195,22 @@ Expected:
 
 Validated:
 
+- USBDBG identified the running build as the unified dry-run build:
+  `fixed_wiring_gps_serial2_diag=false`, `hc12_enabled=false`, and
+  `autonomy_dryrun=true`.
 - This is the first firmware mode where RC MANUAL driving and fixed-wiring GPS
   dry-run coexist in one build.
 - MANUAL mode was tested with `control_source=RC_MANUAL`, and stick input
-  changed `left_cmd` / `right_cmd`.
+  changed `manual_steer_cmd`, `manual_throttle_cmd`, `left_cmd`, and
+  `right_cmd`.
 - AUTO mode was tested with `autonomy_dryrun=true`, GPS fields,
-  target distance/bearing fields, and `left_cmd=0` / `right_cmd=0`.
+  target distance/bearing fields, `control_source=STOP`, and `left_cmd=0` /
+  `right_cmd=0`.
 - With the antenna outside/open sky, `gps_fix=true` was observed.
-- AUTO is still computation-only. Real motion is not enabled yet.
+- Earlier `gps_sats=0` / `gps_hdop=99.99` was antenna placement, not UART
+  failure.
+- AUTO is still computation-only. Real motion is not enabled yet, and HC-12 is
+  disabled in this fixed-wiring GPS mode.
 
 ### Standalone GPS Probe
 
@@ -482,8 +490,9 @@ ls -lh outputs/missions/codex_corner_rectangle_smoke/preview.png
 
 See [docs/station_path_planning.md](docs/station_path_planning.md). Path
 generation remains dry-run only and must not be sent to the rover yet. The
-tested mission output is not yet executed by the rover; the next step is onboard
-mission dry-run, not real motion.
+tested mission output is not yet executed by the rover. The unified onboard
+RC + GPS dry-run is complete, so the next autonomy step is single-waypoint
+controlled motion preparation, not full coverage/lawnmower driving.
 
 Edge/remainder policy: if the rectangle extent is not exactly divisible by
 `lane_spacing_m`, a small remaining margin at the edge is acceptable. Do not add

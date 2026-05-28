@@ -142,6 +142,9 @@ Do not repeat:
   under current fixed wiring. Default firmware still reads GPS from `Serial3`.
 - Do not expect manual driving in `FIXED_WIRING_GPS_SERIAL2_DIAG`; this mode is
   for GPS testing only, disables/ignores HC-12, and forces motors neutral.
+- Do not expect HC-12 in fixed-wiring GPS modes. HC-12 remains
+  disabled/ignored there because GPS and HC-12 cannot both use the current
+  `Serial2` wiring safely.
 - Do not connect both OpenRB USB and station USB-serial during OpenRB upload if
   `arduino-cli` selects the wrong upload port.
 - If upload fails because it selected `/dev/cu.usbserial-02444963`, unplug the
@@ -216,14 +219,20 @@ integration step, not waypoint following.
 
 Validated behavior:
 
+- USBDBG build identity for the completed validation:
+  `fixed_wiring_gps_serial2_diag=false`, `hc12_enabled=false`, and
+  `autonomy_dryrun=true`.
 - This is the first firmware mode where MANUAL and GPS dry-run coexist in one
   firmware.
 - MANUAL mode works with `control_source=RC_MANUAL`, and stick input changes
-  `left_cmd` / `right_cmd`.
+  `manual_steer_cmd`, `manual_throttle_cmd`, `left_cmd`, and `right_cmd`.
 - AUTO mode prints `autonomy_dryrun=true`, GPS fields, and target
   distance/bearing fields.
-- AUTO mode keeps `left_cmd=0` and `right_cmd=0`.
+- AUTO mode must keep `control_source=STOP`, `left_cmd=0`, and `right_cmd=0`.
 - No motor movement occurs in AUTO dry-run.
+- GPS may show increasing `gps_chars` indoors or near a window while still
+  failing to fix; open-sky antenna placement is required before treating this
+  as firmware failure.
 
 Known boundaries:
 

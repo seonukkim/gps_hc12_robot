@@ -578,6 +578,59 @@ Safety and next step:
 - Real autonomous motion remains disabled until a separate safety-gated
   milestone.
 
+## 2026-05-28: Unified Fixed-Wiring RC + GPS Dry-Run Complete
+
+USBDBG build identification:
+
+- `fixed_wiring_gps_serial2_diag=false`
+- `hc12_enabled=false`
+- `autonomy_dryrun=true`
+
+Interpretation:
+
+- The running firmware was the unified fixed-wiring RC + GPS dry-run build.
+- It was not the GPS-only diagnostic build.
+- It was not the default HC-12/manual legacy build.
+
+AUTO / dry-run safety:
+
+- `mode=AUTO_READY`
+- `auto_sw=true`
+- `control_source=STOP`
+- `left_cmd=0.000`
+- `right_cmd=0.000`
+
+This confirms AUTO dry-run did not drive motors.
+
+MANUAL:
+
+- `mode=MANUAL`
+- `auto_sw=false`
+- `control_source=RC_MANUAL`
+- RC stick input changed `manual_steer_cmd`, `manual_throttle_cmd`,
+  `left_cmd`, and `right_cmd`.
+
+This confirms manual driving remains available in the unified dry-run build.
+
+GPS:
+
+- `gps_chars` increased continuously.
+- `gps_fix=true` appeared when the external antenna had open-sky exposure.
+- `gps_lat` and `gps_lon` appeared.
+- `target_distance_m` and `target_bearing_deg` were computed.
+- Earlier `gps_sats=0` / `gps_hdop=99.99` was poor antenna placement, not UART
+  failure.
+
+Safety interpretation:
+
+- AUTO is still computation-only.
+- No real autonomous motion is enabled yet.
+- MANUAL remains the recovery/manual override path.
+- HC-12 is disabled in this fixed-wiring GPS mode because GPS and HC-12 cannot
+  both use the current `Serial2` wiring safely.
+- Next step is single-waypoint controlled motion preparation, not full
+  coverage/lawnmower driving.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

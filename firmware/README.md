@@ -19,6 +19,14 @@ It prints this USB startup marker when the expected firmware is running:
 Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
 ```
 
+## Firmware Modes
+
+| Mode | Compile flag | Purpose | GPS | HC-12 | Motors |
+|---|---|---|---|---|---|
+| Default `openrb_robot_controller` | none | HC-12/manual legacy mode | default firmware reads `Serial3`; current fixed GPS wiring is not available here | enabled | normal safety-gated behavior |
+| GPS-only diagnostic | `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | fixed GPS `Serial2` debug over USB | `Serial2` at `9600` | disabled/ignored | forced neutral |
+| MANUAL RC + AUTO GPS dry-run | `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | RC manual driving plus AUTO GPS distance/bearing computation | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO forced neutral |
+
 Exact macOS Arduino CLI path used in this repo:
 
 ```bash
@@ -86,6 +94,20 @@ The dry-run distance/bearing helpers are Arduino-side only. Validate them from
 USB debug output: with `gps_fix=true`, `target_distance_m` should be finite,
 `target_bearing_deg` should remain in `0..360`, and AUTO mode must still keep
 `left_cmd=0` and `right_cmd=0`.
+
+Completed unified dry-run validation:
+
+- Running build identified by USBDBG:
+  `fixed_wiring_gps_serial2_diag=false`, `hc12_enabled=false`, and
+  `autonomy_dryrun=true`.
+- MANUAL mode: `mode=MANUAL`, `auto_sw=false`,
+  `control_source=RC_MANUAL`, and RC stick input changes manual command and
+  left/right command fields.
+- AUTO mode: `mode=AUTO_READY`, `auto_sw=true`,
+  `control_source=STOP`, `left_cmd=0.000`, and `right_cmd=0.000`.
+- GPS: `gps_chars` increases continuously, `gps_fix=true` appears with
+  open-sky antenna placement, and target distance/bearing fields are computed.
+- This build still has no autonomous motor output.
 
 When uploading a compile-time variant, upload the matching build directory.
 
