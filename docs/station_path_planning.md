@@ -1,19 +1,20 @@
 # Station Path Planning Dry-Run
 
-This workflow generates a station-side coverage mission from two GPS points and
-a requested sweep width. It is file generation only. It does not open a serial
-port, does not send HC-12 frames, and does not command the rover.
+This workflow generates a station-side coverage mission from two GPS corner
+points. It is file generation only. It does not open a serial port, does not
+send HC-12 frames, and does not command the rover.
 
 ## Inputs
 
-- Point A latitude/longitude
-- Point B latitude/longitude
-- Sweep width in meters
-- Lane spacing in meters
+- Point A latitude/longitude: start corner of the coverage rectangle
+- Point B latitude/longitude: opposite/end corner of the coverage rectangle
+- Lane spacing in meters: sweep interval between lanes
 - Optional speed in meters per second
 
-Point A and Point B define the baseline of the coverage region. The sweep width
-extends to the left side of the A-to-B baseline in the local metric frame.
+Default planner mode is `corner-rectangle`. Point A and Point B define an
+axis-aligned rectangle in the local East/North metric frame. Point A is local
+`(0, 0)`, and Point B is the intended final corner. `--sweep-width-m` is not
+used in this default mode.
 
 ## Command
 
@@ -22,11 +23,10 @@ Exact tested command:
 ```bash
 uv run python scripts/station/plan_coverage_path.py \
   --point-a 35.571070,129.186000 \
-  --point-b 35.571070,129.186300 \
-  --sweep-width-m 20.0 \
+  --point-b 35.571250,129.186300 \
   --lane-spacing-m 5.0 \
   --speed-mps 0.4 \
-  --mission-name codex_station_path_smoke
+  --mission-name codex_corner_rectangle_smoke
 ```
 
 Default output directory:
@@ -38,32 +38,51 @@ outputs/missions/
 Generated files:
 
 ```text
-outputs/missions/codex_station_path_smoke/mission.json
-outputs/missions/codex_station_path_smoke/mission.csv
-outputs/missions/codex_station_path_smoke/preview.png
+outputs/missions/codex_corner_rectangle_smoke/mission.json
+outputs/missions/codex_corner_rectangle_smoke/mission.csv
+outputs/missions/codex_corner_rectangle_smoke/preview.png
 ```
 
 Observed dry-run result:
 
 - `mission.json`, `mission.csv`, and `preview.png` were generated.
-- The preview showed lawnmower/boustrophedon lanes.
+- `lane_count=6`.
+- `waypoint_count=13`.
+- The preview showed corner-to-corner lawnmower/boustrophedon lanes.
 - No rover firmware was modified.
 - No commands were sent to the rover.
 
 ## Geometry
 
-The tool converts latitude/longitude into a local East/North meter frame using
-Point A as the origin. It then generates a boustrophedon path:
+The default tool converts latitude/longitude into a local East/North meter
+frame using Point A as the origin. It then builds an axis-aligned local
+rectangle from Point A and Point B:
 
-- even-numbered lanes run from the A side toward the B side;
-- odd-numbered lanes run back from the B side toward the A side;
-- lane offsets include both the near edge and far edge of the requested sweep
-  width;
-- if the sweep width is not divisible by the lane spacing, the final lane is
-  placed on the far sweep edge.
+- local Point A is the start corner;
+- local Point B is the opposite/end corner;
+- lanes run parallel to the local east/west extent;
+- lane offsets advance along the local north/south extent;
+- offsets are `0, lane_spacing, 2*lane_spacing, ..., final_extent`;
+- the final rectangle boundary is always included, even when the residual strip
+  is smaller than `lane_spacing_m`;
+- when the alternating lane order would not naturally end at Point B, the
+  planner adds a final connector waypoint with a `notes` field.
 
 The generated local waypoints are converted back to latitude/longitude before
 being written to JSON and CSV.
+
+The previous baseline plus width behavior is retained only as an explicit
+legacy mode:
+
+```bash
+uv run python scripts/station/plan_coverage_path.py \
+  --planner-mode baseline-width \
+  --point-a 35.571070,129.186000 \
+  --point-b 35.571070,129.186300 \
+  --sweep-width-m 20.0 \
+  --lane-spacing-m 5.0 \
+  --mission-name codex_baseline_width_legacy
+```
 
 ## Mission JSON
 
@@ -74,12 +93,14 @@ The JSON file contains:
 - `dry_run=true`;
 - `sends_rover_commands=false`;
 - local origin;
+- local Point A and Point B roles;
 - local frame description;
 - coverage boundary;
-- lane/waypoint summary;
+- lane/waypoint summary, including rectangle extents in default
+  `corner-rectangle` mode;
 - explicit safety notes;
-- generated waypoints with lat/lon, local `x_m` / `y_m`, lane index, order, and
-  optional `speed_mps`.
+- generated waypoints with index, lat/lon, local `x_m` / `y_m`, lane index,
+  `segment_type`, `notes`, and optional `speed_mps`.
 
 ## Mission CSV
 
@@ -91,6 +112,7 @@ The CSV file includes at least:
 - `x_m`
 - `y_m`
 - `segment_type`
+- `notes`
 
 The extra columns `lane`, `offset_m`, and `speed_mps` are included for dry-run
 inspection.
@@ -99,11 +121,12 @@ inspection.
 
 The preview image shows:
 
-- point A;
-- point B;
+- Point A as the start corner;
+- Point B as the intended final/end corner;
 - generated lanes;
 - waypoint order labels;
-- the sweep boundary rectangle.
+- lane spacing and final residual strip note when present;
+- the coverage boundary rectangle.
 
 ## Safety Rules
 

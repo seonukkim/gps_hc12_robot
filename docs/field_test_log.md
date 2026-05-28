@@ -503,6 +503,56 @@ Rule:
 - This mission output is not yet executed by the rover.
 - Next step is onboard mission dry-run, not real motion.
 
+## 2026-05-28: Station Planner Geometry Correction
+
+Issue found:
+
+- The first station-side coverage planner interpreted Point A and Point B as the
+  baseline of one side of the work area.
+- `sweep_width_m` expanded the area perpendicular to that baseline.
+- That made Point B appear on the first lane instead of representing the final
+  opposite corner of the coverage rectangle.
+
+Correction:
+
+- Default planner mode is now `corner-rectangle`.
+- Point A is the start corner of the work rectangle.
+- Point B is the opposite/end corner of the work rectangle.
+- A/B define an axis-aligned rectangle in the local East/North frame.
+- `lane_spacing_m` is the sweep interval.
+- `sweep_width_m` is not used in the default mode.
+- The final boundary lane is always included, even when the residual strip is
+  smaller than `lane_spacing_m`.
+- A final connector waypoint is added when needed so the mission ends exactly at
+  Point B.
+
+Corrected dry-run command:
+
+```bash
+uv run python scripts/station/plan_coverage_path.py \
+  --point-a 35.571070,129.186000 \
+  --point-b 35.571250,129.186300 \
+  --lane-spacing-m 5.0 \
+  --speed-mps 0.4 \
+  --mission-name codex_corner_rectangle_smoke
+```
+
+Observed corrected result:
+
+- `dry_run=true`.
+- `sends_rover_commands=false`.
+- `lane_count=6`.
+- `waypoint_count=13`.
+- `mission.json`, `mission.csv`, and `preview.png` were generated under
+  `outputs/missions/codex_corner_rectangle_smoke/`.
+
+Safety:
+
+- No rover firmware was modified.
+- No serial port was opened.
+- No HC-12 frames or rover commands were sent.
+- This remains PC/Mac-side mission-file generation only.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

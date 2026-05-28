@@ -441,32 +441,36 @@ uv run python tools/station_mock_mission.py \
   --out-dir data/mock_runs/example
 ```
 
-Generate a station-side coverage mission dry-run from A/B GPS points and sweep
-settings. This writes JSON, CSV, and PNG files under `outputs/missions/` and
-sends no rover commands:
+Generate a station-side coverage mission dry-run from GPS corner points. Point
+A is the start corner, Point B is the opposite/end corner, and
+`lane_spacing_m` is the sweep interval. The default `corner-rectangle` mode
+does not use `sweep_width_m`. This writes JSON, CSV, and PNG files under
+`outputs/missions/` and sends no rover commands:
 
 ```bash
 uv run python scripts/station/plan_coverage_path.py \
   --point-a 35.571070,129.186000 \
-  --point-b 35.571070,129.186300 \
-  --sweep-width-m 20.0 \
+  --point-b 35.571250,129.186300 \
   --lane-spacing-m 5.0 \
   --speed-mps 0.4 \
-  --mission-name codex_station_path_smoke
+  --mission-name codex_corner_rectangle_smoke
 ```
 
 Outputs:
 
 ```text
-outputs/missions/codex_station_path_smoke/mission.json
-outputs/missions/codex_station_path_smoke/mission.csv
-outputs/missions/codex_station_path_smoke/preview.png
+outputs/missions/codex_corner_rectangle_smoke/mission.json
+outputs/missions/codex_corner_rectangle_smoke/mission.csv
+outputs/missions/codex_corner_rectangle_smoke/preview.png
 ```
 
 See [docs/station_path_planning.md](docs/station_path_planning.md). Path
 generation remains dry-run only and must not be sent to the rover yet. The
 tested mission output is not yet executed by the rover; the next step is onboard
 mission dry-run, not real motion.
+
+The previous A/B baseline plus sweep-width interpretation is retained only
+behind `--planner-mode baseline-width --sweep-width-m ...` for comparison.
 
 Generate a standalone path preview figure:
 

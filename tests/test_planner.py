@@ -3,8 +3,10 @@ import math
 import pytest
 
 from gps_coverage_core.planner import (
+    generate_corner_rectangle_path_local,
     generate_coverage_path,
     generate_lawnmower_path,
+    lane_offsets_for_extent,
     lane_offsets_for_sweep_width,
     latlon_to_xy,
     xy_to_latlon,
@@ -80,6 +82,37 @@ def test_lane_offsets_include_far_sweep_edge() -> None:
     assert lane_offsets_for_sweep_width(12.0, 5.0) == pytest.approx(
         [0.0, 5.0, 10.0, 12.0]
     )
+
+
+def test_corner_rectangle_offsets_include_boundary() -> None:
+    assert lane_offsets_for_extent(20.0, 5.0) == pytest.approx(
+        [0.0, 5.0, 10.0, 15.0, 20.0]
+    )
+    assert lane_offsets_for_extent(22.0, 5.0) == pytest.approx(
+        [0.0, 5.0, 10.0, 15.0, 20.0, 22.0]
+    )
+
+
+def test_corner_rectangle_path_starts_at_a_and_ends_at_b_when_possible() -> None:
+    path = generate_corner_rectangle_path_local(27.0, 20.0, lane_spacing_m=5.0)
+
+    assert (path[0]["x_m"], path[0]["y_m"]) == pytest.approx((0.0, 0.0))
+    assert (path[-1]["x_m"], path[-1]["y_m"]) == pytest.approx((27.0, 20.0))
+    assert path[-1]["notes"] == "point B final target"
+    assert [point["offset_m"] for point in path[::2]] == pytest.approx(
+        [0.0, 5.0, 10.0, 15.0, 20.0]
+    )
+
+
+def test_corner_rectangle_path_adds_final_connector_when_needed() -> None:
+    path = generate_corner_rectangle_path_local(27.0, 22.0, lane_spacing_m=5.0)
+
+    assert [point["offset_m"] for point in path[::2]][:6] == pytest.approx(
+        [0.0, 5.0, 10.0, 15.0, 20.0, 22.0]
+    )
+    assert (path[-1]["x_m"], path[-1]["y_m"]) == pytest.approx((27.0, 22.0))
+    assert path[-1]["segment_type"] == "final_connector"
+    assert "point B" in str(path[-1]["notes"])
 
 
 def test_coverage_path_uses_sweep_width_and_alternates_direction() -> None:

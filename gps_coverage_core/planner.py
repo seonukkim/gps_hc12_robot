@@ -62,6 +62,100 @@ def lane_offsets_for_sweep_width(sweep_width_m: float, lane_spacing_m: float) ->
     return offsets
 
 
+def lane_offsets_for_extent(extent_m: float, lane_spacing_m: float) -> list[float]:
+    """Return offsets from zero to the final extent, always including the boundary."""
+    return lane_offsets_for_sweep_width(extent_m, lane_spacing_m)
+
+
+def _signed_lane_offsets(extent_m: float, lane_spacing_m: float) -> list[float]:
+    sign = -1.0 if extent_m < 0.0 else 1.0
+    return [sign * offset for offset in lane_offsets_for_extent(abs(extent_m), lane_spacing_m)]
+
+
+def generate_corner_rectangle_path_local(
+    end_x_m: float,
+    end_y_m: float,
+    lane_spacing_m: float,
+    speed_mps: float | None = None,
+) -> list[dict[str, float | int | str]]:
+    """Generate a boustrophedon path from local A=(0,0) to opposite corner B."""
+    if lane_spacing_m <= 0:
+        raise ValueError("lane_spacing_m must be positive")
+    if speed_mps is not None and speed_mps <= 0:
+        raise ValueError("speed_mps must be positive when provided")
+    if math.isclose(end_x_m, 0.0, abs_tol=1e-9) or math.isclose(end_y_m, 0.0, abs_tol=1e-9):
+        raise ValueError("point_a and point_b must define a non-zero rectangle")
+
+    offsets = _signed_lane_offsets(end_y_m, lane_spacing_m)
+    waypoints: list[dict[str, float | int | str]] = []
+    order = 0
+    for lane, y_m in enumerate(offsets):
+        endpoints = ((0.0, y_m), (end_x_m, y_m))
+        if lane % 2 == 1:
+            endpoints = (endpoints[1], endpoints[0])
+
+        for point_index, (x_m, lane_y_m) in enumerate(endpoints):
+            waypoint: dict[str, float | int | str] = {
+                "order": order,
+                "lane": lane,
+                "x_m": x_m,
+                "y_m": lane_y_m,
+                "offset_m": abs(lane_y_m),
+                "segment_type": "lane_start" if point_index == 0 else "lane_end",
+                "notes": "",
+            }
+            if speed_mps is not None:
+                waypoint["speed_mps"] = speed_mps
+            waypoints.append(waypoint)
+            order += 1
+
+    last = waypoints[-1]
+    if not (
+        math.isclose(float(last["x_m"]), end_x_m, abs_tol=1e-9)
+        and math.isclose(float(last["y_m"]), end_y_m, abs_tol=1e-9)
+    ):
+        connector: dict[str, float | int | str] = {
+            "order": order,
+            "lane": int(last["lane"]),
+            "x_m": end_x_m,
+            "y_m": end_y_m,
+            "offset_m": abs(end_y_m),
+            "segment_type": "final_connector",
+            "notes": "final connector added to end exactly at point B",
+        }
+        if speed_mps is not None:
+            connector["speed_mps"] = speed_mps
+        waypoints.append(connector)
+    else:
+        last["notes"] = "point B final target"
+
+    return waypoints
+
+
+def generate_corner_rectangle_path(
+    point_a: Mapping[str, Any] | Any,
+    point_b: Mapping[str, Any] | Any,
+    lane_spacing_m: float,
+    speed_mps: float | None = None,
+) -> list[dict[str, float | int | str]]:
+    """Generate a dry-run path inside the local ENU rectangle defined by A and B."""
+    lat_a, lon_a = _coerce_point(point_a, "point_a")
+    lat_b, lon_b = _coerce_point(point_b, "point_b")
+    end_x_m, end_y_m = latlon_to_xy(lat_b, lon_b, lat_a, lon_a)
+
+    waypoints = generate_corner_rectangle_path_local(
+        end_x_m=end_x_m,
+        end_y_m=end_y_m,
+        lane_spacing_m=lane_spacing_m,
+        speed_mps=speed_mps,
+    )
+    for waypoint in waypoints:
+        lat, lon = xy_to_latlon(float(waypoint["x_m"]), float(waypoint["y_m"]), lat_a, lon_a)
+        waypoint["lat"] = lat
+        waypoint["lon"] = lon
+    return waypoints
+
+
 def generate_coverage_path(
     point_a: Mapping[str, Any] | Any,
     point_b: Mapping[str, Any] | Any,

@@ -19,7 +19,11 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from gps_coverage_core.planner import generate_coverage_path, latlon_to_xy
+from gps_coverage_core.planner import (
+    generate_corner_rectangle_path,
+    generate_coverage_path,
+    latlon_to_xy,
+)
 
 CSV_FIELDS = (
     "index",
@@ -31,6 +35,7 @@ CSV_FIELDS = (
     "lane",
     "offset_m",
     "speed_mps",
+    "notes",
 )
 
 
@@ -72,10 +77,36 @@ def build_parser() -> argparse.ArgumentParser:
             "This writes mission files only and sends no rover commands."
         )
     )
-    parser.add_argument("--point-a", type=parse_lat_lon, required=True, help="Point A as LAT,LON")
-    parser.add_argument("--point-b", type=parse_lat_lon, required=True, help="Point B as LAT,LON")
-    parser.add_argument("--sweep-width-m", type=float, required=True, help="Coverage width in meters")
-    parser.add_argument("--lane-spacing-m", type=float, required=True, help="Lane spacing in meters")
+    parser.add_argument(
+        "--point-a",
+        type=parse_lat_lon,
+        required=True,
+        help="Start corner as LAT,LON.",
+    )
+    parser.add_argument(
+        "--point-b",
+        type=parse_lat_lon,
+        required=True,
+        help="Opposite/end corner as LAT,LON in the default corner-rectangle mode.",
+    )
+    parser.add_argument(
+        "--planner-mode",
+        choices=("corner-rectangle", "baseline-width"),
+        default="corner-rectangle",
+        help="Planning geometry. Default: corner-rectangle.",
+    )
+    parser.add_argument(
+        "--sweep-width-m",
+        type=float,
+        default=None,
+        help="Coverage width in meters. Required only for --planner-mode baseline-width.",
+    )
+    parser.add_argument(
+        "--lane-spacing-m",
+        type=float,
+        required=True,
+        help="Lane spacing / sweep interval in meters.",
+    )
     parser.add_argument("--speed-mps", type=float, default=None, help="Optional dry-run speed metadata")
     parser.add_argument(
         "--mission-name",
@@ -91,12 +122,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if args.planner_mode == "baseline-width" and args.sweep_width_m is None:
+        raise SystemExit("--sweep-width-m is required when --planner-mode baseline-width")
+    if args.planner_mode == "corner-rectangle" and args.sweep_width_m is not None:
+        print("warning: --sweep-width-m is ignored in corner-rectangle mode", file=sys.stderr)
+
+
 def _lane_length_m(point_a: dict[str, float], point_b: dict[str, float]) -> float:
     bx_m, by_m = latlon_to_xy(point_b["lat"], point_b["lon"], point_a["lat"], point_a["lon"])
     return (bx_m**2 + by_m**2) ** 0.5
 
 
-def _coverage_boundary(waypoints: list[dict[str, float | int]]) -> list[tuple[float, float]]:
+def _coverage_boundary(waypoints: list[dict[str, float | int | str]]) -> list[tuple[float, float]]:
     lane0 = [waypoint for waypoint in waypoints if int(waypoint["lane"]) == 0]
     max_lane = max(int(waypoint["lane"]) for waypoint in waypoints)
     lane_last = [waypoint for waypoint in waypoints if int(waypoint["lane"]) == max_lane]
@@ -116,13 +154,29 @@ def _coverage_boundary(waypoints: list[dict[str, float | int]]) -> list[tuple[fl
     ]
 
 
+def _corner_rectangle_boundary(point_b_local: dict[str, float]) -> list[tuple[float, float]]:
+    min_x = min(0.0, point_b_local["x_m"])
+    max_x = max(0.0, point_b_local["x_m"])
+    min_y = min(0.0, point_b_local["y_m"])
+    max_y = max(0.0, point_b_local["y_m"])
+    return [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+        (min_x, min_y),
+    ]
+
+
 def _mission_waypoints(
-    waypoints: list[dict[str, float | int]],
+    waypoints: list[dict[str, float | int | str]],
 ) -> list[dict[str, float | int | str]]:
     mission_waypoints: list[dict[str, float | int | str]] = []
     for waypoint in waypoints:
         index = int(waypoint["order"])
-        segment_type = "lane_start" if index % 2 == 0 else "lane_end"
+        segment_type = str(
+            waypoint.get("segment_type", "lane_start" if index % 2 == 0 else "lane_end")
+        )
         mission_waypoint: dict[str, float | int | str] = {
             "index": index,
             "lat": float(waypoint["lat"]),
@@ -132,6 +186,7 @@ def _mission_waypoints(
             "segment_type": segment_type,
             "lane": int(waypoint["lane"]),
             "offset_m": float(waypoint["offset_m"]),
+            "notes": str(waypoint.get("notes", "")),
         }
         if "speed_mps" in waypoint:
             mission_waypoint["speed_mps"] = float(waypoint["speed_mps"])
@@ -144,17 +199,29 @@ def build_mission(
     mission_name: str,
     point_a: dict[str, float],
     point_b: dict[str, float],
-    sweep_width_m: float,
+    planner_mode: str,
+    sweep_width_m: float | None,
     lane_spacing_m: float,
     speed_mps: float | None,
-    waypoints: list[dict[str, float | int]],
+    waypoints: list[dict[str, float | int | str]],
 ) -> dict[str, Any]:
     mission_waypoints = _mission_waypoints(waypoints)
     lane_count = len({int(waypoint["lane"]) for waypoint in waypoints})
-    boundary = [
-        {"x_m": x_m, "y_m": y_m}
-        for x_m, y_m in _coverage_boundary(waypoints)
-    ]
+    point_b_x_m, point_b_y_m = latlon_to_xy(
+        point_b["lat"], point_b["lon"], point_a["lat"], point_a["lon"]
+    )
+    point_b_local = {"x_m": point_b_x_m, "y_m": point_b_y_m}
+    if planner_mode == "corner-rectangle":
+        boundary_points = _corner_rectangle_boundary(point_b_local)
+        lane_length_m = abs(point_b_x_m)
+        rectangle_x_extent_m = abs(point_b_x_m)
+        rectangle_y_extent_m = abs(point_b_y_m)
+    else:
+        boundary_points = _coverage_boundary(waypoints)
+        lane_length_m = _lane_length_m(point_a, point_b)
+        rectangle_x_extent_m = None
+        rectangle_y_extent_m = None
+    boundary = [{"x_m": x_m, "y_m": y_m} for x_m, y_m in boundary_points]
 
     return {
         "schema": "station_coverage_path.v1",
@@ -163,6 +230,7 @@ def build_mission(
             "generated_at": dt.datetime.now(tz=dt.UTC).isoformat(),
             "dry_run": True,
             "sends_rover_commands": False,
+            "planner_mode": planner_mode,
         },
         "inputs": {
             "point_a": point_a,
@@ -176,17 +244,27 @@ def build_mission(
             "lon": point_a["lon"],
             "description": "point_a",
         },
+        "input_points_local": {
+            "point_a": {"x_m": 0.0, "y_m": 0.0, "role": "start corner"},
+            "point_b": {
+                "x_m": point_b_x_m,
+                "y_m": point_b_y_m,
+                "role": "opposite/end corner",
+            },
+        },
         "local_frame": {
             "x_m": "east",
             "y_m": "north",
-            "baseline": "point_a_to_point_b",
-            "sweep_side": "left_of_baseline",
+            "planner_mode": planner_mode,
+            "corner_rectangle_rule": "point_a and point_b are opposite corners",
         },
         "summary": {
             "lane_count": lane_count,
             "waypoint_count": len(mission_waypoints),
-            "lane_length_m": _lane_length_m(point_a, point_b),
+            "lane_length_m": lane_length_m,
             "sweep_width_m": sweep_width_m,
+            "rectangle_x_extent_m": rectangle_x_extent_m,
+            "rectangle_y_extent_m": rectangle_y_extent_m,
         },
         "coverage_boundary": boundary,
         "safety": [
@@ -223,10 +301,26 @@ def save_preview_png(path: Path, mission: dict[str, Any]) -> None:
     by = [float(point["y_m"]) for point in boundary]
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(bx, by, linestyle="--", color="tab:gray", linewidth=1.2, label="sweep boundary")
+    ax.plot(bx, by, linestyle="--", color="tab:gray", linewidth=1.2, label="coverage boundary")
     ax.plot(xs, ys, marker="o", linewidth=1.5, label="boustrophedon path")
-    ax.scatter([xs[0]], [ys[0]], color="tab:green", s=70, label="Point A")
-    ax.scatter([xs[1]], [ys[1]], color="tab:red", s=70, label="Point B")
+    point_a_local = mission["input_points_local"]["point_a"]
+    point_b_local = mission["input_points_local"]["point_b"]
+    ax.scatter(
+        [float(point_a_local["x_m"])],
+        [float(point_a_local["y_m"])],
+        color="tab:green",
+        s=70,
+        label="Point A start",
+        zorder=5,
+    )
+    ax.scatter(
+        [float(point_b_local["x_m"])],
+        [float(point_b_local["y_m"])],
+        color="tab:red",
+        s=70,
+        label="Point B final/end corner",
+        zorder=5,
+    )
 
     for waypoint in waypoints:
         ax.annotate(
@@ -237,6 +331,24 @@ def save_preview_png(path: Path, mission: dict[str, Any]) -> None:
             fontsize=8,
         )
 
+    lane_spacing_m = float(mission["inputs"]["lane_spacing_m"])
+    if mission["metadata"]["planner_mode"] == "corner-rectangle":
+        sweep_extent_m = float(mission["summary"]["rectangle_y_extent_m"])
+    else:
+        sweep_extent_m = float(mission["summary"]["sweep_width_m"])
+    residual_m = sweep_extent_m % lane_spacing_m
+    if residual_m > 1e-6:
+        spacing_note = f"lane spacing={lane_spacing_m:.2f} m, final residual={residual_m:.2f} m"
+    else:
+        spacing_note = f"lane spacing={lane_spacing_m:.2f} m"
+    ax.text(
+        0.02,
+        0.02,
+        spacing_note,
+        transform=ax.transAxes,
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.75},
+    )
     ax.set_title("Station Coverage Path Dry-Run")
     ax.set_xlabel("East (m)")
     ax.set_ylabel("North (m)")
@@ -265,19 +377,29 @@ def write_outputs(output_dir: Path, mission_name: str, mission: dict[str, Any]) 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    validate_args(args)
     mission_name = args.mission_name or default_mission_name()
 
-    raw_waypoints = generate_coverage_path(
-        point_a=args.point_a,
-        point_b=args.point_b,
-        sweep_width_m=args.sweep_width_m,
-        lane_spacing_m=args.lane_spacing_m,
-        speed_mps=args.speed_mps,
-    )
+    if args.planner_mode == "corner-rectangle":
+        raw_waypoints = generate_corner_rectangle_path(
+            point_a=args.point_a,
+            point_b=args.point_b,
+            lane_spacing_m=args.lane_spacing_m,
+            speed_mps=args.speed_mps,
+        )
+    else:
+        raw_waypoints = generate_coverage_path(
+            point_a=args.point_a,
+            point_b=args.point_b,
+            sweep_width_m=args.sweep_width_m,
+            lane_spacing_m=args.lane_spacing_m,
+            speed_mps=args.speed_mps,
+        )
     mission = build_mission(
         mission_name=mission_name,
         point_a=args.point_a,
         point_b=args.point_b,
+        planner_mode=args.planner_mode,
         sweep_width_m=args.sweep_width_m,
         lane_spacing_m=args.lane_spacing_m,
         speed_mps=args.speed_mps,
