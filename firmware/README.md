@@ -162,6 +162,38 @@ firmware/gps_uart_probe/gps_uart_probe.ino
 It does not attach motor outputs. Full procedure and per-variant compile/upload
 commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
 
+## I2C Scanner Test
+
+Use this standalone sketch to verify whether the purple module or any other
+device responds on the OpenRB I2C bus:
+
+```text
+firmware/i2c_scanner_test/i2c_scanner_test.ino
+```
+
+It uses `Wire`, USB Serial at `115200`, scans addresses `0x03` through `0x77`,
+and does not attach motors or Servo outputs. Addresses such as `0x68`, `0x69`,
+or `0x76` are common for some IMU/sensor modules, but address alone is not a
+device identification.
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-scanner firmware/i2c_scanner_test
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-scanner firmware/i2c_scanner_test
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
 ## Serial3 Pin Verification
 
 These standalone sketches are retained as historical/safe UART pin tools:

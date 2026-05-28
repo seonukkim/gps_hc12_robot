@@ -183,6 +183,41 @@ Decision rule:
 - For first fix, place the GPS antenna outdoors with open sky view and wait
   before debugging firmware.
 
+## GPS Antenna Frame Is Not Rover Body Frame
+
+Status:
+
+- Recent GPS fix and single-waypoint candidate dry-run tests used an external
+  antenna placed far outside while the rover body remained indoors.
+- In that setup, `gps_lat` and `gps_lon` are the antenna position, not the rover
+  body position.
+
+Risk:
+
+- Detached-antenna GPS is valid for reception and satellite-fix validation.
+- Detached-antenna GPS is invalid for floor navigation and rover body
+  localization.
+- The IMU cannot fully correct a detached or free-moving GPS antenna into rover
+  body position.
+- The IMU may help later with heading/rotation sensing, but it does not replace
+  a rover-mounted GPS position source.
+
+Required before motion:
+
+- Mount the GPS antenna rigidly on the rover, or define a fixed measured offset
+  from the rover body frame.
+- Run an IMU I2C scan.
+- Verify IMU orientation and axis signs.
+- Re-test candidate GPS fields with mounted antenna and open-sky placement.
+- Use wheel-off-ground bench testing before any floor test.
+
+Do not repeat:
+
+- Do not approve `AUTO_MOTION_ARMED=1` floor tests while the GPS antenna is
+  detached from the rover body.
+- Do not assume IMU data can turn detached antenna coordinates into rover body
+  coordinates.
+
 ## Station HC-12 Device Still Needs Confirmation
 
 The repository defaults to `/dev/ttyACM0`, but the actual station HC-12 USB
@@ -251,7 +286,8 @@ Known boundaries:
 
 The rover likely needs heading from GPS plus BMI160 IMU, but BMI160 support is
 not implemented in the current repo. Do not build waypoint following as if
-heading is already available.
+heading is already available. First run an IMU I2C scan and verify orientation
+and axis signs.
 
 ## ROS2 Is Skeleton-Only
 

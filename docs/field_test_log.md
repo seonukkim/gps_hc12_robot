@@ -631,6 +631,56 @@ Safety interpretation:
 - Next step is single-waypoint controlled motion preparation, not full
   coverage/lawnmower driving.
 
+## 2026-05-28: Single-Waypoint Candidate Dry-Run And GPS Frame Issue
+
+Observed candidate dry-run:
+
+- Build flags:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+- USB debug printed:
+  - `single_waypoint_experiment=true`
+  - `auto_motion_armed=false`
+  - `auto_motor_inhibit=true`
+  - `gps_fix=true` eventually
+  - `target_distance_m`
+  - `target_bearing_deg`
+- AUTO kept `left_cmd=0` and `right_cmd=0`.
+- MANUAL returned to `RC_MANUAL`, and stick input changed motor command fields.
+
+Interpretation:
+
+- Candidate dry-run safety is confirmed.
+- Basic GPS distance/bearing computation is confirmed.
+- Real motion is still not enabled.
+
+Important sensor-frame issue:
+
+- The GPS antenna was placed far outside while the rover body remained indoors.
+- Therefore `gps_lat` / `gps_lon` represented the antenna location, not the
+  rover body location.
+- This is acceptable for GPS reception validation.
+- This is not valid for floor navigation.
+- IMU data cannot fully correct a detached GPS antenna into rover body
+  position.
+- IMU may help later with heading/rotation sensing, but it does not replace a
+  rover-mounted GPS position source.
+
+Decision:
+
+- Do not proceed to floor waypoint driving yet.
+- Do not approve `AUTO_MOTION_ARMED=1` floor testing yet.
+- Real outdoor navigation requires the GPS antenna to be rigidly mounted on the
+  rover or its offset from the rover body to be fixed and known.
+
+Next required validation before motion:
+
+- IMU I2C scan.
+- IMU orientation and axis check.
+- GPS mounted/open-sky candidate retest.
+- Wheel-off-ground bench test only after safety gates and sensor assumptions
+  are clear.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

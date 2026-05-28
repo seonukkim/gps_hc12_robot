@@ -49,10 +49,34 @@
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
-- Purple module: appears to be an IMU on an I2C-style connection; not a UART
-  path
+- Purple module: appears to be on an I2C-style connection and may be an IMU,
+  but IMU presence is unverified until the I2C scanner test is run
 - Fixed Wiring Plan: GPS remains on the central connector / `Serial2`; HC-12
   remains physically mounted as-is until its current wiring is audited
+
+## GPS Antenna Frame Vs Rover Body Frame
+
+Observed sensor-frame issue:
+
+- During sky-view and single-waypoint candidate dry-run tests, the external GPS
+  antenna was placed far outside while the rover body remained indoors.
+- Therefore `gps_lat` / `gps_lon` represented the antenna location, not the
+  rover body location.
+
+Interpretation:
+
+- This setup is valid for GPS reception, UART, satellite fix, and
+  distance/bearing computation validation.
+- This setup is not valid for floor navigation or rover body localization.
+- An IMU cannot fully correct a detached GPS antenna into rover body position.
+- The IMU may help later with heading and rotation sensing, but it does not
+  replace a rover-mounted GPS position source.
+
+Requirement for real navigation:
+
+- Mount the GPS antenna rigidly on the rover, or use a fixed, measured antenna
+  offset from the rover body frame.
+- Do not approve `AUTO_MOTION_ARMED=1` floor testing until this is resolved.
 
 ## Confirmed RC debug state
 
@@ -175,8 +199,9 @@ Current status:
 - Whether HC-12 shares GPS `Serial2` is not yet proven.
 - Historical `Serial3` D13/D14 wiring notes in older docs must be treated as a
   different wiring setup until revalidated.
-- Purple module appears to be I2C-style IMU wiring and should not be treated as
-  UART.
+- Purple module appears to be I2C-style wiring and should not be treated as
+  UART; IMU presence and exact device identity remain unverified until the I2C
+  scanner test is run.
 
 ## Firmware mapping
 
@@ -201,8 +226,15 @@ Current status:
 - Unified RC + GPS dry-run validation is complete. This is the first mode where
   MANUAL and GPS dry-run coexist in one firmware. AUTO is still
   computation-only and real motion is not enabled yet.
-- Next autonomy milestone is single-waypoint controlled motion preparation, not
-  full coverage/lawnmower driving.
+- Single-waypoint candidate dry-run with `AUTO_MOTION_ARMED=0` confirms
+  candidate-command safety, but floor waypoint driving is blocked by the GPS
+  antenna/body-frame issue.
+- Next required validation before motion:
+  - IMU I2C scan
+  - IMU orientation/axis check
+  - GPS mounted/open-sky candidate retest
+  - wheel-off-ground bench test only after safety gates and sensor assumptions
+    are clear
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
   debug with motors neutral and HC-12 ignored.
 - Audit current HC-12 wiring from code, board inspection, and non-motion

@@ -6,9 +6,10 @@ manual driving with GPS readiness calculations.
 
 ## Status
 
-Unified fixed-wiring RC + GPS dry-run validation is complete. The next
-autonomy milestone is single-waypoint controlled motion preparation, not full
-coverage/lawnmower driving.
+Unified fixed-wiring RC + GPS dry-run validation is complete. Single-waypoint
+candidate dry-run with `AUTO_MOTION_ARMED=0` confirms candidate-command safety,
+but floor waypoint driving is not approved yet because the GPS antenna/body
+frame assumption is not valid.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -21,13 +22,48 @@ Staged plan:
    with AUTO motor output forced to zero.
 2. Single-waypoint candidate-command dry-run: compute candidate commands behind
    safety gates while `AUTO_MOTION_ARMED=0` forces final motor output to zero.
-3. Bench test with wheels lifted: compile the same experiment with
+3. Sensor-frame validation: run IMU diagnostics and retest GPS with the antenna
+   mounted on the rover body in open sky.
+4. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
-4. Low-speed floor test: only after wheel-off-ground behavior is validated.
-5. Multi-waypoint motion: only after single-waypoint behavior is proven.
-6. Coverage path / lawnmower driving: last step, after mission sequencing,
+5. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
+   assumptions are validated.
+6. Multi-waypoint motion: only after single-waypoint behavior is proven.
+7. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
+
+## GPS Antenna Frame Vs Rover Body Frame
+
+GPS coordinates are antenna coordinates. During the recent single-waypoint
+candidate dry-run, the GPS antenna was placed far outside while the rover body
+remained indoors. That setup is acceptable for validating GPS reception,
+`gps_fix`, distance/bearing computation, and AUTO motor inhibition, but it is
+not valid for floor navigation.
+
+A detached antenna means `gps_lat` / `gps_lon` represents the antenna location,
+not the rover body location. An IMU cannot fully correct a detached or
+free-moving GPS antenna into rover body position. The IMU may help later with
+heading, rotation, tilt, and short-term motion sensing, but it does not replace
+a rover-mounted GPS position source.
+
+Real outdoor navigation requires one of these conditions:
+
+- the GPS antenna is rigidly mounted on the rover; or
+- the antenna offset from the rover body frame is fixed, measured, and modeled.
+
+Until that is true, do not proceed to floor waypoint driving and do not approve
+`AUTO_MOTION_ARMED=1` floor tests.
+
+## Next Required Validation Before Motion
+
+- Run an IMU I2C scan.
+- Verify IMU orientation and axis signs.
+- Re-test candidate GPS fields with the GPS antenna mounted on the rover and
+  placed in open sky.
+- Run wheel-off-ground bench testing only after safety gates and sensor-frame
+  assumptions are clear.
+- Keep `AUTO_MOTION_ARMED=0` for floor or indoor tests.
 
 ## Current Fixed-Wiring Dry-Run Mode
 
@@ -230,6 +266,20 @@ final_right_cmd=...
 This mode does not load `mission.json`, does not run multiple waypoints, and
 does not implement coverage/lawnmower driving.
 
+Observed candidate dry-run status:
+
+- `single_waypoint_experiment=true`
+- `auto_motion_armed=false`
+- `auto_motor_inhibit=true`
+- `gps_fix=true` eventually with open-sky antenna placement
+- `target_distance_m` and `target_bearing_deg` printed
+- AUTO kept final `left_cmd` / `right_cmd` at `0`
+- MANUAL returned to `RC_MANUAL`, and stick input changed motor command fields
+
+This confirms candidate dry-run safety and basic distance/bearing computation,
+but it does not validate rover body localization while the GPS antenna is
+detached from the rover.
+
 ## Safety Rules
 
 - No real autonomous motion in this mode.
@@ -243,10 +293,11 @@ does not implement coverage/lawnmower driving.
 
 Next milestone:
 
-- Prepare single-waypoint controlled motion only.
-- Keep the waypoint target small and explicit.
-- Require GPS readiness, heading/attitude plan, RC override, STOP/failsafe
-  checks, and wheel-off-ground validation before any ground-contact test.
+- Prepare IMU diagnostics and GPS antenna/body-frame validation.
+- Keep the waypoint target small and explicit when motion work resumes.
+- Require GPS readiness, known GPS body-frame placement, heading/attitude plan,
+  RC override, STOP/failsafe checks, and wheel-off-ground validation before any
+  ground-contact test.
 - Do not jump directly to full coverage/lawnmower execution.
 
 Before implementing waypoint following:

@@ -67,6 +67,30 @@ station HC-12 operation.
 See [docs/current_hardware_status.md](docs/current_hardware_status.md),
 [docs/wiring.md](docs/wiring.md), and [firmware/README.md](firmware/README.md).
 
+## GPS Antenna Frame Vs Rover Body Frame
+
+GPS coordinates are the antenna coordinates. In recent sky-view tests, the
+external GPS antenna was placed far outside while the rover body remained
+indoors. That is valid for GPS UART, satellite-fix, and candidate-command
+dry-run validation, but it is not valid for floor navigation because the
+reported `gps_lat` / `gps_lon` is not the rover body position.
+
+The IMU cannot fully correct a detached GPS antenna into rover body position.
+The IMU may help later with heading and rotation sensing, but it does not
+replace a rover-mounted position source. Real outdoor navigation requires the
+GPS antenna to be rigidly mounted on the rover, or its offset from the rover
+body frame must be fixed, measured, and modeled.
+
+## Next Required Validation Before Motion
+
+- Run an IMU I2C scan.
+- Verify IMU orientation and axis signs.
+- Re-test GPS candidate fields with the antenna mounted on the rover and placed
+  in open sky.
+- Run only wheel-off-ground bench testing after safety gates and sensor-frame
+  assumptions are clear.
+- Do not approve `AUTO_MOTION_ARMED=1` floor testing yet.
+
 ## Legacy HC-12 References
 
 Legacy HC-12 scripts and notes from `~/Desktop/project-lab/hc12` have been
