@@ -83,8 +83,9 @@ body frame must be fixed, measured, and modeled.
 
 ## Next Required Validation Before Motion
 
-- Run an IMU I2C scan.
-- Verify IMU orientation and axis signs.
+- Fix and verify single-waypoint target override diagnostics. Runtime USBDBG
+  `target_lat` / `target_lon` must match the intended nearby target before
+  interpreting `distance_allowed` or `safety_ready`.
 - Re-test GPS candidate fields with the antenna mounted on the rover and placed
   in open sky.
 - Run only wheel-off-ground bench testing after safety gates and sensor-frame
@@ -250,6 +251,18 @@ Compile with motor output inhibited:
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0' firmware/openrb_robot_controller
 ```
 
+Compile with the nearby target override and motor output inhibited:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-nearby-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_TARGET_LAT=35.5716800 -DSINGLE_WP_TARGET_LON=129.1866516' firmware/openrb_robot_controller
+```
+
+Upload the nearby override build using the matching build directory:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-nearby-inhibit firmware/openrb_robot_controller
+```
+
 Upload the inhibited build:
 
 ```bash
@@ -265,8 +278,17 @@ Monitor:
 Expected USBDBG additions:
 
 ```text
-single_waypoint_experiment=true auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... safety_ready=... arrived=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... safety_ready=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
 ```
+
+Runtime `target_lat` and `target_lon` are the source of truth. A nearby target
+override build should print `target_override_enabled=true`,
+`target_source=compile_time`, `target_lat_macro=35.5716800`,
+`target_lon_macro=129.1866516`, `target_lat=35.571680`, and
+`target_lon=129.186652`. Without override macros, USBDBG should print
+`target_override_enabled=false` and `target_source=fallback`. Do not interpret
+`distance_allowed` or approve bench testing until the runtime target fields
+match the intended target.
 
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.

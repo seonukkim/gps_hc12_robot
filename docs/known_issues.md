@@ -268,6 +268,48 @@ Do not repeat:
 - Do not rely on IMU heading or acceleration for autonomy until a stable I2C
   device address and orientation/axis checks are confirmed.
 
+## Single-Waypoint Target Override Must Be Verified In USBDBG
+
+Status:
+
+- A nearby single-waypoint candidate retest was compiled/uploaded with:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+  - `SINGLE_WP_TARGET_LAT=35.5716800`
+  - `SINGLE_WP_TARGET_LON=129.1866516`
+- Runtime USBDBG still printed the old placeholder:
+  - `target_lat=35.571120`
+  - `target_lon=129.186050`
+- GPS fix was achieved, and at least one log line reached `gps_hdop=1.19` and
+  `gps_ready=true`.
+- Because the target remained the old placeholder, `target_distance_m` stayed
+  around `40` to `60` m, `distance_allowed=false`, and `safety_ready=false`.
+- `AUTO_MOTION_ARMED=0` correctly kept final motor output at zero.
+- MANUAL still returned to `control_source=RC_MANUAL`.
+- Firmware source now supports compile-time target override through:
+  - `SINGLE_WP_TARGET_LAT`
+  - `SINGLE_WP_TARGET_LON`
+- If both macros are provided, USBDBG should print
+  `target_override_enabled=true` and `target_source=compile_time`.
+- If the macros are not provided, USBDBG should print
+  `target_override_enabled=false` and `target_source=fallback`.
+
+Interpretation:
+
+- This was a safe failed validation, not a successful nearby candidate-command
+  test.
+- Safety gates and AUTO motor inhibit worked correctly.
+- Compile-time target override must be verified in USBDBG before interpreting
+  `distance_allowed`, `safety_ready`, or candidate command values.
+- Runtime `target_lat` and `target_lon` are the source of truth.
+
+Do not repeat:
+
+- Do not assume a compile command changed the target unless USBDBG confirms the
+  runtime `target_lat` / `target_lon`.
+- Do not approve bench testing or floor driving from a run where the target
+  override did not take effect.
+
 ## Station HC-12 Device Still Needs Confirmation
 
 The repository defaults to `/dev/ttyACM0`, but the actual station HC-12 USB

@@ -118,11 +118,34 @@ Single-waypoint experiment compile/upload/monitor with motor output inhibited:
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
 ```
 
+Compile with the nearby target override and motor output inhibited:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-nearby-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_TARGET_LAT=35.5716800 -DSINGLE_WP_TARGET_LON=129.1866516' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-nearby-inhibit firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
 Expected single-waypoint USB debug additions:
 
 ```text
-single_waypoint_experiment=true auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... timeout_ok=... distance_allowed=... safety_ready=... arrived=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... timeout_ok=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
 ```
+
+Target override rule:
+
+- Runtime USBDBG `target_lat` and `target_lon` are the source of truth.
+- Verify those fields before interpreting `target_distance_m`,
+  `distance_allowed`, `safety_ready`, or candidate command values.
+- With override macros provided, USBDBG should print
+  `target_override_enabled=true`, `target_source=compile_time`,
+  `target_lat_macro=35.5716800`, `target_lon_macro=129.1866516`,
+  `target_lat=35.571680`, and `target_lon=129.186652`.
+- Without override macros, USBDBG should print `target_override_enabled=false`
+  and `target_source=fallback`.
+- The previous nearby target run was safe because `AUTO_MOTION_ARMED=0` kept
+  final outputs at zero, but it was not a successful nearby candidate-command
+  test because runtime target fields still showed the old placeholder.
 
 Safety gates:
 

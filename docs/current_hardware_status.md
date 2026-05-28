@@ -259,9 +259,25 @@ Current status:
   MANUAL and GPS dry-run coexist in one firmware. AUTO is still
   computation-only and real motion is not enabled yet.
 - Single-waypoint candidate dry-run with `AUTO_MOTION_ARMED=0` confirms
-  candidate-command safety, but floor waypoint driving is blocked by the GPS
-  antenna/body-frame issue.
+  candidate-command safety, but the latest nearby retest is blocked by target
+  override plumbing. The compile command attempted
+  `SINGLE_WP_TARGET_LAT=35.5716800` and `SINGLE_WP_TARGET_LON=129.1866516`,
+  while runtime USBDBG still printed `target_lat=35.571120` and
+  `target_lon=129.186050`.
+- Nearby candidate retest status: safe failed validation. GPS reached ready
+  state on at least one line (`gps_hdop=1.19`, `gps_ready=true`), but the old
+  placeholder target kept `target_distance_m` around `40` to `60` m,
+  `distance_allowed=false`, `safety_ready=false`, candidate commands at zero,
+  and final outputs at zero.
+- Runtime `target_lat` / `target_lon` are the source of truth before
+  interpreting `distance_allowed` or approving any bench test.
+- Firmware source now supports `SINGLE_WP_TARGET_LAT` /
+  `SINGLE_WP_TARGET_LON`; the next hardware check is to verify USBDBG prints
+  `target_override_enabled=true`, `target_source=compile_time`,
+  `target_lat_macro`, `target_lon_macro`, and the intended runtime
+  `target_lat` / `target_lon`.
 - Next required validation before motion:
+  - verify compile-time target override diagnostics on USBDBG
   - GPS mounted/open-sky candidate retest
   - wheel-off-ground bench test only after safety gates and sensor assumptions
     are clear

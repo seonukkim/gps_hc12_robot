@@ -772,6 +772,50 @@ Decision:
 - Continue the GPS+RC safety-gated workflow without IMU for now.
 - Do not enable motion based on IMU assumptions.
 
+## 2026-05-28: Nearby Single-Waypoint Candidate Retest Blocked By Target Override
+
+Build/upload:
+
+- Build/upload succeeded with intended flags:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+  - `SINGLE_WP_TARGET_LAT=35.5716800`
+  - `SINGLE_WP_TARGET_LON=129.1866516`
+- The compile command intended to override the target to a nearby point.
+
+Observed USBDBG:
+
+- Runtime target remained the old placeholder:
+  - `target_lat=35.571120`
+  - `target_lon=129.186050`
+- GPS fix was achieved.
+- At least one log line reached:
+  - `gps_hdop=1.19`
+  - `gps_ready=true`
+- Because the target was still the old placeholder, `target_distance_m`
+  remained around `40` to `60` m.
+- `distance_allowed=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0` correctly kept:
+  - `final_left_cmd=0.000`
+  - `final_right_cmd=0.000`
+- MANUAL mode still returned to `control_source=RC_MANUAL`.
+
+Interpretation:
+
+- This is a safe failed validation, not a successful nearby candidate-command
+  test.
+- Safety gates worked correctly.
+- AUTO motor inhibit worked correctly.
+- GPS can become ready.
+- The next blocker is target override plumbing.
+- The runtime `target_lat` / `target_lon` fields are the source of truth for
+  interpreting `target_distance_m`, `distance_allowed`, and `safety_ready`.
+- Bench test is not approved yet.
+- Floor driving is not approved.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:
