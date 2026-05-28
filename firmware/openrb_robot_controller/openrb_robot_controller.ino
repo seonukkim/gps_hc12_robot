@@ -10,8 +10,17 @@
 #define FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN 0
 #endif
 
+#ifndef FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+#define FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT 0
+#endif
+
+#ifndef AUTO_MOTION_ARMED
+#define AUTO_MOTION_ARMED 0
+#endif
+
 #define ENABLE_GPS_TELEMETRY 1
-#if FIXED_WIRING_GPS_SERIAL2_DIAG || FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+#if FIXED_WIRING_GPS_SERIAL2_DIAG || FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
+    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 #define HC12_LINK_ENABLED 0
 #define GPS_SERIAL Serial2
 #else
@@ -32,6 +41,16 @@ constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
 constexpr uint32_t DRYRUN_GPS_READY_MAX_AGE_MS = 3000;
+constexpr bool SINGLE_WAYPOINT_TARGET_AVAILABLE = true;
+constexpr double SINGLE_WAYPOINT_TARGET_LAT = 35.571120;
+constexpr double SINGLE_WAYPOINT_TARGET_LON = 129.186050;
+constexpr bool SINGLE_WAYPOINT_AUTO_MOTION_ARMED = AUTO_MOTION_ARMED != 0;
+constexpr float SINGLE_WAYPOINT_MAX_AUTO_THROTTLE = 0.10f;
+constexpr double SINGLE_WAYPOINT_ARRIVAL_RADIUS_M = 2.5;
+constexpr double SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M = 30.0;
+constexpr uint32_t SINGLE_WAYPOINT_GPS_STALE_MS = 2000;
+constexpr double SINGLE_WAYPOINT_MAX_HDOP = 2.5;
+constexpr uint32_t SINGLE_WAYPOINT_AUTO_TIMEOUT_MS = 15000;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
 // Printed transmitter labels are 1-based (CH1-CH8), while ppmChannels[] uses 0-based indexes.
@@ -106,6 +125,22 @@ float autoLeftCmd = 0.0f;
 float autoRightCmd = 0.0f;
 float lastLeftOutputCmd = 0.0f;
 float lastRightOutputCmd = 0.0f;
+
+#if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+uint32_t singleWaypointAutoStartMs = 0;
+bool singleWaypointGpsReadyFlag = false;
+bool singleWaypointTargetReadyFlag = false;
+bool singleWaypointTimeoutOkFlag = false;
+bool singleWaypointDistanceAllowedFlag = false;
+bool singleWaypointSafetyReadyFlag = false;
+bool singleWaypointArrivedFlag = false;
+bool singleWaypointAutoMotorInhibitFlag = true;
+bool singleWaypointTargetComputedFlag = false;
+double singleWaypointTargetDistanceM = 0.0;
+double singleWaypointTargetBearingDeg = 0.0;
+float singleWaypointCandidateLeftCmd = 0.0f;
+float singleWaypointCandidateRightCmd = 0.0f;
+#endif
 
 void ppmISR() {
   uint32_t now = micros();
@@ -191,7 +226,8 @@ float absFloat(float value) {
   return value < 0.0f ? -value : value;
 }
 
-#if FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN
+#if FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
+    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 double degreesToRadians(double degrees) {
   return degrees * 0.017453292519943295;
 }
@@ -234,6 +270,61 @@ double dryrunBearingDegrees(double fromLat, double fromLon, double toLat, double
 
 bool dryrunGpsReady() {
   return gps.location.isValid() && gps.location.age() <= DRYRUN_GPS_READY_MAX_AGE_MS;
+}
+#endif
+
+#if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+bool singleWaypointGpsReady() {
+  return gps.location.isValid() && gps.location.age() <= SINGLE_WAYPOINT_GPS_STALE_MS &&
+         gps.hdop.isValid() && gps.hdop.hdop() <= SINGLE_WAYPOINT_MAX_HDOP;
+}
+
+void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32_t now) {
+  singleWaypointTargetReadyFlag = SINGLE_WAYPOINT_TARGET_AVAILABLE;
+  singleWaypointGpsReadyFlag = singleWaypointGpsReady();
+  singleWaypointTargetComputedFlag = singleWaypointTargetReadyFlag && gps.location.isValid();
+  singleWaypointTargetDistanceM = 0.0;
+  singleWaypointTargetBearingDeg = 0.0;
+  singleWaypointArrivedFlag = false;
+  singleWaypointDistanceAllowedFlag = false;
+
+  if (singleWaypointTargetComputedFlag) {
+    singleWaypointTargetDistanceM = dryrunDistanceMeters(
+        gps.location.lat(), gps.location.lng(), SINGLE_WAYPOINT_TARGET_LAT, SINGLE_WAYPOINT_TARGET_LON);
+    singleWaypointTargetBearingDeg = dryrunBearingDegrees(
+        gps.location.lat(), gps.location.lng(), SINGLE_WAYPOINT_TARGET_LAT, SINGLE_WAYPOINT_TARGET_LON);
+    singleWaypointArrivedFlag = singleWaypointTargetDistanceM <= SINGLE_WAYPOINT_ARRIVAL_RADIUS_M;
+    singleWaypointDistanceAllowedFlag =
+        singleWaypointTargetDistanceM > SINGLE_WAYPOINT_ARRIVAL_RADIUS_M &&
+        singleWaypointTargetDistanceM <= SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M;
+  }
+
+  if (rcValid && autoSwitchOn) {
+    if (singleWaypointAutoStartMs == 0) {
+      singleWaypointAutoStartMs = now;
+    }
+  } else {
+    singleWaypointAutoStartMs = 0;
+  }
+
+  singleWaypointTimeoutOkFlag =
+      singleWaypointAutoStartMs != 0 &&
+      now - singleWaypointAutoStartMs <= SINGLE_WAYPOINT_AUTO_TIMEOUT_MS;
+  singleWaypointSafetyReadyFlag =
+      rcValid && autoSwitchOn && singleWaypointGpsReadyFlag && singleWaypointTargetReadyFlag &&
+      singleWaypointDistanceAllowedFlag && singleWaypointTimeoutOkFlag;
+
+  if (singleWaypointSafetyReadyFlag) {
+    // Heading control is not implemented yet; this candidate is straight low-speed only.
+    singleWaypointCandidateLeftCmd = SINGLE_WAYPOINT_MAX_AUTO_THROTTLE;
+    singleWaypointCandidateRightCmd = SINGLE_WAYPOINT_MAX_AUTO_THROTTLE;
+  } else {
+    singleWaypointCandidateLeftCmd = 0.0f;
+    singleWaypointCandidateRightCmd = 0.0f;
+  }
+
+  singleWaypointAutoMotorInhibitFlag =
+      !SINGLE_WAYPOINT_AUTO_MOTION_ARMED || !singleWaypointSafetyReadyFlag;
 }
 #endif
 
@@ -572,6 +663,57 @@ void debugPrintStatus() {
   Serial.print(F(" autonomy_ready="));
   Serial.print(autonomyReady ? F("true") : F("false"));
 #endif
+#if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+  Serial.print(F(" single_waypoint_experiment=true"));
+  Serial.print(F(" auto_motion_armed="));
+  Serial.print(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? F("true") : F("false"));
+  Serial.print(F(" auto_motor_inhibit="));
+  Serial.print(singleWaypointAutoMotorInhibitFlag ? F("true") : F("false"));
+  Serial.print(F(" gps_ready="));
+  Serial.print(singleWaypointGpsReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" target_ready="));
+  Serial.print(singleWaypointTargetReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" timeout_ok="));
+  Serial.print(singleWaypointTimeoutOkFlag ? F("true") : F("false"));
+  Serial.print(F(" distance_allowed="));
+  Serial.print(singleWaypointDistanceAllowedFlag ? F("true") : F("false"));
+  Serial.print(F(" safety_ready="));
+  Serial.print(singleWaypointSafetyReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" arrived="));
+  Serial.print(singleWaypointArrivedFlag ? F("true") : F("false"));
+  Serial.print(F(" target_lat="));
+  if (singleWaypointTargetReadyFlag) {
+    Serial.print(SINGLE_WAYPOINT_TARGET_LAT, 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" target_lon="));
+  if (singleWaypointTargetReadyFlag) {
+    Serial.print(SINGLE_WAYPOINT_TARGET_LON, 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" target_distance_m="));
+  if (singleWaypointTargetComputedFlag) {
+    Serial.print(singleWaypointTargetDistanceM, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" target_bearing_deg="));
+  if (singleWaypointTargetComputedFlag) {
+    Serial.print(singleWaypointTargetBearingDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" candidate_left_cmd="));
+  Serial.print(singleWaypointCandidateLeftCmd, 3);
+  Serial.print(F(" candidate_right_cmd="));
+  Serial.print(singleWaypointCandidateRightCmd, 3);
+  Serial.print(F(" final_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" final_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+#endif
   Serial.println();
 }
 
@@ -808,6 +950,15 @@ void setup() {
   Serial.println("GPS uses current fixed wiring: OpenRB-150 Serial2 at 9600 baud.");
   Serial.println("RC MANUAL mode can drive normally; AUTO mode is computation-only with motor outputs neutral.");
   Serial.println("No autonomous waypoint following is implemented in this dry-run build.");
+#elif FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+  Serial.println("FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT enabled.");
+  Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
+  Serial.println("GPS uses current fixed wiring: OpenRB-150 Serial2 at 9600 baud.");
+  Serial.println("RC MANUAL mode can drive normally; AUTO mode uses one placeholder waypoint only.");
+  Serial.print("AUTO_MOTION_ARMED=");
+  Serial.println(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? "1" : "0");
+  Serial.println("AUTO_MOTION_ARMED=0 computes candidate commands only and forces motor outputs neutral.");
+  Serial.println("No multi-waypoint, mission.json, or coverage/lawnmower driving is implemented.");
 #else
   Serial.println("GPS telemetry uses OpenRB-150 Serial3 (D13/RX) at 9600 baud.");
 #endif
@@ -873,6 +1024,37 @@ void loop() {
     currentMode = AUTO_READY;
     currentControlSource = CONTROL_SOURCE_STOP;
     motorStop();
+  } else {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = DISARMED;
+    motorStop();
+  }
+  debugPrintStatus();
+  return;
+#endif
+
+#if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+  clearAutoCommand();
+  clearStationManualCommand();
+  updateSingleWaypointExperimentState(rcValid, autoSwitchOn, now);
+  if (!rcValid) {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = FAILSAFE;
+    motorStop();
+  } else if (rcManualActive) {
+    currentMode = MANUAL;
+    currentControlSource = CONTROL_SOURCE_RC_MANUAL;
+    applyManualOverride(steeringUs, throttleUs);
+  } else if (autoSwitchOn) {
+    if (singleWaypointSafetyReadyFlag && SINGLE_WAYPOINT_AUTO_MOTION_ARMED) {
+      currentMode = AUTO_RUNNING;
+      currentControlSource = CONTROL_SOURCE_AUTO;
+      applyAutoCommand(singleWaypointCandidateLeftCmd, singleWaypointCandidateRightCmd);
+    } else {
+      currentMode = AUTO_READY;
+      currentControlSource = CONTROL_SOURCE_STOP;
+      motorStop();
+    }
   } else {
     currentControlSource = CONTROL_SOURCE_STOP;
     currentMode = DISARMED;

@@ -26,6 +26,7 @@ Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
 | Default `openrb_robot_controller` | none | HC-12/manual legacy mode | default firmware reads `Serial3`; current fixed GPS wiring is not available here | enabled | normal safety-gated behavior |
 | GPS-only diagnostic | `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | fixed GPS `Serial2` debug over USB | `Serial2` at `9600` | disabled/ignored | forced neutral |
 | MANUAL RC + AUTO GPS dry-run | `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | RC manual driving plus AUTO GPS distance/bearing computation | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO forced neutral |
+| Single-waypoint experiment | `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | guarded one-target candidate-command experiment | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO is neutral unless `AUTO_MOTION_ARMED=1` |
 
 Exact macOS Arduino CLI path used in this repo:
 
@@ -108,6 +109,39 @@ Completed unified dry-run validation:
 - GPS: `gps_chars` increases continuously, `gps_fix=true` appears with
   open-sky antenna placement, and target distance/bearing fields are computed.
 - This build still has no autonomous motor output.
+
+Single-waypoint experiment compile/upload/monitor with motor output inhibited:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-inhibit firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected single-waypoint USB debug additions:
+
+```text
+single_waypoint_experiment=true auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... timeout_ok=... distance_allowed=... safety_ready=... arrived=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+```
+
+Safety gates:
+
+- GPS location valid.
+- GPS age no more than `SINGLE_WAYPOINT_GPS_STALE_MS` (`2000` ms).
+- HDOP valid and no more than `SINGLE_WAYPOINT_MAX_HDOP` (`2.5`).
+- Target available.
+- RC input valid.
+- RC AUTO switch on.
+- Target distance above `SINGLE_WAYPOINT_ARRIVAL_RADIUS_M` (`2.5` m).
+- Target distance no more than `SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M` (`30` m).
+- AUTO state age no more than `SINGLE_WAYPOINT_AUTO_TIMEOUT_MS` (`15000` ms).
+
+`AUTO_MOTION_ARMED=1` is reserved for a later explicit wheel-off-ground bench
+test. The current inhibited build computes candidate commands but forces final
+left/right outputs to zero. This mode does not load `mission.json`, does not
+run multi-waypoint missions, and does not implement coverage/lawnmower driving.
+Candidate commands are straight low-speed placeholders; target bearing is
+printed for inspection, but heading control is not implemented yet.
 
 When uploading a compile-time variant, upload the matching build directory.
 

@@ -94,6 +94,7 @@ HC-12, or motor behavior from the wrong mode.
 | Default rover controller | `firmware/openrb_robot_controller` | OpenRB-150 | RC manual and HC-12 protocol baseline | Default firmware reads GPS from `Serial3`; under current fixed wiring, GPS `Serial2` is not available here and `gps_chars=0` is expected | enabled | normal safety-gated rover behavior |
 | Fixed-wiring GPS Serial2 diagnostic | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | OpenRB-150 | Integrated GPS-on-`Serial2` USB debug | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | forced neutral; manual driving does not work by design |
 | Fixed-wiring RC + GPS autonomy dry-run | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | OpenRB-150 | RC manual plus GPS readiness/distance/bearing dry-run | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO forces neutral and computes readiness only |
+| Single-waypoint experiment | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | OpenRB-150 | Guarded one-target candidate-command experiment | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO computes candidate commands; `AUTO_MOTION_ARMED=0` forces neutral |
 | Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
 | Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
 | Pin finder test | `firmware/pin_finder_test` | OpenRB-150 | Historical physical pin finder | not a GPS test | not used | no motor outputs |
@@ -211,6 +212,43 @@ Validated:
   failure.
 - AUTO is still computation-only. Real motion is not enabled yet, and HC-12 is
   disabled in this fixed-wiring GPS mode.
+
+### Single-Waypoint Experiment
+
+This mode prepares the next autonomy milestone without enabling coverage
+driving. It uses one placeholder target and adds safety gates around candidate
+commands. `AUTO_MOTION_ARMED=0` is the default-safe experiment: it prints
+candidate commands but forces final motor output to zero.
+
+Compile with motor output inhibited:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0' firmware/openrb_robot_controller
+```
+
+Upload the inhibited build:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-inhibit firmware/openrb_robot_controller
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected USBDBG additions:
+
+```text
+single_waypoint_experiment=true auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... safety_ready=... arrived=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+```
+
+Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
+target validity, target distance range, arrival radius, and AUTO timeout.
+`AUTO_MOTION_ARMED=1` is reserved for a later wheel-off-ground bench test after
+explicit approval. This mode does not load `mission.json` and does not implement
+multi-waypoint or lawnmower/coverage driving.
 
 ### Standalone GPS Probe
 

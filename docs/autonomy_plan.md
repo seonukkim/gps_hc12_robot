@@ -15,6 +15,20 @@ the next step. The rover must first prove one carefully bounded waypoint motion
 with explicit safety gates, GPS validity policy, heading plan, manual override,
 and wheel-off-ground checks.
 
+Staged plan:
+
+1. Dry-run complete: MANUAL RC and AUTO GPS distance/bearing computation coexist
+   with AUTO motor output forced to zero.
+2. Single-waypoint candidate-command dry-run: compute candidate commands behind
+   safety gates while `AUTO_MOTION_ARMED=0` forces final motor output to zero.
+3. Bench test with wheels lifted: compile the same experiment with
+   `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
+   output, timeout, arrival stop, GPS rejection, and manual override.
+4. Low-speed floor test: only after wheel-off-ground behavior is validated.
+5. Multi-waypoint motion: only after single-waypoint behavior is proven.
+6. Coverage path / lawnmower driving: last step, after mission sequencing,
+   heading control, logging, and safety policy are complete.
+
 ## Current Fixed-Wiring Dry-Run Mode
 
 Compile-time flag:
@@ -139,6 +153,82 @@ Rule:
 
 `autonomy_ready=true` is still only a dry-run state. It is not permission to
 move.
+
+## Single-Waypoint Experiment
+
+Compile-time flag:
+
+```text
+FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1
+```
+
+Default motion arming flag:
+
+```text
+AUTO_MOTION_ARMED=0
+```
+
+Behavior:
+
+- GPS uses fixed `Serial2` at `9600`.
+- HC-12 is disabled/ignored.
+- RC PPM remains enabled.
+- MANUAL mode preserves existing RC manual driving and reports
+  `control_source=RC_MANUAL`.
+- AUTO mode uses one placeholder target only.
+- AUTO mode computes `target_distance_m` and `target_bearing_deg`.
+- AUTO mode prints candidate left/right commands.
+- Candidate commands are straight low-speed placeholders. Target bearing is
+  printed for inspection, but heading control is not implemented yet.
+- With `AUTO_MOTION_ARMED=0`, final `left_cmd` and `right_cmd` remain zero even
+  when candidate commands are nonzero.
+- With `AUTO_MOTION_ARMED=1`, low-speed candidate output is allowed only if all
+  safety gates pass. This is reserved for a later explicit wheel-off-ground
+  bench test.
+
+Safety constants:
+
+- `SINGLE_WAYPOINT_MAX_AUTO_THROTTLE=0.10`
+- `SINGLE_WAYPOINT_ARRIVAL_RADIUS_M=2.5`
+- `SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M=30.0`
+- `SINGLE_WAYPOINT_GPS_STALE_MS=2000`
+- `SINGLE_WAYPOINT_MAX_HDOP=2.5`
+- `SINGLE_WAYPOINT_AUTO_TIMEOUT_MS=15000`
+
+Safety gates:
+
+- GPS location valid.
+- GPS age below stale threshold.
+- GPS HDOP valid and below threshold.
+- Target valid.
+- RC input valid.
+- RC AUTO switch on.
+- Target distance above arrival radius.
+- Target distance below max allowed distance.
+- AUTO timeout not exceeded.
+
+USB debug fields:
+
+```text
+single_waypoint_experiment=true
+auto_motion_armed=...
+auto_motor_inhibit=...
+gps_ready=...
+target_ready=...
+timeout_ok=...
+distance_allowed=...
+safety_ready=...
+arrived=...
+target_distance_m=...
+target_bearing_deg=...
+candidate_left_cmd=...
+candidate_right_cmd=...
+final_left_cmd=...
+final_right_cmd=...
+```
+
+This mode does not load `mission.json`, does not run multiple waypoints, and
+does not implement coverage/lawnmower driving.
 
 ## Safety Rules
 
