@@ -521,8 +521,7 @@ Correction:
 - A/B define an axis-aligned rectangle in the local East/North frame.
 - `lane_spacing_m` is the sweep interval.
 - `sweep_width_m` is not used in the default mode.
-- The final boundary lane is always included, even when the residual strip is
-  smaller than `lane_spacing_m`.
+- Generated lanes must remain inside or on the coverage boundary.
 - A final connector waypoint is added when needed so the mission ends exactly at
   Point B.
 
@@ -552,6 +551,32 @@ Safety:
 - No serial port was opened.
 - No HC-12 frames or rover commands were sent.
 - This remains PC/Mac-side mission-file generation only.
+
+## 2026-05-28: Path Planning Visualization Complete
+
+Completed state:
+
+- Station-side planner generated `mission.json`, `mission.csv`, and
+  `preview.png`.
+- Preview image is sufficient to review Point A, Point B, lane order, coverage
+  boundary, and final endpoint before any rover-side execution work.
+- This is station-side path visualization only.
+
+Edge/remainder policy:
+
+- If the rectangle extent is not exactly divisible by `lane_spacing_m`, a small
+  remaining margin at the edge is acceptable.
+- Do not add an extra lane outside the boundary just to remove the margin.
+- Keep generated lanes boundary-safe.
+
+Safety and next step:
+
+- No rover firmware was modified.
+- No serial port was opened.
+- No HC-12 frames or rover commands were sent.
+- The next step is onboard mission dry-run, not real motion.
+- Real autonomous motion remains disabled until a separate safety-gated
+  milestone.
 
 ## Known Manual Direction Attempts
 

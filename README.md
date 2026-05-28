@@ -186,7 +186,12 @@ Expected:
   `autonomy_ready`
 - placeholder target is dry-run only:
   `35.571120,129.186050`
+- onboard geodesy computes placeholder target distance and initial bearing over
+  USB debug only
 - no real waypoint following is implemented
+- Arduino-side distance/bearing helpers are validated manually from USBDBG:
+  `target_distance_m` finite with `gps_fix=true`, `target_bearing_deg` in
+  `0..360`, and AUTO still `left_cmd=0` / `right_cmd=0`
 
 Validated:
 
@@ -441,6 +446,8 @@ uv run python tools/station_mock_mission.py \
   --out-dir data/mock_runs/example
 ```
 
+### Path Planning Preview Dry-run
+
 Generate a station-side coverage mission dry-run from GPS corner points. Point
 A is the start corner, Point B is the opposite/end corner, and
 `lane_spacing_m` is the sweep interval. The default `corner-rectangle` mode
@@ -464,10 +471,23 @@ outputs/missions/codex_corner_rectangle_smoke/mission.csv
 outputs/missions/codex_corner_rectangle_smoke/preview.png
 ```
 
+Inspect the generated files:
+
+```bash
+uv run python -m json.tool outputs/missions/codex_corner_rectangle_smoke/mission.json
+head -n 12 outputs/missions/codex_corner_rectangle_smoke/mission.csv
+tail -n 3 outputs/missions/codex_corner_rectangle_smoke/mission.csv
+ls -lh outputs/missions/codex_corner_rectangle_smoke/preview.png
+```
+
 See [docs/station_path_planning.md](docs/station_path_planning.md). Path
 generation remains dry-run only and must not be sent to the rover yet. The
 tested mission output is not yet executed by the rover; the next step is onboard
 mission dry-run, not real motion.
+
+Edge/remainder policy: if the rectangle extent is not exactly divisible by
+`lane_spacing_m`, a small remaining margin at the edge is acceptable. Do not add
+an extra lane outside the boundary just to remove that margin.
 
 The previous A/B baseline plus sweep-width interpretation is retained only
 behind `--planner-mode baseline-width --sweep-width-m ...` for comparison.

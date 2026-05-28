@@ -62,14 +62,25 @@ rectangle from Point A and Point B:
 - local Point B is the opposite/end corner;
 - lanes run parallel to the local east/west extent;
 - lane offsets advance along the local north/south extent;
-- offsets are `0, lane_spacing, 2*lane_spacing, ..., final_extent`;
-- the final rectangle boundary is always included, even when the residual strip
-  is smaller than `lane_spacing_m`;
+- nominal offsets advance as `0, lane_spacing, 2*lane_spacing, ...` while
+  staying inside the rectangle;
 - when the alternating lane order would not naturally end at Point B, the
   planner adds a final connector waypoint with a `notes` field.
 
 The generated local waypoints are converted back to latitude/longitude before
 being written to JSON and CSV.
+
+## Edge And Remainder Policy
+
+The planner is boundary-safe. It must not add an extra lane outside the
+rectangle just to remove a small remaining margin at the far edge.
+
+When the rectangle extent is not exactly divisible by `lane_spacing_m`, a small
+remaining strip at the boundary is acceptable for this preview dry-run stage.
+Generated coverage lanes must stay inside or on the rectangle boundary. A final
+Point B connector may be added to make the mission endpoint explicit, but that
+connector is not a command to drive outside the boundary and is not real rover
+motion.
 
 The previous baseline plus width behavior is retained only as an explicit
 legacy mode:
@@ -84,7 +95,29 @@ uv run python scripts/station/plan_coverage_path.py \
   --mission-name codex_baseline_width_legacy
 ```
 
-## Mission JSON
+## Mission Schema
+
+Generated missions use schema `station_coverage_path.v1`. The file is a
+station-side dry-run artifact, not a rover command file. It can be inspected by
+future onboard dry-run tooling, but it must not be streamed to the rover as live
+motor commands.
+
+Top-level fields:
+
+- `schema`: mission file format identifier.
+- `metadata`: mission name, generation time, dry-run flag, rover-command flag,
+  and planner mode.
+- `inputs`: original GPS points and planning parameters.
+- `local_origin`: latitude/longitude used as the local metric-frame origin.
+- `input_points_local`: Point A and Point B positions in local meters plus
+  their roles.
+- `local_frame`: axis naming and planner-mode rule.
+- `summary`: lane count, waypoint count, lane length, and rectangle extents.
+- `coverage_boundary`: rectangle vertices in local meters.
+- `safety`: explicit dry-run constraints.
+- `waypoints`: ordered mission preview waypoints.
+
+## Mission JSON Fields
 
 The JSON file contains:
 
@@ -102,9 +135,21 @@ The JSON file contains:
 - generated waypoints with index, lat/lon, local `x_m` / `y_m`, lane index,
   `segment_type`, `notes`, and optional `speed_mps`.
 
+Waypoint fields:
+
+- `index`: zero-based waypoint order in the preview path.
+- `lat` / `lon`: waypoint converted back to GPS coordinates.
+- `x_m` / `y_m`: local East/North position in meters from Point A.
+- `segment_type`: `lane_start`, `lane_end`, or `final_connector`.
+- `lane`: zero-based lane index.
+- `offset_m`: lane offset from the Point A side.
+- `speed_mps`: optional speed metadata only; it is not sent to the rover.
+- `notes`: human-readable explanation, such as a final connector to Point B.
+
 ## Mission CSV
 
-The CSV file includes at least:
+The CSV file is the same waypoint list in table form. It is intended for quick
+inspection, spreadsheet review, and later dry-run import tests. It includes:
 
 - `index`
 - `lat`
@@ -115,7 +160,7 @@ The CSV file includes at least:
 - `notes`
 
 The extra columns `lane`, `offset_m`, and `speed_mps` are included for dry-run
-inspection.
+inspection. CSV rows are ordered exactly as the preview path order.
 
 ## Preview PNG
 
@@ -127,6 +172,15 @@ The preview image shows:
 - waypoint order labels;
 - lane spacing and final residual strip note when present;
 - the coverage boundary rectangle.
+
+Interpretation rules:
+
+- The dashed rectangle is the intended local coverage boundary.
+- Numbered markers show waypoint order.
+- The path is a preview of a future mission shape, not an executed route.
+- Any final residual note means the planner stayed boundary-safe instead of
+  adding an out-of-bounds lane.
+- A `final_connector` marker means the preview ends exactly at Point B.
 
 ## Safety Rules
 

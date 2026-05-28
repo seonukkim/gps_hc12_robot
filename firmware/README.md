@@ -19,16 +19,26 @@ It prints this USB startup marker when the expected firmware is running:
 Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
 ```
 
-Compile with Arduino CLI:
+Exact macOS Arduino CLI path used in this repo:
 
 ```bash
-arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli'
 ```
 
-Compile the fixed-wiring GPS Serial2 diagnostic build:
+Default build compile/upload/monitor:
 
 ```bash
-arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-diag --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_DIAG=1' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-default firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-default firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Fixed-wiring GPS Serial2 diagnostic compile/upload/monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-diag --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_DIAG=1' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-diag firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
 ```
 
 In this diagnostic build, GPS uses `Serial2` at `9600`, HC-12 commands are
@@ -53,10 +63,12 @@ Interpretation checklist:
 - Protect electronics and antenna connectors from rain even if the GPS can fix
   during rainy open-sky testing.
 
-Compile the unified fixed-wiring RC + GPS autonomy dry-run build:
+Unified fixed-wiring RC + GPS autonomy dry-run compile/upload/monitor:
 
 ```bash
-arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
 ```
 
 In this dry-run build, GPS uses `Serial2` at `9600`, HC-12 is disabled/ignored,
@@ -70,18 +82,12 @@ Expected dry-run USB debug additions:
 autonomy_dryrun=true target_lat=35.571120 target_lon=129.186050 target_distance_m=... target_bearing_deg=... gps_ready=... target_ready=... autonomy_ready=...
 ```
 
-When uploading a compile-time variant, upload the matching build directory. For
-example, the dry-run build uses:
+The dry-run distance/bearing helpers are Arduino-side only. Validate them from
+USB debug output: with `gps_fix=true`, `target_distance_m` should be finite,
+`target_bearing_deg` should remain in `0..360`, and AUTO mode must still keep
+`left_cmd=0` and `right_cmd=0`.
 
-```bash
-arduino-cli upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-s2-rc-dryrun firmware/openrb_robot_controller
-```
-
-Upload to the connected OpenRB USB serial port:
-
-```bash
-arduino-cli upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 firmware/openrb_robot_controller
-```
+When uploading a compile-time variant, upload the matching build directory.
 
 On Linux/WSL station hosts, the upload port may instead look like
 `/dev/ttyACM0`. Confirm the actual port before upload.

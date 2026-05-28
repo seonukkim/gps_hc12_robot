@@ -47,6 +47,41 @@ lon=129.186050
 The placeholder target is only used to compute distance and bearing from the
 current GPS position. It must not cause motor movement.
 
+## Onboard Mission Dry-Run Implementation
+
+The current onboard mission dry-run is implemented inside
+`firmware/openrb_robot_controller/openrb_robot_controller.ino` and is enabled
+only by:
+
+```text
+FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1
+```
+
+The dry-run target is a small placeholder config section in the firmware:
+
+- `DRYRUN_TARGET_AVAILABLE`
+- `DRYRUN_TARGET_LAT`
+- `DRYRUN_TARGET_LON`
+- `DRYRUN_GPS_READY_MAX_AGE_MS`
+
+The Arduino-side geodesy helpers are:
+
+- `dryrunDistanceMeters(...)`: haversine distance in meters.
+- `dryrunBearingDegrees(...)`: initial bearing in degrees, normalized to
+  `0..360`.
+
+These helpers are currently Arduino-side only, so there is no Python unit test
+for them. Manual validation is by USB debug output in the dry-run build:
+
+- verify `target_distance_m` is finite when `gps_fix=true`;
+- verify `target_bearing_deg` stays in `0..360`;
+- verify `gps_ready=true` only when GPS has a valid recent location;
+- verify AUTO mode still reports `left_cmd=0` and `right_cmd=0`;
+- verify switching RC back to MANUAL restores `control_source=RC_MANUAL`.
+
+This is the onboard preparation step for future mission execution. It is not
+real waypoint following.
+
 ## Validation Result
 
 The unified fixed-wiring dry-run firmware was tested with
