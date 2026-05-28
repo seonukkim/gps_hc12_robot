@@ -22,8 +22,10 @@ Staged plan:
    with AUTO motor output forced to zero.
 2. Single-waypoint candidate-command dry-run: compute candidate commands behind
    safety gates while `AUTO_MOTION_ARMED=0` forces final motor output to zero.
-3. Sensor-frame validation: run IMU diagnostics and retest GPS with the antenna
-   mounted on the rover body in open sky.
+3. Sensor-frame validation: retest GPS with the antenna mounted on the rover
+   body in open sky. IMU diagnostics remain useful, but IMU is optional for the
+   current GPS+RC single-waypoint preparation stage and must not block
+   candidate dry-run work.
 4. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
@@ -57,13 +59,14 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 
 ## Next Required Validation Before Motion
 
-- Run an IMU I2C scan.
-- Verify IMU orientation and axis signs.
 - Re-test candidate GPS fields with the GPS antenna mounted on the rover and
   placed in open sky.
 - Run wheel-off-ground bench testing only after safety gates and sensor-frame
   assumptions are clear.
 - Keep `AUTO_MOTION_ARMED=0` for floor or indoor tests.
+- IMU status: optional for the current GPS+RC single-waypoint stage. The
+  default `Wire` scanner currently shows D11/D12 stuck low before scanning, so
+  no IMU address is verified and no IMU data may be used for autonomy yet.
 
 ## Current Fixed-Wiring Dry-Run Mode
 
@@ -293,7 +296,9 @@ detached from the rover.
 
 Next milestone:
 
-- Prepare IMU diagnostics and GPS antenna/body-frame validation.
+- Prepare GPS antenna/body-frame validation for the GPS+RC single-waypoint
+  workflow. Continue IMU electrical diagnostics separately, but do not block
+  GPS+RC candidate dry-run on IMU availability.
 - Keep the waypoint target small and explicit when motion work resumes.
 - Require GPS readiness, known GPS body-frame placement, heading/attitude plan,
   RC override, STOP/failsafe checks, and wheel-off-ground validation before any

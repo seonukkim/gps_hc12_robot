@@ -731,6 +731,47 @@ Updated variant-file finding:
   without IMU support.
 - Do not enable motion based on IMU assumptions.
 
+## 2026-05-28: Default Wire Scanner Confirms D11/D12 Bus Stuck Low
+
+Observed setup:
+
+- OpenRB-150 variant files confirm:
+  - Arduino D11 = SDA = PA08
+  - Arduino D12 = SCL = PA09
+  - `PIN_WIRE_SDA = 11`
+  - `PIN_WIRE_SCL = 12`
+  - `Wire` is constructed using those pins
+- Current IMU wiring matches the default `Wire` pins.
+- Physical IMU wiring should not be moved casually.
+
+Observed robust `Wire` scanner result:
+
+- The scanner runs and prints repeated scan passes.
+- Every pass shows:
+  - `pre_scan_sda=LOW`
+  - `pre_scan_scl=LOW`
+  - `BUS_STUCK_LOW_BEFORE_SCAN`
+  - `found_count=0`
+  - `stable_valid_address=NA`
+
+Interpretation:
+
+- The scanner is not hanging.
+- It is correctly refusing to scan because the I2C bus is stuck low before
+  address probing.
+- IMU is not verified and must not be used for autonomy yet.
+- This is likely an electrical or bus issue rather than an Arduino pin mapping
+  issue.
+- Possible causes include IMU power, GND, missing pullups, bus held low,
+  connector/solder issue, or sensor board issue.
+- Previous all-address bit-bang scan results remain invalid and must not be
+  treated as successful IMU detection.
+
+Decision:
+
+- Continue the GPS+RC safety-gated workflow without IMU for now.
+- Do not enable motion based on IMU assumptions.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

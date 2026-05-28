@@ -247,10 +247,16 @@ Status:
 - IMU presence remains unverified.
 - D11/D12 stuck-low means an electrical or bus issue, not a pin mapping issue.
 - Possible causes include IMU power, GND, pullups, or a bus-stuck fault.
-- Next diagnostic is the robust default `Wire` scanner for D11/D12, not a
-  custom SERCOM2 scanner.
-- If the robust default `Wire` scanner also fails, continue GPS+RC work without
-  relying on IMU data.
+- Robust default `Wire` scanner result:
+  - scanner runs and prints repeated scan passes
+  - every pass shows `pre_scan_sda=LOW` and `pre_scan_scl=LOW`
+  - every pass prints `BUS_STUCK_LOW_BEFORE_SCAN`
+  - every pass reports `found_count=0`
+  - every pass reports `stable_valid_address=NA`
+- `pre_scan_sda=LOW` and `pre_scan_scl=LOW` mean the bus is stuck low before
+  address probing.
+- `stable_valid_address=NA` means no valid IMU address has been verified.
+- Continue GPS+RC work without relying on IMU data for now.
 
 Do not repeat:
 
@@ -331,9 +337,9 @@ Known boundaries:
 The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is
 not implemented in the current repo and the fixed D11/D12 IMU wiring is not yet
 verified. Do not build waypoint following as if heading is already available.
-First verify the IMU with the robust default `Wire` D11/D12 scanner, then verify
-orientation and axis signs. If the IMU remains unavailable, continue GPS+RC
-workflow without IMU-dependent autonomy.
+The robust default `Wire` D11/D12 scanner currently shows the bus stuck low
+before scanning, so no IMU address is verified. If the IMU remains unavailable,
+continue GPS+RC workflow without IMU-dependent autonomy.
 
 ## ROS2 Is Skeleton-Only
 

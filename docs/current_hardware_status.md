@@ -223,10 +223,17 @@ Current status:
   `stable_valid_address=NA`.
 - D11/D12 stuck-low should be treated as an electrical or bus issue, such as
   IMU power, GND, pullups, or a stuck device, not as a pin mapping issue.
+- Robust default `Wire` scanner result:
+  - scanner runs and prints repeated scan passes
+  - `pre_scan_sda=LOW`
+  - `pre_scan_scl=LOW`
+  - `BUS_STUCK_LOW_BEFORE_SCAN`
+  - `found_count=0`
+  - `stable_valid_address=NA`
+- The scanner is not hanging; it is correctly refusing to scan while the bus is
+  stuck low before address probing.
 - IMU presence and exact device identity remain unverified.
-- Next diagnostic is the robust default `Wire` scanner for D11/D12.
-- If the robust default `Wire` scanner also fails, continue the GPS+RC workflow
-  without IMU support instead of blocking on IMU integration.
+- Continue the GPS+RC workflow without IMU support for now.
 
 ## Firmware mapping
 
@@ -255,11 +262,11 @@ Current status:
   candidate-command safety, but floor waypoint driving is blocked by the GPS
   antenna/body-frame issue.
 - Next required validation before motion:
-  - robust default `Wire` I2C scan for D11/D12
-  - IMU orientation/axis check
   - GPS mounted/open-sky candidate retest
   - wheel-off-ground bench test only after safety gates and sensor assumptions
     are clear
+  - IMU is optional for the current GPS+RC single-waypoint preparation stage;
+    do not block candidate dry-run work on IMU availability
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB
   debug with motors neutral and HC-12 ignored.
 - Audit current HC-12 wiring from code, board inspection, and non-motion

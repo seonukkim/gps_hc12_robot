@@ -193,6 +193,17 @@ and do not treat it as success. If D11/D12 read LOW with pullups enabled, treat
 that as an electrical or bus issue such as power, GND, pullups, or a stuck bus;
 do not treat it as a pin mapping issue.
 
+Latest observed result:
+
+- The robust default `Wire` scanner runs and prints repeated scan passes.
+- Every pass shows `pre_scan_sda=LOW` and `pre_scan_scl=LOW`.
+- Every pass prints `BUS_STUCK_LOW_BEFORE_SCAN`.
+- Every pass reports `found_count=0` and `stable_valid_address=NA`.
+- The scanner is not hanging; it is correctly refusing to scan because the bus
+  is stuck low before address probing.
+- IMU remains unverified and must not be used for autonomy yet.
+- Continue the GPS+RC safety-gated workflow without IMU for now.
+
 Compile:
 
 ```bash
