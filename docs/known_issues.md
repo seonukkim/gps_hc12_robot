@@ -218,6 +218,44 @@ Do not repeat:
 - Do not assume IMU data can turn detached antenna coordinates into rover body
   coordinates.
 
+## IMU I2C Wiring Is Fixed On D11/D12
+
+Status:
+
+- The IMU wiring cannot be moved casually.
+- Current fixed wiring is believed to be:
+  - IMU SDA: OpenRB D11 / PA08 / SDA(SC2)
+  - IMU SCL: OpenRB D12 / PA09 / SCL(SC2)
+- The normal `Wire.begin()` scanner uses the board's default hardware I2C pins.
+  It does not scan arbitrary D11/D12 pins and is inconclusive for this wiring.
+- Use `firmware/i2c_d11_d12_bitbang_scanner` to test the current fixed IMU
+  wiring.
+- If the scanner reports every address, or a very large number of addresses,
+  treat it as scanner/bus failure such as ACK stuck low. It is not evidence of
+  many I2C devices.
+- The original bit-bang scanner produced impossible all-address detection; this
+  result is invalid and must not be treated as successful IMU detection.
+- The hardened bit-bang scanner was tested with SDA=D11/SCL=D12 and with the
+  swapped SDA=D12/SCL=D11 assignment. Both variants repeatedly reported
+  `released_sda=LOW`, `released_scl=LOW`, `SDA stuck low`, `SCL stuck low`,
+  `raw_found_count=0`, `valid_found_count=0`, and `stable_valid_address=NA`.
+- IMU presence remains unverified.
+- The D11/D12 PA08/PA09 wiring may require a SERCOM2 hardware I2C setup instead
+  of software bit-bang.
+- Another possible cause is IMU power, GND, pullup, or a bus-stuck fault.
+- Next diagnostic is a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
+- If SERCOM2 also fails, continue GPS+RC work without relying on IMU data.
+
+Do not repeat:
+
+- Do not ask to move IMU wires to hardware SDA/SCL as a routine software step.
+- Do not conclude the IMU is absent only because `firmware/i2c_scanner_test`
+  finds no devices on hardware `Wire` pins.
+- Do not treat all-address detection as valid.
+- Do not infer device type from I2C address alone.
+- Do not rely on IMU heading or acceleration for autonomy until a stable I2C
+  device address and orientation/axis checks are confirmed.
+
 ## Station HC-12 Device Still Needs Confirmation
 
 The repository defaults to `/dev/ttyACM0`, but the actual station HC-12 USB
@@ -284,10 +322,12 @@ Known boundaries:
 
 ## Heading / BMI160 Is Not Integrated
 
-The rover likely needs heading from GPS plus BMI160 IMU, but BMI160 support is
-not implemented in the current repo. Do not build waypoint following as if
-heading is already available. First run an IMU I2C scan and verify orientation
-and axis signs.
+The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is
+not implemented in the current repo and the fixed D11/D12 IMU wiring is not yet
+verified. Do not build waypoint following as if heading is already available.
+First verify the IMU with a SERCOM2 D11/D12 hardware I2C scan, then verify
+orientation and axis signs. If the IMU remains unavailable, continue GPS+RC
+workflow without IMU-dependent autonomy.
 
 ## ROS2 Is Skeleton-Only
 

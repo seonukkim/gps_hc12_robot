@@ -681,6 +681,46 @@ Next required validation before motion:
 - Wheel-off-ground bench test only after safety gates and sensor assumptions
   are clear.
 
+## 2026-05-28: Fixed D11/D12 IMU Bit-Bang Scanner Inconclusive
+
+Observed setup:
+
+- Physical IMU wiring should not be moved.
+- Physical wiring is believed to be:
+  - SCL: OpenRB D12 / PA09 / SCL(SC2)
+  - SDA: OpenRB D11 / PA08 / SDA(SC2)
+
+Observed bit-bang scanner results:
+
+- The original bit-bang scanner produced impossible all-address detection.
+- The hardened bit-bang scanner was then tested with:
+  - SDA=D11, SCL=D12
+  - SDA=D12, SCL=D11
+- Both tests repeatedly showed:
+  - `released_sda=LOW`
+  - `released_scl=LOW`
+  - `SDA stuck low`
+  - `SCL stuck low`
+  - `raw_found_count=0`
+  - `valid_found_count=0`
+  - `stable_valid_address=NA`
+
+Interpretation:
+
+- IMU is not verified.
+- All-address detection was invalid and must not be treated as success.
+- The fixed D11/D12 PA08/PA09 wiring may require a SERCOM2 hardware I2C setup
+  instead of bit-bang.
+- Another possible cause is IMU power, GND, pullup, or a bus-stuck issue.
+- Do not rely on IMU data for autonomy yet.
+- Do not move IMU wires casually.
+
+Next action:
+
+- Create or run a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
+- If that also fails, continue GPS+RC workflow without IMU support.
+- Do not enable motion based on IMU assumptions.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

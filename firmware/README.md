@@ -164,17 +164,20 @@ commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
 
 ## I2C Scanner Test
 
-Use this standalone sketch to verify whether the purple module or any other
-device responds on the OpenRB I2C bus:
+Use this standalone sketch to verify whether a device responds on the OpenRB
+hardware `Wire` I2C bus:
 
 ```text
 firmware/i2c_scanner_test/i2c_scanner_test.ino
 ```
 
 It uses `Wire`, USB Serial at `115200`, scans addresses `0x03` through `0x77`,
-and does not attach motors or Servo outputs. Addresses such as `0x68`, `0x69`,
-or `0x76` are common for some IMU/sensor modules, but address alone is not a
-device identification.
+and does not attach motors or Servo outputs. This scanner is only valid for the
+board's default hardware I2C pins. It is inconclusive for the current fixed IMU
+wiring on D11/D12. Addresses such as `0x68`, `0x69`, or `0x76` are common for
+some IMU/sensor modules, but address alone is not a device identification. The
+scanner prints a startup banner, Wire checkpoints, and `scan_pass=N
+found_count=M` every 2 seconds.
 
 Compile:
 
@@ -186,6 +189,89 @@ Upload:
 
 ```bash
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-scanner firmware/i2c_scanner_test
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+If the monitor is blank, press the OpenRB reset button while the monitor is
+open. The scanner should print again every 2 seconds even if the first startup
+messages were missed.
+
+## D11/D12 Bit-Bang I2C Scanner
+
+Use this standalone sketch for the current fixed IMU wiring:
+
+```text
+firmware/i2c_d11_d12_bitbang_scanner/i2c_d11_d12_bitbang_scanner.ino
+```
+
+Current fixed IMU wiring:
+
+- SDA: OpenRB D11 / PA08 / SDA(SC2)
+- SCL: OpenRB D12 / PA09 / SCL(SC2)
+
+This sketch implements open-drain style I2C in software:
+
+- release line: `pinMode(pin, INPUT_PULLUP)`
+- drive low: `pinMode(pin, OUTPUT); digitalWrite(pin, LOW)`
+- never drive HIGH directly
+
+It prints the released SDA/SCL state, reports `SDA stuck low` or `SCL stuck
+low` if either line remains low, attempts bus recovery before skipping stuck
+passes, scans addresses `0x03` through `0x77` every 2 seconds, and prints
+`scan_pass`, `bus_stuck_low`, raw/valid found counts, found addresses, and
+`stable_valid_address`.
+
+If a pass reports many addresses or every address, treat it as scanner/bus
+failure (`INVALID_SCAN_ACK_STUCK_LOW`), not as many devices. The IMU remains
+unverified until a stable single address is detected in at least three
+consecutive valid scan passes.
+
+Latest observed result:
+
+- The original bit-bang scanner produced impossible all-address detection; that
+  was invalid and must not be treated as success.
+- The hardened scanner was tested with SDA=D11/SCL=D12 and with swapped
+  SDA=D12/SCL=D11.
+- Both variants repeatedly reported `released_sda=LOW`, `released_scl=LOW`,
+  `SDA stuck low`, `SCL stuck low`, `raw_found_count=0`, `valid_found_count=0`,
+  and `stable_valid_address=NA`.
+- IMU presence remains unverified.
+- Next diagnostic is a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
+- If SERCOM2 also fails, continue GPS+RC workflow without IMU support.
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-d11-d12-bitbang firmware/i2c_d11_d12_bitbang_scanner
+```
+
+Compile with explicit pin override:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-d11-d12-bitbang --build-property 'compiler.cpp.extra_flags=-DI2C_BITBANG_SDA_PIN=11 -DI2C_BITBANG_SCL_PIN=12' firmware/i2c_d11_d12_bitbang_scanner
+```
+
+Compile with swapped D12/D11 assignment, without moving wires:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-d12-d11-bitbang --build-property 'compiler.cpp.extra_flags=-DI2C_BITBANG_SDA_PIN=12 -DI2C_BITBANG_SCL_PIN=11' firmware/i2c_d11_d12_bitbang_scanner
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-d11-d12-bitbang firmware/i2c_d11_d12_bitbang_scanner
+```
+
+Upload the swapped D12/D11 build:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-i2c-d12-d11-bitbang firmware/i2c_d11_d12_bitbang_scanner
 ```
 
 Monitor:

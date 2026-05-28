@@ -49,8 +49,9 @@
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
-- Purple module: appears to be on an I2C-style connection and may be an IMU,
-  but IMU presence is unverified until the I2C scanner test is run
+- Purple module: fixed wiring is believed to be SDA on OpenRB D11 / PA08 /
+  SDA(SC2) and SCL on OpenRB D12 / PA09 / SCL(SC2); it may be an IMU, but IMU
+  I2C presence remains unverified
 - Fixed Wiring Plan: GPS remains on the central connector / `Serial2`; HC-12
   remains physically mounted as-is until its current wiring is audited
 
@@ -199,9 +200,24 @@ Current status:
 - Whether HC-12 shares GPS `Serial2` is not yet proven.
 - Historical `Serial3` D13/D14 wiring notes in older docs must be treated as a
   different wiring setup until revalidated.
-- Purple module appears to be I2C-style wiring and should not be treated as
-  UART; IMU presence and exact device identity remain unverified until the I2C
-  scanner test is run.
+- Purple module uses fixed D11/D12 I2C-style wiring and should not be treated as
+  UART.
+- IMU SCL is believed to be connected to OpenRB D12 / PA09 / SCL(SC2).
+- IMU SDA is believed to be connected to OpenRB D11 / PA08 / SDA(SC2).
+- Do not ask to move the IMU wires to hardware SDA/SCL.
+- The normal `Wire.begin()` scanner checks the board's default hardware I2C
+  pins and is inconclusive for the current D11/D12 wiring.
+- D11/D12 and swapped D12/D11 assignments can be tested with compile-time pin
+  override without moving wires.
+- All-address detection is scanner/bus failure, not evidence of many devices.
+- Hardened bit-bang tests with both SDA=D11/SCL=D12 and SDA=D12/SCL=D11
+  repeatedly reported `released_sda=LOW`, `released_scl=LOW`, `SDA stuck low`,
+  `SCL stuck low`, `raw_found_count=0`, `valid_found_count=0`, and
+  `stable_valid_address=NA`.
+- IMU presence and exact device identity remain unverified.
+- Next diagnostic is a SERCOM2 hardware I2C scanner for D11/D12 PA08/PA09.
+- If the SERCOM2 scanner also fails, continue the GPS+RC workflow without IMU
+  support instead of blocking on IMU integration.
 
 ## Firmware mapping
 
@@ -230,7 +246,7 @@ Current status:
   candidate-command safety, but floor waypoint driving is blocked by the GPS
   antenna/body-frame issue.
 - Next required validation before motion:
-  - IMU I2C scan
+  - SERCOM2 hardware I2C scan for D11/D12 PA08/PA09
   - IMU orientation/axis check
   - GPS mounted/open-sky candidate retest
   - wheel-off-ground bench test only after safety gates and sensor assumptions
