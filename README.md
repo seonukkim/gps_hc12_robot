@@ -290,6 +290,14 @@ override build should print `target_override_enabled=true`,
 `distance_allowed` or approve bench testing until the runtime target fields
 match the intended target.
 
+Latest check: target override plumbing is verified. A build with
+`SINGLE_WP_TARGET_LAT=35.5710210` and `SINGLE_WP_TARGET_LON=129.1864016`
+correctly printed `target_source=compile_time`, matching macro strings, and
+runtime `target_lat=35.571021`, `target_lon=129.186402`. It was still blocked
+because the current GPS position was about `380` to `392` m away, exceeding
+`max_target_distance_m=30.0`. Recompute the target from the current GPS position
+before the next `AUTO_MOTION_ARMED=0` run.
+
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.
 `AUTO_MOTION_ARMED=1` is reserved for a later wheel-off-ground bench test after

@@ -293,22 +293,42 @@ Status:
   `target_override_enabled=true` and `target_source=compile_time`.
 - If the macros are not provided, USBDBG should print
   `target_override_enabled=false` and `target_source=fallback`.
+- A later check verified target override plumbing with:
+  - `SINGLE_WP_TARGET_LAT=35.5710210`
+  - `SINGLE_WP_TARGET_LON=129.1864016`
+  - `target_override_enabled=true`
+  - `target_source=compile_time`
+  - `target_lat_macro=35.5710210`
+  - `target_lon_macro=129.1864016`
+  - `target_lat=35.571021`
+  - `target_lon=129.186402`
+- That same run had current GPS around `gps_lat≈35.56752..35.56756` and
+  `gps_lon≈129.18688`, so `target_distance_m≈380..392`.
+- Since `max_target_distance_m=30.0`, `distance_allowed=false` and
+  `safety_ready=false` were expected.
 
 Interpretation:
 
 - This was a safe failed validation, not a successful nearby candidate-command
   test.
 - Safety gates and AUTO motor inhibit worked correctly.
-- Compile-time target override must be verified in USBDBG before interpreting
-  `distance_allowed`, `safety_ready`, or candidate command values.
+- Compile-time target override is now verified, but target override success must
+  be checked separately from `distance_allowed`, `safety_ready`, or candidate
+  command values.
+- Runtime GPS can move far from a previously computed target. Recompute the
+  nearby target from the current GPS position before each nearby candidate run.
+- `distance_allowed=false` is expected when `target_distance_m` exceeds
+  `max_target_distance_m`.
 - Runtime `target_lat` and `target_lon` are the source of truth.
 
 Do not repeat:
 
 - Do not assume a compile command changed the target unless USBDBG confirms the
   runtime `target_lat` / `target_lon`.
+- Do not treat `target_override_enabled=true` as proof that the target is nearby
+  enough. Check `target_distance_m` against `max_target_distance_m`.
 - Do not approve bench testing or floor driving from a run where the target
-  override did not take effect.
+  override did not take effect or where `distance_allowed=false`.
 
 ## Station HC-12 Device Still Needs Confirmation
 

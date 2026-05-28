@@ -816,6 +816,54 @@ Interpretation:
 - Bench test is not approved yet.
 - Floor driving is not approved.
 
+## 2026-05-28: Single-Waypoint Target Override Verified, Distance Gate Blocks
+
+Build/upload:
+
+- Build/upload succeeded with:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+  - `SINGLE_WP_TARGET_LAT=35.5710210`
+  - `SINGLE_WP_TARGET_LON=129.1864016`
+
+Observed USBDBG target fields:
+
+- `target_override_enabled=true`
+- `target_source=compile_time`
+- `target_lat_macro=35.5710210`
+- `target_lon_macro=129.1864016`
+- `target_lat=35.571021`
+- `target_lon=129.186402`
+
+Observed GPS and safety fields:
+
+- GPS fix was true.
+- Current GPS position was around:
+  - `gps_lat≈35.56752` to `35.56756`
+  - `gps_lon≈129.18688`
+- `target_distance_m` remained around `380` to `392` m.
+- `max_target_distance_m=30.0`.
+- `distance_allowed=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0` correctly kept:
+  - `final_left_cmd=0.000`
+  - `final_right_cmd=0.000`
+
+Interpretation:
+
+- Target override plumbing is fixed.
+- This was a safe blocked validation, not a nearby candidate-command success.
+- `distance_allowed=false` is expected because `target_distance_m` exceeded
+  `max_target_distance_m`.
+- Target override success must be checked separately from
+  `distance_allowed` / `safety_ready`.
+- The next step is to recompute a nearby target from the current GPS position
+  and rerun with `AUTO_MOTION_ARMED=0`.
+- Bench test is still blocked.
+- Floor driving is still blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

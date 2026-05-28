@@ -146,6 +146,15 @@ Target override rule:
 - The previous nearby target run was safe because `AUTO_MOTION_ARMED=0` kept
   final outputs at zero, but it was not a successful nearby candidate-command
   test because runtime target fields still showed the old placeholder.
+- Latest check: target override plumbing is verified with
+  `SINGLE_WP_TARGET_LAT=35.5710210` and
+  `SINGLE_WP_TARGET_LON=129.1864016`; USBDBG printed
+  `target_override_enabled=true`, `target_source=compile_time`, matching macro
+  strings, and runtime `target_lat=35.571021`, `target_lon=129.186402`.
+- That run was still blocked because current GPS was about `380` to `392` m
+  away, greater than `max_target_distance_m=30.0`, so `distance_allowed=false`
+  and `safety_ready=false` were expected. Recompute a nearby target from the
+  current GPS position before the next inhibited run.
 
 Safety gates:
 

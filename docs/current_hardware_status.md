@@ -272,12 +272,22 @@ Current status:
 - Runtime `target_lat` / `target_lon` are the source of truth before
   interpreting `distance_allowed` or approving any bench test.
 - Firmware source now supports `SINGLE_WP_TARGET_LAT` /
-  `SINGLE_WP_TARGET_LON`; the next hardware check is to verify USBDBG prints
+  `SINGLE_WP_TARGET_LON`; USBDBG target override was verified with
+  `SINGLE_WP_TARGET_LAT=35.5710210` and
+  `SINGLE_WP_TARGET_LON=129.1864016`. Runtime printed
   `target_override_enabled=true`, `target_source=compile_time`,
-  `target_lat_macro`, `target_lon_macro`, and the intended runtime
-  `target_lat` / `target_lon`.
+  `target_lat_macro=35.5710210`, `target_lon_macro=129.1864016`,
+  `target_lat=35.571021`, and `target_lon=129.186402`.
+- Nearby candidate command remains incomplete. GPS fix was true, but current
+  GPS was around `gps_lat≈35.56752..35.56756`, `gps_lon≈129.18688`, so
+  `target_distance_m≈380..392` exceeded `max_target_distance_m=30.0`.
+  Therefore `distance_allowed=false`, `safety_ready=false`, candidate commands
+  stayed zero, and final outputs stayed zero.
+- Target override success must be interpreted separately from
+  `distance_allowed` / `safety_ready`.
 - Next required validation before motion:
-  - verify compile-time target override diagnostics on USBDBG
+  - recompute a nearby target from the current GPS position
+  - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
   - GPS mounted/open-sky candidate retest
   - wheel-off-ground bench test only after safety gates and sensor assumptions
     are clear

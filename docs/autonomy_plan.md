@@ -8,10 +8,11 @@ manual driving with GPS readiness calculations.
 
 Unified fixed-wiring RC + GPS dry-run validation is complete. Single-waypoint
 candidate dry-run with `AUTO_MOTION_ARMED=0` confirms candidate-command safety,
-but the latest nearby candidate retest is blocked by target override plumbing:
-the compile command attempted to set a nearby target, while runtime USBDBG still
-printed the old placeholder target. Bench testing and floor waypoint driving
-are not approved yet.
+and compile-time target override is now verified in USBDBG. Nearby candidate
+command validation is still incomplete because the verified target was about
+`380` to `392` m from the current GPS position, so `distance_allowed=false` and
+`safety_ready=false`. Bench testing and floor waypoint driving are not approved
+yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -24,21 +25,23 @@ Staged plan:
    with AUTO motor output forced to zero.
 2. Single-waypoint candidate-command dry-run: compute candidate commands behind
    safety gates while `AUTO_MOTION_ARMED=0` forces final motor output to zero.
-3. Target override diagnostics: compile with `SINGLE_WP_TARGET_LAT` /
-   `SINGLE_WP_TARGET_LON`, verify USBDBG prints `target_override_enabled=true`
-   and `target_source=compile_time`, then verify runtime `target_lat` /
-   `target_lon` before interpreting `distance_allowed` or `safety_ready`.
-4. Sensor-frame validation: retest GPS with the antenna mounted on the rover
+3. Target override diagnostics complete: USBDBG now confirms
+   `target_override_enabled=true`, `target_source=compile_time`, and runtime
+   `target_lat` / `target_lon` matching the compile-time macros.
+4. Nearby target recomputation: compute a new target from the current GPS
+   position and rerun with `AUTO_MOTION_ARMED=0`. Do not proceed until
+   `target_distance_m <= max_target_distance_m`.
+5. Sensor-frame validation: retest GPS with the antenna mounted on the rover
    body in open sky. IMU diagnostics remain useful, but IMU is optional for the
    current GPS+RC single-waypoint preparation stage and must not block
    candidate dry-run work.
-5. Bench test with wheels lifted: compile the same experiment with
+6. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
-6. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
+7. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
    assumptions are validated.
-7. Multi-waypoint motion: only after single-waypoint behavior is proven.
-8. Coverage path / lawnmower driving: last step, after mission sequencing,
+8. Multi-waypoint motion: only after single-waypoint behavior is proven.
+9. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
@@ -65,12 +68,10 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 
 ## Next Required Validation Before Motion
 
-- Validate compile-time target override diagnostics on the rover. The runtime
-  `target_override_enabled`, `target_source`, `target_lat_macro`,
-  `target_lon_macro`, `target_lat`, and `target_lon` fields printed by USBDBG
-  must match the intended nearby target before `target_distance_m`,
-  `distance_allowed`, or `safety_ready` are interpreted as a nearby-target
-  result.
+- Recompute a nearby target from the current GPS position and rerun the
+  single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
+- Confirm the target override fields still match the intended target, then
+  interpret `target_distance_m`, `distance_allowed`, and `safety_ready`.
 - Re-test candidate GPS fields with the GPS antenna mounted on the rover and
   placed in open sky.
 - Run wheel-off-ground bench testing only after safety gates and sensor-frame
@@ -255,6 +256,14 @@ Target override rule:
   `target_lon=129.186050`.
 - Therefore the nearby retest was blocked by target override plumbing and must
   not be counted as a successful nearby candidate-command test.
+- A later target override check compiled with
+  `SINGLE_WP_TARGET_LAT=35.5710210` and `SINGLE_WP_TARGET_LON=129.1864016`.
+  USBDBG correctly printed `target_override_enabled=true`,
+  `target_source=compile_time`, matching macro strings, and runtime
+  `target_lat=35.571021`, `target_lon=129.186402`.
+- That proves target override plumbing is fixed. It does not prove nearby
+  candidate command behavior, because the current GPS position was around
+  `35.56752..35.56756,129.18688`, making `target_distance_m≈380..392`.
 
 Safety constants:
 
@@ -340,6 +349,28 @@ Latest nearby candidate retest:
 - This was a safe failed validation. Safety gates and motor inhibit worked, but
   target override plumbing is the next blocker.
 
+Latest target override check:
+
+- Build/upload succeeded with
+  `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`,
+  `AUTO_MOTION_ARMED=0`, `SINGLE_WP_TARGET_LAT=35.5710210`, and
+  `SINGLE_WP_TARGET_LON=129.1864016`.
+- USBDBG correctly printed `target_override_enabled=true`,
+  `target_source=compile_time`, `target_lat_macro=35.5710210`,
+  `target_lon_macro=129.1864016`, `target_lat=35.571021`, and
+  `target_lon=129.186402`.
+- GPS fix was true, but current GPS was around `gps_lat≈35.56752..35.56756`
+  and `gps_lon≈129.18688`.
+- `target_distance_m` remained around `380` to `392` m while
+  `max_target_distance_m=30.0`.
+- `distance_allowed=false`, `safety_ready=false`,
+  `candidate_left_cmd=0.000`, and `candidate_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0` correctly kept `final_left_cmd=0.000` and
+  `final_right_cmd=0.000`.
+- This verifies target override plumbing, but nearby candidate command remains
+  incomplete. Recompute a nearby target from the current GPS position and rerun
+  with `AUTO_MOTION_ARMED=0`.
+
 ## Safety Rules
 
 - No real autonomous motion in this mode.
@@ -353,10 +384,10 @@ Latest nearby candidate retest:
 
 Next milestone:
 
-- Validate compile-time target override diagnostics on hardware, then prepare
-  GPS antenna/body-frame validation for the GPS+RC single-waypoint workflow.
-  Continue IMU electrical diagnostics separately, but do not block GPS+RC
-  candidate dry-run on IMU availability.
+- Recompute a nearby target from the current GPS position and rerun
+  `AUTO_MOTION_ARMED=0`, then prepare GPS antenna/body-frame validation for the
+  GPS+RC single-waypoint workflow. Continue IMU electrical diagnostics
+  separately, but do not block GPS+RC candidate dry-run on IMU availability.
 - Keep the waypoint target small and explicit when motion work resumes.
 - Require GPS readiness, known GPS body-frame placement, heading/attitude plan,
   RC override, STOP/failsafe checks, and wheel-off-ground validation before any
