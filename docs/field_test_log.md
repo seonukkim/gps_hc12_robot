@@ -1026,6 +1026,137 @@ Interpretation:
 - Bench test remains blocked.
 - Floor driving remains blocked.
 
+## 2026-05-29: Outdoor Manual/Auto Recovery And Stale-Target Safety Block
+
+Setup:
+
+- The rover/GPS was tested outdoors.
+- The previous RC mode-switch issue was traced to the station/controller being
+  off.
+- After restoring the controller/link, Manual/Auto switching worked again.
+- Build remained the single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
+
+Observed Manual/Auto recovery:
+
+- AUTO was verified:
+  - `mode=AUTO_READY`
+  - `auto_sw=true`
+  - `mode_us` around `2001` to `2002`
+  - `control_source=STOP`
+- MANUAL was verified:
+  - `mode=MANUAL`
+  - `auto_sw=false`
+  - `mode_us` around `1000` to `1001`
+  - `control_source=RC_MANUAL`
+- Manual stick input was also verified:
+  - `steer_us` / `throttle_us` changed
+  - at least one MANUAL line produced nonzero `left_cmd` /
+    `final_left_cmd`
+
+Observed GPS and target state:
+
+- GPS was usable outdoors at several points:
+  - `gps_fix=true`
+  - `gps_ready=true` appeared when HDOP was good
+- The compile-time target was stale:
+  - `target_lat=35.570675`
+  - `target_lon=129.186769`
+  - runtime GPS was around `35.5716,129.1875`
+  - `target_distance_m` was around `100` to `131` m
+  - `max_target_distance_m=30.0`
+
+Observed safety state:
+
+- `distance_allowed=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0`.
+- `auto_motor_inhibit=true`.
+- AUTO final commands stayed zero.
+
+Interpretation:
+
+- This is a partial success: RC Manual/Auto operation is recovered, and outdoor
+  GPS can become usable.
+- This is also a safety-blocked autonomy dry-run, not a nearby candidate-command
+  success.
+- The remaining blocker is stale target and GPS/timeout gate handling.
+- The next step is to recompute a nearby target from the current runtime GPS
+  fix and rerun with `AUTO_MOTION_ARMED=0`.
+- Bench test remains blocked until `safety_ready=true` and nonzero candidate
+  commands are observed while final outputs remain inhibited.
+- Floor driving remains blocked.
+
+## 2026-05-29: Outdoor Nearby Dry-Run Reached Distance Gate But Stayed Blocked
+
+Build/upload:
+
+- Build/upload used:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+  - `SINGLE_WP_TARGET_LAT=35.5707680`
+  - `SINGLE_WP_TARGET_LON=129.1867906`
+
+Observed USBDBG target fields:
+
+- `target_override_enabled=true`
+- `target_source=compile_time`
+- `target_lat_macro=35.5707680`
+- `target_lon_macro=129.1867906`
+- `target_lat=35.570768`
+- `target_lon=129.186791`
+
+Observed GPS and distance state:
+
+- GPS was good outdoors in many lines:
+  - `gps_fix=true`
+  - `gps_ready=true` appeared repeatedly
+  - `gps_sats` often `7` to `8`
+  - `gps_hdop` reached around `0.95` to `1.98`
+  - `gps_age_ms` was fresh in many lines
+- The rover/GPS eventually became close enough to the target:
+  - `target_distance_m` decreased from around `45` to `55` m to around
+    `27.1`, `25.4`, `23.5`, `21.1`, `18.8`, and `18.5` m
+  - `distance_allowed=true` was observed after `target_distance_m` became less
+    than `max_target_distance_m=30.0`
+
+Observed blocker:
+
+- `mode` stayed mostly `MANUAL`.
+- `auto_sw=false`.
+- `timeout_ok=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- A brief failsafe-like PPM glitch was also observed:
+  - `mode=FAILSAFE`
+  - `rc_ok=false`
+  - `steer_us` around `495`
+  - `throttle_us` around `2504`
+  - `control_source=STOP`
+- `AUTO_MOTION_ARMED=0` remained safe.
+
+Interpretation:
+
+- This is partial progress and a safe blocked validation, not a full success.
+- Target override is working.
+- Outdoor GPS is now good enough for candidate dry-run work.
+- The distance gate can become true with a nearby target.
+- `distance_allowed=true` in MANUAL is not enough.
+- A successful candidate dry-run still requires the same condition in
+  `AUTO_READY` with `gps_ready=true`, `distance_allowed=true`,
+  `timeout_ok=true`, `safety_ready=true`, and candidate commands observed while
+  final motor outputs remain inhibited.
+- The repeated `timeout_ok=false` suggests the current timeout semantics are
+  unsuitable for long MANUAL GPS-waiting workflows.
+- Next step is either:
+  - quick reset/reupload and immediate AUTO dry-run while `distance_allowed=true`
+  - firmware improvement so timeout is based on AUTO entry rather than total
+    boot/manual waiting time
+- Bench test remains blocked.
+- Floor driving remains blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

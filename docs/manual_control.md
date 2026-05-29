@@ -91,12 +91,30 @@ Compile/upload/monitor on this macOS setup:
 Probe procedure:
 
 1. Keep motors disconnected or wheels off ground.
-2. Move each stick and each switch one at a time.
-3. Record which `chN_us` changes and the min/max range for that channel.
-4. Treat the channel that reaches around `2000 us` as the AUTO switch
+2. Confirm the station/controller is powered on and linked. A controller-off
+   state can make RC channels appear static or failsafe-like even when the
+   rover PPM reader is working.
+3. Move each stick and each switch one at a time.
+4. Record which `chN_us` changes and the min/max range for that channel.
+5. Treat the channel that reaches around `2000 us` as the AUTO switch
    candidate.
-5. Do not change the controller mode-channel mapping until the raw PPM probe
+6. Do not change the controller mode-channel mapping until the raw PPM probe
    confirms the intended switch.
+
+Latest outdoor recovery note:
+
+- The previous stuck-looking RC mode issue was caused by the
+  station/controller being off.
+- After restoring the controller/link, AUTO was verified with
+  `mode=AUTO_READY`, `auto_sw=true`, `mode_us≈2001..2002`, and
+  `control_source=STOP`.
+- MANUAL was verified with `mode=MANUAL`, `auto_sw=false`,
+  `mode_us≈1000..1001`, and `control_source=RC_MANUAL`.
+- Manual stick input changed `steer_us` / `throttle_us`, and at least one
+  MANUAL line produced nonzero `left_cmd` / `final_left_cmd`.
+- A later outdoor nearby dry-run briefly showed a failsafe-like PPM glitch
+  (`rc_ok=false`, invalid-looking `steer_us` / `throttle_us`); the firmware kept
+  `control_source=STOP`, which is the correct safe behavior.
 
 Current calibration and direction constants:
 
@@ -346,6 +364,11 @@ Important defaults:
 
 - `motorStop()` runs during setup.
 - CH5 high alone does not run autonomous drive; it only enters `AUTO_READY`.
+- In the current inhibited single-waypoint experiment, `AUTO_MOTION_ARMED=0`
+  and `auto_motor_inhibit=true` must keep AUTO final commands at zero.
+- `distance_allowed=true` observed in MANUAL is not enough to approve motion;
+  the same run must be verified in `AUTO_READY` with all safety flags true
+  before any later wheel-off-ground bench test.
 - Station startup must not send live motor-driving `AUTO` commands.
 - Link loss or stale manual frames return outputs to neutral.
 
@@ -354,7 +377,11 @@ Important defaults:
 1. Keep rover wheels off ground.
 2. Flash `firmware/openrb_robot_controller/openrb_robot_controller.ino`.
 3. Confirm firmware marker is `rc-cardinal-remap`.
-4. Confirm neutral USBDBG has `left_cmd=0.000 right_cmd=0.000`.
-5. Push stick forward and confirm forward wheel direction.
-6. Pull stick backward and confirm reverse wheel direction.
-7. Confirm `x`/`STOP` behavior before any ground-contact test.
+4. Confirm the station/controller is powered on and linked.
+5. Confirm MANUAL shows `mode_us≈1000` and `control_source=RC_MANUAL`.
+6. Confirm AUTO shows `mode_us≈2000`, `mode=AUTO_READY`, and
+   `control_source=STOP` before any autonomy dry-run interpretation.
+7. Confirm neutral USBDBG has `left_cmd=0.000 right_cmd=0.000`.
+8. Push stick forward and confirm forward wheel direction.
+9. Pull stick backward and confirm reverse wheel direction.
+10. Confirm `x`/`STOP` behavior before any ground-contact test.

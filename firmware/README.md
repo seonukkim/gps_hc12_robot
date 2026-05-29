@@ -170,6 +170,24 @@ Target override rule:
   `target_distance_m≈93.9`, `gps_ready=false`, `distance_allowed=false`, and
   `safety_ready=false`. Do the next inhibited run fully outdoors with rover and
   GPS fixed together, and run promptly because `timeout_ok` can expire.
+- Outdoor Manual/Auto recovery: the previous RC issue was caused by the
+  station/controller being off. After restoring the controller/link, AUTO was
+  verified with `mode=AUTO_READY`, `auto_sw=true`, `mode_us≈2001..2002`, and
+  `control_source=STOP`; MANUAL was verified with `mode=MANUAL`,
+  `auto_sw=false`, `mode_us≈1000..1001`, and `control_source=RC_MANUAL`.
+  Outdoor GPS was usable, but the compile-time target was stale
+  (`35.570675,129.186769` while runtime GPS was around `35.5716,129.1875`), so
+  `target_distance_m≈100..131`, `distance_allowed=false`, and
+  `safety_ready=false` were expected. Recompute the target from the current
+  runtime GPS fix before the next inhibited run.
+- Outdoor nearby dry-run progress: target override worked with
+  `SINGLE_WP_TARGET_LAT=35.5707680` and
+  `SINGLE_WP_TARGET_LON=129.1867906`; runtime printed
+  `target_lat=35.570768`, `target_lon=129.186791`. Outdoor GPS was repeatedly
+  ready and `target_distance_m` dropped below `30.0` m, so
+  `distance_allowed=true` was observed. This was still not a successful AUTO
+  candidate dry-run because mode stayed mostly MANUAL, `timeout_ok=false`,
+  `safety_ready=false`, and candidate commands remained zero.
 
 Safety gates:
 

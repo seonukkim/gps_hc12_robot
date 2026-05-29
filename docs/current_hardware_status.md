@@ -43,9 +43,34 @@
 - Final unified dry-run MANUAL observation: `mode=MANUAL`, `auto_sw=false`,
   `control_source=RC_MANUAL`, and RC stick input changes manual command and
   left/right command fields
+- Latest outdoor Manual/Auto recovery: the previous stuck-looking RC issue was
+  caused by the station/controller being off. After restoring the
+  controller/link, AUTO produced `mode=AUTO_READY`, `auto_sw=true`,
+  `mode_us≈2001..2002`, and `control_source=STOP`; MANUAL produced
+  `mode=MANUAL`, `auto_sw=false`, `mode_us≈1000..1001`, and
+  `control_source=RC_MANUAL`. Manual stick input changed `steer_us` /
+  `throttle_us`, and at least one MANUAL line produced nonzero
+  `left_cmd` / `final_left_cmd`.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed
+- Latest outdoor single-waypoint safety state: GPS was usable at several
+  points (`gps_fix=true`, `gps_ready=true` when HDOP was good), but the
+  compile-time target `35.570675,129.186769` was stale while runtime GPS was
+  around `35.5716,129.1875`. `target_distance_m≈100..131` exceeded
+  `max_target_distance_m=30.0`, so `distance_allowed=false`,
+  `safety_ready=false`, candidate commands stayed zero, and
+  `AUTO_MOTION_ARMED=0` / `auto_motor_inhibit=true` kept AUTO final commands at
+  zero.
+- Latest outdoor nearby dry-run: target override worked with
+  `SINGLE_WP_TARGET_LAT=35.5707680` and
+  `SINGLE_WP_TARGET_LON=129.1867906`; runtime printed
+  `target_lat=35.570768`, `target_lon=129.186791`. Outdoor GPS quality was good
+  in many lines (`gps_ready=true`, `gps_sats=7..8`, `gps_hdop≈0.95..1.98`), and
+  `target_distance_m` dropped below `30.0` m, so `distance_allowed=true` was
+  observed. The run was still blocked because mode stayed mostly MANUAL,
+  `auto_sw=false`, `timeout_ok=false`, `safety_ready=false`, and candidate
+  commands stayed zero.
 - GPS sky-fix validation: previous `gps_sats=0` and `gps_hdop=99.99` was poor
   indoor/window-side reception, not UART or firmware failure; moving the
   external antenna farther outside into open sky produced fix
@@ -259,12 +284,12 @@ Current status:
   MANUAL and GPS dry-run coexist in one firmware. AUTO is still
   computation-only and real motion is not enabled yet.
 - Single-waypoint candidate dry-run with `AUTO_MOTION_ARMED=0` confirms
-  candidate-command safety, but the latest nearby retest is blocked by target
-  override plumbing. The compile command attempted
+  candidate-command safety. The earliest nearby retest was blocked by target
+  override plumbing: the compile command attempted
   `SINGLE_WP_TARGET_LAT=35.5716800` and `SINGLE_WP_TARGET_LON=129.1866516`,
   while runtime USBDBG still printed `target_lat=35.571120` and
-  `target_lon=129.186050`.
-- Nearby candidate retest status: safe failed validation. GPS reached ready
+  `target_lon=129.186050`. Later builds fixed and verified target override.
+- Earliest nearby candidate retest status: safe failed validation. GPS reached ready
   state on at least one line (`gps_hdop=1.19`, `gps_ready=true`), but the old
   placeholder target kept `target_distance_m` around `40` to `60` m,
   `distance_allowed=false`, `safety_ready=false`, candidate commands at zero,
@@ -317,6 +342,29 @@ Current status:
   `max_target_distance_m=30.0`, so `distance_allowed=false`,
   `gps_ready=false`, `safety_ready=false`, candidate commands stayed zero, and
   final outputs stayed zero.
+- Latest outdoor Manual/Auto recovery is complete. The station/controller must
+  be powered on for meaningful RC mode tests; controller-off can make the RC
+  stream appear stuck or failsafe-like. With the link restored, MANUAL and AUTO
+  switch positions were confirmed using `mode_us≈1000..1001` and
+  `mode_us≈2001..2002`.
+- Latest outdoor candidate dry-run remained safely blocked by stale target:
+  runtime GPS was around `35.5716,129.1875`, while the target remained
+  `35.570675,129.186769`. `target_distance_m≈100..131` exceeded
+  `max_target_distance_m=30.0`, so `distance_allowed=false` and
+  `safety_ready=false` were expected.
+- Latest outdoor nearby dry-run made partial progress. With target
+  `35.570768,129.186791`, GPS was repeatedly ready outdoors and
+  `target_distance_m` decreased through `27.1`, `25.4`, `23.5`, `21.1`,
+  `18.8`, and `18.5` m. `distance_allowed=true` was observed once the target
+  was within `max_target_distance_m=30.0`.
+- The same nearby dry-run is still not a successful AUTO candidate validation:
+  `mode` stayed mostly `MANUAL`, `auto_sw=false`, `timeout_ok=false`,
+  `safety_ready=false`, and `candidate_left_cmd=0.000` /
+  `candidate_right_cmd=0.000`. Safety must be verified in `AUTO_READY`, not
+  only in MANUAL.
+- A brief PPM/failsafe-like glitch was observed with `mode=FAILSAFE`,
+  `rc_ok=false`, `steer_us≈495`, `throttle_us≈2504`, and
+  `control_source=STOP`. This is the correct safe response.
 - Window/outside-thrown antenna placement is not equivalent to rover body
   localization.
 - Target override success must be interpreted separately from
@@ -326,6 +374,12 @@ Current status:
   - acquire a fresh GPS fix in MANUAL
   - recompute a nearby target from that actual runtime GPS fix
   - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
+  - either run a quick reset/reupload and immediate AUTO dry-run while
+    `distance_allowed=true`, or improve firmware timeout semantics so
+    `timeout_ok` is based on AUTO entry instead of total boot/manual waiting
+  - verify Manual/Auto positions first: MANUAL should show `mode_us≈1000` and
+    `control_source=RC_MANUAL`; AUTO should show `mode_us≈2000`,
+    `mode=AUTO_READY`, and `control_source=STOP` while motion remains inhibited
   - confirm GPS freshness/quality using `gps_age_ms`, `gps_hdop`, and
     `gps_sats`; do not rely on `gps_fix=true` alone
   - run candidate validation promptly after upload/reset or AUTO entry because

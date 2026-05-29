@@ -83,8 +83,18 @@ body frame must be fixed, measured, and modeled.
 
 ## Next Required Validation Before Motion
 
+- Confirm the station/controller is powered on and linked; controller-off can
+  make RC appear stuck or failsafe-like.
+- Verify Manual/Auto before autonomy dry-run: MANUAL should show
+  `mode_us≈1000` and `control_source=RC_MANUAL`; AUTO should show
+  `mode_us≈2000`, `mode=AUTO_READY`, and `control_source=STOP`.
 - Recompute the single-waypoint target from the current GPS position and rerun
   with `AUTO_MOTION_ARMED=0`.
+- Verify the nearby-target condition in `AUTO_READY`, not only in MANUAL.
+  `distance_allowed=true` in MANUAL is progress but not enough.
+- If `timeout_ok=false` appears after waiting in MANUAL for GPS, either do an
+  immediate post-reset AUTO dry-run or change timeout semantics so the timer
+  starts on AUTO entry.
 - Confirm `gps_age_ms`, `gps_hdop`, and `gps_sats`, not only `gps_fix=true`,
   before interpreting GPS readiness.
 - Re-test GPS candidate fields with the antenna mounted on the rover and placed
@@ -335,6 +345,24 @@ fix appeared around `35.571284,129.188456`, but `gps_sats`, `gps_hdop`, and
 `gps_ready=false`, `distance_allowed=false`, and `safety_ready=false` were
 expected. Go fully outdoors with rover and GPS fixed together before the next
 candidate dry-run.
+
+Latest outdoor recovery: the previous RC issue was caused by the
+station/controller being off. After restoring the controller/link, MANUAL was
+verified with `mode_us≈1000..1001` and `control_source=RC_MANUAL`; AUTO was
+verified with `mode_us≈2001..2002`, `mode=AUTO_READY`, and
+`control_source=STOP`. GPS was usable outdoors, but the compile-time target was
+stale: target `35.570675,129.186769` versus runtime GPS around
+`35.5716,129.1875`, giving `target_distance_m≈100..131`. This is a successful
+RC recovery and safety-blocked dry-run, not a nearby candidate success.
+Recompute the target from the current runtime GPS fix and rerun with
+`AUTO_MOTION_ARMED=0`.
+
+Latest outdoor nearby dry-run: target override worked with
+`35.570768,129.186791`, GPS was repeatedly ready outdoors, and
+`target_distance_m` dropped below `30.0` m, so `distance_allowed=true` was
+observed. The run was still blocked because it stayed mostly in MANUAL,
+`timeout_ok=false`, `safety_ready=false`, and candidate commands remained zero.
+This is partial progress, not a successful AUTO candidate dry-run.
 
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.

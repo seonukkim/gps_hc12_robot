@@ -16,8 +16,17 @@ did not satisfy readiness. A later nearby attempt acquired GPS fix, but the
 target was still `93.3` m from the actual runtime fix, so the distance gate
 blocked it. The latest window/outside-antenna attempt also remained safely
 blocked because GPS quality was unstable and the antenna position was not the
-rover body position. Bench testing and floor waypoint driving are not approved
-yet.
+rover body position. The latest outdoor Manual/Auto recovery test confirmed
+that the previous RC issue was caused by the station/controller being off:
+MANUAL and AUTO switching now work again, and outdoor GPS can become usable.
+That run was still safety-blocked because the compile-time target was stale
+(`target_distance_m≈100..131` m, above `max_target_distance_m=30.0`). The
+latest outdoor nearby dry-run then showed real progress: target override worked,
+outdoor GPS readiness was repeatedly good, and `distance_allowed=true` was
+observed after `target_distance_m` dropped below `30.0` m. It was still blocked
+because the rover stayed mostly in MANUAL, `timeout_ok=false`,
+`safety_ready=false`, and no candidate commands were produced. Bench testing and
+floor waypoint driving are not approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -33,22 +42,32 @@ Staged plan:
 3. Target override diagnostics complete: USBDBG now confirms
    `target_override_enabled=true`, `target_source=compile_time`, and runtime
    `target_lat` / `target_lon` matching the compile-time macros.
-4. Full outdoor fixed-frame dry-run: take the rover and GPS outside together,
+4. RC recovery complete: with the station/controller powered and linked, MANUAL
+   shows `mode_us≈1000..1001` and `control_source=RC_MANUAL`; AUTO shows
+   `mode_us≈2001..2002`, `mode=AUTO_READY`, and `control_source=STOP`.
+5. Outdoor GPS/distance progress: GPS readiness is now good outdoors, and
+   `distance_allowed=true` has been observed in MANUAL with a nearby target.
+   This is not enough for success because `safety_ready` must be verified in
+   AUTO_READY.
+6. Full outdoor fixed-frame dry-run: take the rover and GPS outside together,
    acquire a fresh fix in MANUAL, recompute the target from that actual fix, and
    rerun with `AUTO_MOTION_ARMED=0`. Do not proceed until
    `target_distance_m <= max_target_distance_m`, GPS freshness/quality gates
    pass, and `timeout_ok` has not expired.
-5. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
+7. Timeout semantics decision: either do a quick reset/reupload and immediate
+   AUTO dry-run while `distance_allowed=true`, or improve the firmware so
+   timeout is based on AUTO entry instead of total boot/manual waiting time.
+8. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
    sky. IMU diagnostics remain useful, but IMU is optional for the current
    GPS+RC single-waypoint preparation stage and must not block candidate dry-run
    work.
-6. Bench test with wheels lifted: compile the same experiment with
+9. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
-7. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
+10. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
    assumptions are validated.
-8. Multi-waypoint motion: only after single-waypoint behavior is proven.
-9. Coverage path / lawnmower driving: last step, after mission sequencing,
+11. Multi-waypoint motion: only after single-waypoint behavior is proven.
+12. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
@@ -78,12 +97,23 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 - Go fully outdoors with the rover and GPS fixed together, acquire a fresh GPS
   fix in MANUAL, recompute a nearby target from that actual fix, then rerun the
   single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
+- Confirm the station/controller is powered on and linked before interpreting
+  RC mode values; controller-off can make the PPM stream appear stuck or
+  failsafe-like.
+- Verify Manual/Auto switch positions before the dry-run: MANUAL should show
+  `mode_us≈1000` and `control_source=RC_MANUAL`; AUTO should show
+  `mode_us≈2000`, `mode=AUTO_READY`, and `control_source=STOP`.
 - Confirm the target override fields still match the intended target, then
   interpret `target_distance_m`, `distance_allowed`, and `safety_ready`.
+- `distance_allowed=true` in MANUAL is not enough; verify the same nearby-target
+  condition in `AUTO_READY` with `gps_ready=true`, `timeout_ok=true`, and
+  `safety_ready=true`.
 - Confirm GPS readiness using `gps_age_ms`, `gps_hdop`, and `gps_sats`; do not
   rely on `gps_fix=true` alone.
 - Run candidate validation promptly after upload/reset or AUTO entry; `timeout_ok`
   can expire while waiting too long.
+- Consider changing timeout semantics so the experiment timeout starts on AUTO
+  entry rather than at boot if long MANUAL GPS waiting remains necessary.
 - Run wheel-off-ground bench testing only after safety gates and sensor-frame
   assumptions are clear.
 - Keep `AUTO_MOTION_ARMED=0` for floor or indoor tests.
@@ -470,6 +500,55 @@ Latest window/outside-antenna attempt:
   outdoors with the rover and GPS fixed together, acquire a fresh MANUAL fix,
   recompute the target from that actual fix, and rerun with
   `AUTO_MOTION_ARMED=0`.
+
+Latest outdoor Manual/Auto recovery and stale-target block:
+
+- The previous RC issue was caused by the station/controller being off.
+- After restoring the controller/link, AUTO was verified with
+  `mode=AUTO_READY`, `auto_sw=true`, `mode_us≈2001..2002`, and
+  `control_source=STOP`.
+- MANUAL was verified with `mode=MANUAL`, `auto_sw=false`,
+  `mode_us≈1000..1001`, and `control_source=RC_MANUAL`.
+- Manual stick input changed `steer_us` / `throttle_us`, and at least one
+  MANUAL line produced nonzero `left_cmd` / `final_left_cmd`.
+- Outdoor GPS was usable at several points: `gps_fix=true` and `gps_ready=true`
+  appeared when HDOP was good.
+- The compile-time target was stale: `target_lat=35.570675`,
+  `target_lon=129.186769`, while runtime GPS was around `35.5716,129.1875`.
+- `target_distance_m≈100..131`, greater than `max_target_distance_m=30.0`.
+- `distance_allowed=false`, `safety_ready=false`,
+  `candidate_left_cmd=0.000`, and `candidate_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0` and `auto_motor_inhibit=true` kept AUTO final commands
+  at zero.
+- This is a successful RC recovery and a safety-blocked autonomy dry-run, not a
+  nearby candidate-command success. Recompute a nearby target from the current
+  runtime GPS fix and rerun with `AUTO_MOTION_ARMED=0`.
+
+Latest outdoor nearby dry-run:
+
+- Build/upload used `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`,
+  `AUTO_MOTION_ARMED=0`, `SINGLE_WP_TARGET_LAT=35.5707680`, and
+  `SINGLE_WP_TARGET_LON=129.1867906`.
+- USBDBG confirmed target override:
+  `target_override_enabled=true`, `target_source=compile_time`,
+  `target_lat_macro=35.5707680`, `target_lon_macro=129.1867906`,
+  `target_lat=35.570768`, and `target_lon=129.186791`.
+- Outdoor GPS readiness improved: `gps_fix=true`, repeated `gps_ready=true`,
+  `gps_sats=7..8`, `gps_hdop≈0.95..1.98`, and fresh `gps_age_ms` appeared in
+  many lines.
+- The rover/GPS became close enough to the target. `target_distance_m` decreased
+  from around `45..55` m to `27.1`, `25.4`, `23.5`, `21.1`, `18.8`, and
+  `18.5` m. `distance_allowed=true` was observed once below
+  `max_target_distance_m=30.0`.
+- The run was still blocked: mode stayed mostly `MANUAL`, `auto_sw=false`,
+  `timeout_ok=false`, `safety_ready=false`, and candidate commands remained
+  zero.
+- A brief PPM/failsafe-like glitch appeared with `mode=FAILSAFE`,
+  `rc_ok=false`, `steer_us≈495`, `throttle_us≈2504`, and
+  `control_source=STOP`; keeping `STOP` is the correct safe behavior.
+- This is partial progress and a safe blocked validation, not a successful AUTO
+  candidate dry-run. Next step is either immediate post-reset AUTO dry-run while
+  the rover is nearby, or a firmware change so timeout starts at AUTO entry.
 
 ## Safety Rules
 

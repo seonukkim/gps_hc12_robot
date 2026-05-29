@@ -29,30 +29,40 @@ Reference:
 - `docs/manual_control.md`
 - `docs/field_test_log.md`
 
-## RC Mode Switch Channel Is Not Reconfirmed
+## RC Mode Switch Requires Powered Controller/Link
 
 Status:
 
-- Current rover USBDBG logs show `mode_us` around `1502` to `1503`,
-  `mode=MANUAL`, and `auto_sw=false`.
-- Previous logs showed `AUTO_READY` when `mode_us` was around `2000`.
-- The intended physical AUTO switch must be mapped from raw PPM channels before
-  changing `MODE_CHANNEL_INDEX`.
+- A recent outdoor test showed the previous stuck-looking RC issue was caused
+  by the station/controller being off.
+- After restoring the controller/link, Manual/Auto switching worked again.
+- AUTO was verified with `mode=AUTO_READY`, `auto_sw=true`,
+  `mode_us≈2001..2002`, and `control_source=STOP`.
+- MANUAL was verified with `mode=MANUAL`, `auto_sw=false`,
+  `mode_us≈1000..1001`, and `control_source=RC_MANUAL`.
+- Manual stick input changed `steer_us` / `throttle_us`, and at least one
+  MANUAL line produced nonzero `left_cmd` / `final_left_cmd`.
 
 Diagnostic:
 
 - Use `firmware/rc_channel_probe`.
+- Confirm the station/controller is powered on and linked before interpreting
+  static channel output.
 - Move one stick or switch at a time.
 - Record `ch1_us` through `ch8_us`, each channel min/max, and
   `changed_channels`.
 - The AUTO candidate is the channel that reaches around `2000 us`.
+- Manual/Auto verification requires seeing both ends of the switch travel:
+  `mode_us≈1000` for MANUAL and `mode_us≈2000` for AUTO.
 
 Do not repeat:
 
 - Do not assume the physical switch label matches the PPM channel number.
+- Do not treat static RC probe channels as a mapping failure until the
+  station/controller power and link are confirmed.
 - Do not change controller channel mapping based only on panel labels.
-- Do not approve AUTO, bench, or floor testing until the raw channel probe
-  identifies the intended mode switch.
+- Do not approve AUTO, bench, or floor testing unless USBDBG shows the expected
+  Manual/Auto mode values and the relevant safety gates.
 
 ## Rover Drifts Left/Right During Long Manual Movement
 
@@ -361,6 +371,33 @@ Status:
   - `gps_age_ms` grew very large
   - `target_distance_m≈93.9`, above `max_target_distance_m=30.0`
   - `distance_allowed=false`, `gps_ready=false`, and `safety_ready=false`
+- Latest outdoor Manual/Auto recovery showed the RC path is recovered and GPS
+  can be usable outdoors, but the autonomy dry-run was still target-blocked:
+  - AUTO verified with `mode_us≈2001..2002`, `mode=AUTO_READY`, and
+    `control_source=STOP`
+  - MANUAL verified with `mode_us≈1000..1001` and
+    `control_source=RC_MANUAL`
+  - runtime GPS was around `35.5716,129.1875`
+  - target remained stale at `35.570675,129.186769`
+  - `target_distance_m≈100..131`, above `max_target_distance_m=30.0`
+  - `distance_allowed=false` and `safety_ready=false`
+  - `AUTO_MOTION_ARMED=0` / `auto_motor_inhibit=true` kept AUTO final commands
+    at zero
+- Latest outdoor nearby dry-run showed partial progress but remained blocked:
+  - target override worked with `target_lat=35.570768`,
+    `target_lon=129.186791`
+  - outdoor GPS readiness was repeatedly good (`gps_ready=true`,
+    `gps_sats=7..8`, `gps_hdop≈0.95..1.98`, fresh `gps_age_ms`)
+  - `target_distance_m` decreased below `30.0` m, and
+    `distance_allowed=true` was observed
+  - mode stayed mostly `MANUAL`
+  - `auto_sw=false`
+  - `timeout_ok=false`
+  - `safety_ready=false`
+  - `candidate_left_cmd=0.000` and `candidate_right_cmd=0.000`
+- A brief PPM/failsafe-like glitch was observed with `mode=FAILSAFE`,
+  `rc_ok=false`, `steer_us≈495`, `throttle_us≈2504`, and
+  `control_source=STOP`.
 
 Interpretation:
 
@@ -374,6 +411,19 @@ Interpretation:
   nearby target from the current GPS position before each nearby candidate run.
 - The target must be recalculated from the actual runtime GPS fix, not from an
   assumed antenna location.
+- Outdoor GPS readiness and RC mode recovery do not make a stale target valid.
+  Recompute the target from the current runtime GPS fix before interpreting
+  `distance_allowed` or candidate commands.
+- `distance_allowed=true` in MANUAL is progress, but it is not sufficient for a
+  candidate dry-run success.
+- `safety_ready` must be verified in `AUTO_READY` with `gps_ready=true`,
+  `distance_allowed=true`, `timeout_ok=true`, valid RC, and the AUTO switch on.
+- The current `timeout_ok=false` observations suggest the experiment timeout can
+  expire while waiting in MANUAL for GPS/target setup. Either validate promptly
+  after reset/AUTO entry, or change the firmware so the timeout starts on AUTO
+  entry instead of total boot/manual waiting time.
+- Brief PPM/failsafe glitches can occur; the safe response is
+  `control_source=STOP` with no autonomous output.
 - A window-thrown or window/outside antenna position is not equivalent to the
   rover body position. It can validate that GPS reception is possible, but it
   cannot validate rover localization.
@@ -397,8 +447,15 @@ Do not repeat:
   runtime `target_lat` / `target_lon`.
 - Do not treat `target_override_enabled=true` as proof that the target is nearby
   enough. Check `target_distance_m` against `max_target_distance_m`.
+- Do not treat `distance_allowed=true` in MANUAL as a successful AUTO candidate
+  dry-run.
+- Do not approve bench testing until `AUTO_READY`, `gps_ready=true`,
+  `distance_allowed=true`, `timeout_ok=true`, `safety_ready=true`, and nonzero
+  candidate commands are observed while final outputs remain inhibited.
 - Do not reuse a previously computed nearby target after moving the antenna or
   on a later day without recalculating it from the current GPS position.
+- Do not reuse a compile-time target from an earlier outdoor location; even
+  100 m of target error correctly keeps `distance_allowed=false`.
 - Do not compute the target from an assumed antenna location; use the actual
   runtime GPS fix printed by USBDBG.
 - Do not treat a window/outside antenna toss as equivalent to moving the rover
@@ -407,6 +464,8 @@ Do not repeat:
   `gps_hdop` is high, or satellites are unstable.
 - Do not ignore `timeout_ok`; if it expires, rerun the validation promptly from
   a fresh upload/reset/AUTO entry state.
+- Do not ignore PPM/failsafe glitches; any `rc_ok=false` or invalid pulse values
+  must keep the rover stopped.
 - Do not approve bench testing or floor driving from a run where the target
   override did not take effect or where `distance_allowed=false`.
 
