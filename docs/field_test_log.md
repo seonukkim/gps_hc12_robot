@@ -1640,6 +1640,61 @@ Safety decision:
   safety procedure.
 - Floor driving remains blocked.
 
+## 2026-05-29: Armed AUTO Final Output Reached (0.100), No Visible Motion — Motor Deadband Suspected
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Mode:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=1` (armed, no ground crawl harness in this build)
+- Rover/GPS placement: outdoors with motion-grade sky view.
+
+Observed armed AUTO state:
+
+```text
+mode=AUTO_RUNNING control_source=AUTO
+auto_motion_armed=true auto_motor_inhibit=false
+gps_ready=true gps_motion_ready=true gps_block_reason=OK
+last_rmc_status=A last_gga_fix_quality=2 gps_sats=7..9 gps_hdop=1.0..1.4
+distance_allowed=true safety_ready=true
+candidate_left_cmd=0.100 candidate_right_cmd=0.100
+final_left_cmd=0.100 final_right_cmd=0.100
+```
+
+Returning to MANUAL:
+
+```text
+mode=MANUAL control_source=RC_MANUAL
+final_left_cmd=0.000 final_right_cmd=0.000
+```
+
+Interpretation:
+
+- This is **NOT** a GPS problem and **NOT** an AUTO-gate problem. Firmware-side
+  armed AUTO output was achieved for the first time: `final_left_cmd=0.100` /
+  `final_right_cmd=0.100` while armed, motion-grade GPS, and all gates passing.
+- **No visible rover movement was observed.** The likely cause is the
+  **motor/ESC/friction deadband**: `0.100` maps to only ≈1530 µs (30 µs above the
+  1500 µs neutral), below the threshold to overcome static friction.
+- Returning to MANUAL correctly drove final commands to `0.000`.
+
+Safety decision:
+
+- This is **NOT** a successful physical ground crawl. Normal floor driving is
+  **NOT** approved.
+- We must **NOT** simply raise the AUTO command magnitude in this build — an
+  ungated, time-unbounded armed command is a runaway risk.
+- The next motion test must use the **guarded ground crawl** harness
+  (`GROUND_CRAWL_TEST_MODE=1`): command clamped to ±`GROUND_CRAWL_MAX_CMD`
+  (default `0.08`), hard latch stop after `GROUND_CRAWL_MAX_AUTO_MS` (default
+  `1200` ms), latch clears only on MANUAL, plus neutral-RC + motion-GPS +
+  near-field-target (5–20 m) gates. The cap (0.08) starts below the observed
+  deadband by design — raise it only via `-DGROUND_CRAWL_MAX_CMD` in small steps,
+  under latch protection, wheels-off-ground or open-area-with-killswitch only.
+- Firmware change made the crawl harness the **only** path to armed motion: any
+  armed build without `GROUND_CRAWL_TEST_MODE=1` now holds final commands at zero.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

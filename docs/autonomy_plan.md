@@ -14,9 +14,16 @@ observed, candidate commands reached `0.100` / `0.100`, and final motor outputs
 remained inhibited at `0.000` / `0.000`. Compile-time target override is
 verified in USBDBG, but targets still become stale whenever the rover moves.
 GPS readiness is tiered so no-motion dry-run can use `gps_dryrun_ready`, while
-any future armed motion must require `gps_motion_ready`. The next step is
-wheel-off-ground bench testing with a strict safety procedure. Floor waypoint
-driving is not approved yet.
+any future armed motion must require `gps_motion_ready`. On 2026-05-29 the armed
+build (`AUTO_MOTION_ARMED=1`) reached firmware-side final output for the first
+time (`final_left_cmd=0.100` / `final_right_cmd=0.100`, motion-grade GPS, all
+gates passing) but produced **no visible motion** — almost certainly the
+motor/ESC/friction deadband (`0.100` ≈ 1530 µs, only 30 µs above neutral). The
+AUTO command must not be raised ungated. Armed motion is now permitted ONLY
+through the guarded ground crawl harness (`GROUND_CRAWL_TEST_MODE=1`) with a
+command clamp and a hard latch stop. The next step is the guarded ground crawl
+bench test with a strict safety procedure. Floor waypoint driving is not
+approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -64,9 +71,17 @@ Staged plan:
    sky. IMU diagnostics remain useful, but IMU is optional for the current
    GPS+RC single-waypoint preparation stage and must not block candidate dry-run
    work.
-12. Bench test with wheels lifted: compile the same experiment with
-   `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
-   output, timeout, arrival stop, GPS rejection, and manual override.
+12. Guarded ground crawl bench test (wheels lifted / open area with kill switch):
+   armed AUTO motion is permitted ONLY through the guarded ground crawl harness.
+   Compile with `AUTO_MOTION_ARMED=1 GROUND_CRAWL_TEST_MODE=1` (any armed build
+   without the crawl flag now holds final commands at zero). Verify the clamp to
+   ±`GROUND_CRAWL_MAX_CMD` (default `0.08`), the hard latch stop after
+   `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms), latch-clears-only-on-MANUAL,
+   the neutral-RC and motion-GPS and near-field-target (5–20 m) gates, and
+   manual override. Note the 2026-05-29 result: armed AUTO reached
+   `final_left_cmd=0.100` / `final_right_cmd=0.100` with no visible motion
+   (motor deadband). Raise past the deadband only via `-DGROUND_CRAWL_MAX_CMD` in
+   small steps, never by ungated AUTO command.
 13. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
    assumptions are validated.
 14. Multi-waypoint motion: only after single-waypoint behavior is proven.
@@ -359,6 +374,14 @@ Safety constants:
 - Motion GPS tier: `GPS_MOTION_STALE_MS=2000`, `GPS_MOTION_MIN_SATS=5`,
   `GPS_MOTION_MAX_HDOP=2.5`
 - `SINGLE_WAYPOINT_AUTO_TIMEOUT_MS=15000`
+- Guarded ground crawl (armed-motion harness; only path to armed motion):
+  - `GROUND_CRAWL_TEST_MODE` (default `0`; `1` enables the crawl harness)
+  - `GROUND_CRAWL_MAX_CMD=0.08` (final command clamp magnitude)
+  - `GROUND_CRAWL_MAX_AUTO_MS=1200` (latch hard-stop after this much continuous
+    AUTO; latch clears only on MANUAL)
+  - `GROUND_CRAWL_MIN_TARGET_DISTANCE_M=5.0`,
+    `GROUND_CRAWL_MAX_TARGET_DISTANCE_M=20.0` (near-field target window, further
+    restricting `SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M=30.0`)
 
 Safety gates:
 

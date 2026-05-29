@@ -635,6 +635,38 @@ Known boundaries:
 - Do not convert this mode into motor-driving autonomy without a separate
   safety design and test plan.
 
+## Armed AUTO Output Reached But No Motion (Motor Deadband)
+
+On 2026-05-29 the armed single-waypoint build (`AUTO_MOTION_ARMED=1`) reached
+firmware-side final output for the first time: `mode=AUTO_RUNNING`,
+`auto_motor_inhibit=false`, motion-grade GPS, all gates passing, and
+`final_left_cmd=0.100` / `final_right_cmd=0.100`. No visible rover movement
+occurred. Returning to MANUAL drove final commands to `0.000`.
+
+Diagnosis:
+
+- This is NOT a GPS problem and NOT an AUTO-gate problem; the firmware produced
+  the commanded output correctly.
+- `0.100` maps to only ≈1530 µs (30 µs above the 1500 µs neutral), almost
+  certainly below the motor/ESC/friction deadband.
+
+Rule — do not raise the AUTO command without the latch stop:
+
+- Do NOT simply increase `SINGLE_WAYPOINT_MAX_AUTO_THROTTLE` or otherwise raise
+  the armed AUTO command magnitude in an ungated, time-unbounded build. That is a
+  runaway risk.
+- The next motion test must use the guarded ground crawl build
+  (`GROUND_CRAWL_TEST_MODE=1`). Armed motion is now gated to zero in any build
+  without it.
+- The crawl harness clamps to ±`GROUND_CRAWL_MAX_CMD` (default `0.08`, which is
+  intentionally below the observed deadband) and latches a hard stop after
+  `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms; clears only on MANUAL). Step the
+  cap up via `-DGROUND_CRAWL_MAX_CMD` only in small increments, under latch
+  protection, wheels-off-ground or open-area-with-kill-switch.
+- Confirm the deadband interpretation with `unclamped_final_left_cmd` /
+  `unclamped_final_right_cmd` and `ground_crawl_block_reason` in USBDBG before
+  raising the cap.
+
 ## Heading / BMI160 Is Not Integrated
 
 The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is

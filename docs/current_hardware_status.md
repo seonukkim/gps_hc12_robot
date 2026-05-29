@@ -73,6 +73,20 @@
   `candidate_right_cmd=0.100`. Because `AUTO_MOTION_ARMED=0`,
   `auto_motor_inhibit=true` kept `final_left_cmd=0.000` and
   `final_right_cmd=0.000`.
+- Latest armed AUTO output reached, but no visible motion (motor deadband
+  suspected). With `AUTO_MOTION_ARMED=1` and motion-grade GPS, USBDBG showed
+  `mode=AUTO_RUNNING`, `control_source=AUTO`, `auto_motor_inhibit=false`,
+  `gps_motion_ready=true`, `gps_block_reason=OK`, RMC `A`, GGA quality `2`,
+  `gps_sats≈7..9`, `gps_hdop≈1.0..1.4`, `distance_allowed=true`,
+  `safety_ready=true`, `candidate_left_cmd=0.100`, `candidate_right_cmd=0.100`,
+  and for the first time `final_left_cmd=0.100` / `final_right_cmd=0.100`.
+  **No visible rover movement occurred.** Returning to MANUAL drove final
+  commands to `0.000`. This is firmware-side armed output success but
+  **not** a physical ground crawl. `0.100` maps to only ≈1530 µs (30 µs above
+  the 1500 µs neutral), almost certainly below the motor/ESC/friction deadband.
+  The next motion test must use the guarded ground crawl build
+  (`GROUND_CRAWL_TEST_MODE=1`); the AUTO command must not be raised without the
+  crawl clamp + latch stop. Floor driving remains **not** approved.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed
@@ -461,6 +475,8 @@ Current status:
 - Target override success must be interpreted separately from
   `distance_allowed` / `safety_ready`.
 - Next required validation before any armed motion:
+  - use the guarded ground crawl build (`GROUND_CRAWL_TEST_MODE=1`) for the next
+    motion test; armed motion is now gated to zero in any build without it
   - prepare a strict wheel-off-ground bench procedure
   - keep the rover physically lifted
   - verify RC manual override, STOP, and failsafe before any armed variant
@@ -469,6 +485,8 @@ Current status:
     changes
   - do not enable floor driving until wheel-off-ground logs prove the expected
     behavior
+  - do not raise the AUTO command past the deadband except via
+    `-DGROUND_CRAWL_MAX_CMD` in small steps, under the crawl latch stop
   - IMU is optional for the current GPS+RC single-waypoint preparation stage;
     do not block candidate dry-run work on IMU availability
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB

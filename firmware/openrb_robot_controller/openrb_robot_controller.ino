@@ -18,6 +18,18 @@
 #define AUTO_MOTION_ARMED 0
 #endif
 
+#ifndef GROUND_CRAWL_TEST_MODE
+#define GROUND_CRAWL_TEST_MODE 0
+#endif
+
+#ifndef GROUND_CRAWL_MAX_CMD
+#define GROUND_CRAWL_MAX_CMD 0.08
+#endif
+
+#ifndef GROUND_CRAWL_MAX_AUTO_MS
+#define GROUND_CRAWL_MAX_AUTO_MS 1200
+#endif
+
 #define STRINGIFY_VALUE_IMPL(value) #value
 #define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
 
@@ -85,6 +97,12 @@ constexpr double SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M = 1000.0;
 constexpr uint32_t SINGLE_WAYPOINT_GPS_STALE_MS = GPS_DRYRUN_STALE_MS;
 constexpr double SINGLE_WAYPOINT_MAX_HDOP = GPS_DRYRUN_MAX_HDOP;
 constexpr uint32_t SINGLE_WAYPOINT_AUTO_TIMEOUT_MS = 15000;
+
+constexpr bool     GROUND_CRAWL_ENABLED = GROUND_CRAWL_TEST_MODE != 0;
+constexpr float    GROUND_CRAWL_MAX_CMD_VALUE = GROUND_CRAWL_MAX_CMD;
+constexpr uint32_t GROUND_CRAWL_MAX_AUTO_MS_VALUE = GROUND_CRAWL_MAX_AUTO_MS;
+constexpr double   GROUND_CRAWL_MIN_TARGET_DISTANCE_M = 5.0;
+constexpr double   GROUND_CRAWL_MAX_TARGET_DISTANCE_M = 20.0;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
 // Printed transmitter labels are 1-based (CH1-CH8), while ppmChannels[] uses 0-based indexes.
@@ -182,6 +200,13 @@ double singleWaypointTargetDistanceM = 0.0;
 double singleWaypointTargetBearingDeg = 0.0;
 float singleWaypointCandidateLeftCmd = 0.0f;
 float singleWaypointCandidateRightCmd = 0.0f;
+bool groundCrawlNeutralOkFlag = false;
+bool groundCrawlReadyFlag = false;
+bool groundCrawlLatchedStopFlag = false;
+uint32_t groundCrawlElapsedMs = 0;
+float groundCrawlUnclampedLeftCmd = 0.0f;
+float groundCrawlUnclampedRightCmd = 0.0f;
+const char *groundCrawlBlockReason = "MODE_OFF";
 #endif
 
 void ppmISR() {
@@ -531,6 +556,12 @@ void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32
 }
 #endif
 
+float clampGroundCrawl(float value) {
+  if (value > GROUND_CRAWL_MAX_CMD_VALUE) return GROUND_CRAWL_MAX_CMD_VALUE;
+  if (value < -GROUND_CRAWL_MAX_CMD_VALUE) return -GROUND_CRAWL_MAX_CMD_VALUE;
+  return value;
+}
+
 void applyDriveCommand(float left, float right) {
   left = clampUnit(left);
   right = clampUnit(right);
@@ -598,6 +629,59 @@ void mapRcManualAxes(float rawSteering, float rawThrottle, float &steeringOut, f
   steeringOut = clampUnit((rawSteering + rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE);
   throttleOut = clampUnit((rawSteering - rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE);
 }
+
+#if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+// Guarded ground crawl: the ONLY path to armed AUTO motion. Clamps the candidate
+// command to +/-GROUND_CRAWL_MAX_CMD, latches to a hard stop after
+// GROUND_CRAWL_MAX_AUTO_MS of continuous AUTO, and requires neutral RC sticks plus
+// motion-grade GPS and a near-field target before motion is permitted.
+void updateGroundCrawlState(bool rcValid, bool autoSwitchOn, bool rcManualActive,
+                            uint16_t steeringUs, uint16_t throttleUs) {
+  groundCrawlNeutralOkFlag =
+      (normRcCentered(steeringUs, STEERING_CENTER_US) == 0.0f) &&
+      (normRcCentered(throttleUs, THROTTLE_CENTER_US) == 0.0f);
+
+  groundCrawlElapsedMs = singleWaypointAutoElapsedMs;
+  groundCrawlUnclampedLeftCmd = singleWaypointCandidateLeftCmd;
+  groundCrawlUnclampedRightCmd = singleWaypointCandidateRightCmd;
+
+  // Latch clears only on a return to MANUAL.
+  if (rcManualActive) {
+    groundCrawlLatchedStopFlag = false;
+  }
+
+  bool crawlAutoActive = GROUND_CRAWL_ENABLED && SINGLE_WAYPOINT_AUTO_MOTION_ARMED &&
+                         rcValid && autoSwitchOn && !rcManualActive;
+  if (crawlAutoActive && groundCrawlElapsedMs > GROUND_CRAWL_MAX_AUTO_MS_VALUE) {
+    groundCrawlLatchedStopFlag = true;
+  }
+
+  bool crawlDistanceOk =
+      singleWaypointGpsCoordSaneFlag &&
+      singleWaypointTargetDistanceM >= GROUND_CRAWL_MIN_TARGET_DISTANCE_M &&
+      singleWaypointTargetDistanceM <= GROUND_CRAWL_MAX_TARGET_DISTANCE_M;
+
+  if (!GROUND_CRAWL_ENABLED) {
+    groundCrawlBlockReason = "MODE_OFF";
+  } else if (groundCrawlLatchedStopFlag) {
+    groundCrawlBlockReason = "LATCHED_STOP";
+  } else if (!groundCrawlNeutralOkFlag) {
+    groundCrawlBlockReason = "RC_NOT_NEUTRAL";
+  } else if (!singleWaypointMotionReadyFlag) {
+    groundCrawlBlockReason = "GPS_NOT_MOTION_READY";
+  } else if (!singleWaypointSafetyReadyFlag) {
+    groundCrawlBlockReason = "SAFETY_NOT_READY";
+  } else if (!crawlDistanceOk) {
+    groundCrawlBlockReason = "DISTANCE_OUT_OF_RANGE";
+  } else {
+    groundCrawlBlockReason = "OK";
+  }
+
+  groundCrawlReadyFlag = GROUND_CRAWL_ENABLED && !groundCrawlLatchedStopFlag &&
+                         groundCrawlNeutralOkFlag && singleWaypointMotionReadyFlag &&
+                         singleWaypointSafetyReadyFlag && crawlDistanceOk;
+}
+#endif
 
 bool rcChannelsValid(uint16_t steering, uint16_t throttle, uint16_t mode) {
   if (!rcFrameRecent()) {
@@ -1031,6 +1115,30 @@ void debugPrintStatus() {
   Serial.print(lastLeftOutputCmd, 3);
   Serial.print(F(" final_right_cmd="));
   Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" ground_crawl_test_mode="));
+  Serial.print(GROUND_CRAWL_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" ground_crawl_max_cmd="));
+  Serial.print(GROUND_CRAWL_MAX_CMD_VALUE, 3);
+  Serial.print(F(" ground_crawl_max_auto_ms="));
+  Serial.print(GROUND_CRAWL_MAX_AUTO_MS_VALUE);
+  Serial.print(F(" ground_crawl_elapsed_ms="));
+  Serial.print(groundCrawlElapsedMs);
+  Serial.print(F(" ground_crawl_latched_stop="));
+  Serial.print(groundCrawlLatchedStopFlag ? F("true") : F("false"));
+  Serial.print(F(" ground_crawl_neutral_ok="));
+  Serial.print(groundCrawlNeutralOkFlag ? F("true") : F("false"));
+  Serial.print(F(" ground_crawl_ready="));
+  Serial.print(groundCrawlReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" ground_crawl_block_reason="));
+  Serial.print(groundCrawlBlockReason);
+  Serial.print(F(" ground_crawl_min_target_distance_m="));
+  Serial.print(GROUND_CRAWL_MIN_TARGET_DISTANCE_M, 1);
+  Serial.print(F(" ground_crawl_max_target_distance_m="));
+  Serial.print(GROUND_CRAWL_MAX_TARGET_DISTANCE_M, 1);
+  Serial.print(F(" unclamped_final_left_cmd="));
+  Serial.print(groundCrawlUnclampedLeftCmd, 3);
+  Serial.print(F(" unclamped_final_right_cmd="));
+  Serial.print(groundCrawlUnclampedRightCmd, 3);
 #endif
   Serial.println();
 }
@@ -1370,6 +1478,7 @@ void loop() {
   clearAutoCommand();
   clearStationManualCommand();
   updateSingleWaypointExperimentState(rcValid, autoSwitchOn, now);
+  updateGroundCrawlState(rcValid, autoSwitchOn, rcManualActive, steeringUs, throttleUs);
   if (!rcValid) {
     currentControlSource = CONTROL_SOURCE_STOP;
     currentMode = FAILSAFE;
@@ -1379,10 +1488,15 @@ void loop() {
     currentControlSource = CONTROL_SOURCE_RC_MANUAL;
     applyManualOverride(steeringUs, throttleUs);
   } else if (autoSwitchOn) {
-    if (singleWaypointSafetyReadyFlag && SINGLE_WAYPOINT_AUTO_MOTION_ARMED) {
+    // Armed AUTO motion is permitted ONLY through the guarded ground crawl harness.
+    // Any armed build without GROUND_CRAWL_TEST_MODE=1 (or a failed/latched crawl
+    // gate) holds the final commands at zero.
+    if (singleWaypointSafetyReadyFlag && SINGLE_WAYPOINT_AUTO_MOTION_ARMED &&
+        GROUND_CRAWL_ENABLED && groundCrawlReadyFlag) {
       currentMode = AUTO_RUNNING;
       currentControlSource = CONTROL_SOURCE_AUTO;
-      applyAutoCommand(singleWaypointCandidateLeftCmd, singleWaypointCandidateRightCmd);
+      applyAutoCommand(clampGroundCrawl(singleWaypointCandidateLeftCmd),
+                       clampGroundCrawl(singleWaypointCandidateRightCmd));
     } else {
       currentMode = AUTO_READY;
       currentControlSource = CONTROL_SOURCE_STOP;

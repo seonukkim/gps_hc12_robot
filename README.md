@@ -101,6 +101,12 @@ body frame must be fixed, measured, and modeled.
 - Run only wheel-off-ground bench testing after safety gates and sensor-frame
   assumptions are clear.
 - Do not approve `AUTO_MOTION_ARMED=1` floor testing yet.
+- 2026-05-29 result: armed AUTO reached `final_left_cmd=0.100` /
+  `final_right_cmd=0.100` with all gates passing but produced no visible motion
+  (motor/ESC/friction deadband). The next motion test must use the guarded ground
+  crawl build (`GROUND_CRAWL_TEST_MODE=1`); armed motion is now gated to zero in
+  any build without it. Do not raise the AUTO command past the deadband except
+  via `-DGROUND_CRAWL_MAX_CMD` in small steps, under the crawl latch stop.
 
 ## Legacy HC-12 References
 
@@ -129,7 +135,8 @@ HC-12, or motor behavior from the wrong mode.
 | Default rover controller | `firmware/openrb_robot_controller` | OpenRB-150 | RC manual and HC-12 protocol baseline | Default firmware reads GPS from `Serial3`; under current fixed wiring, GPS `Serial2` is not available here and `gps_chars=0` is expected | enabled | normal safety-gated rover behavior |
 | Fixed-wiring GPS Serial2 diagnostic | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | OpenRB-150 | Integrated GPS-on-`Serial2` USB debug | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | forced neutral; manual driving does not work by design |
 | Fixed-wiring RC + GPS autonomy dry-run | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | OpenRB-150 | RC manual plus GPS readiness/distance/bearing dry-run | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO forces neutral and computes readiness only |
-| Single-waypoint experiment | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | OpenRB-150 | Guarded one-target candidate-command experiment | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO computes candidate commands; `AUTO_MOTION_ARMED=0` forces neutral |
+| Single-waypoint experiment | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | OpenRB-150 | Guarded one-target candidate-command experiment | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO computes candidate commands; armed motion gated to zero unless the ground crawl flag is also set |
+| Guarded ground crawl | `firmware/openrb_robot_controller` with `...SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1` | OpenRB-150 | Only path to armed motion; safety-bounded crawl for deadband calibration | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO output clamped to ±`GROUND_CRAWL_MAX_CMD` and hard-latched to stop after `GROUND_CRAWL_MAX_AUTO_MS`, else neutral |
 | RC channel probe | `firmware/rc_channel_probe` | OpenRB-150 | Identify which raw PPM channel changes for each RC stick/switch | not used | not used | no motor outputs |
 | Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
 | Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
@@ -395,7 +402,11 @@ and `gps_cached_age_ms`.
 
 Safety gates include GPS readiness, coordinate sanity, RC validity, AUTO switch
 state, target validity, target distance range, arrival radius, and AUTO timeout.
-`AUTO_MOTION_ARMED=1` is reserved for a later wheel-off-ground bench test after
+`AUTO_MOTION_ARMED=1` alone no longer produces motion; armed motion is gated to
+zero unless `GROUND_CRAWL_TEST_MODE=1` is also set, which applies the guarded
+ground crawl harness (command clamp to ±`GROUND_CRAWL_MAX_CMD`, hard latch stop
+after `GROUND_CRAWL_MAX_AUTO_MS`, neutral-RC/motion-GPS/near-field-target gates).
+The armed build is reserved for a wheel-off-ground / open-area bench test after
 explicit approval. This mode does not load `mission.json` and does not implement
 multi-waypoint or lawnmower/coverage driving.
 
@@ -561,6 +572,19 @@ Latest no-motion AUTO waypoint dry-run succeeded with target
 `final_right_cmd=0.000`. This validates candidate command generation only; it
 does not approve floor driving. The next step is wheel-off-ground bench
 testing.
+
+On 2026-05-29 the armed build (`AUTO_MOTION_ARMED=1`) then reached firmware-side
+final output for the first time: `mode=AUTO_RUNNING`, `auto_motor_inhibit=false`,
+motion-grade GPS, all gates passing, and `final_left_cmd=0.100` /
+`final_right_cmd=0.100`. No visible rover movement occurred (motor/ESC/friction
+deadband: `0.100` ≈ 1530 µs, only 30 µs above the 1500 µs neutral). Returning to
+MANUAL drove final commands to `0.000`. This is firmware-side armed-output
+success, NOT a physical ground crawl, and floor driving is NOT approved. The AUTO
+command must not be raised ungated; armed motion is now permitted ONLY through the
+guarded ground crawl build (`GROUND_CRAWL_TEST_MODE=1`), which clamps to
+±`GROUND_CRAWL_MAX_CMD` (default `0.08`) and hard-latches a stop after
+`GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms, clears only on MANUAL). Step the
+cap up only via `-DGROUND_CRAWL_MAX_CMD`, under latch protection.
 
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.

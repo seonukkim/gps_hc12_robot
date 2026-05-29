@@ -48,6 +48,33 @@ The integrated firmware evaluates control source in this order:
 
 This means CH5 high alone must not drive the rover.
 
+## Guarded Ground Crawl (Armed-Motion Harness)
+
+Armed AUTO motion is permitted ONLY through the guarded ground crawl harness.
+On 2026-05-29 the armed build reached `final_left_cmd=0.100` /
+`final_right_cmd=0.100` with all gates passing but produced no visible motion
+(motor/ESC/friction deadband). The AUTO command must NOT be raised ungated.
+
+Rules:
+
+- Any armed build (`AUTO_MOTION_ARMED=1`) without `GROUND_CRAWL_TEST_MODE=1`
+  holds final commands at zero. The crawl harness is the only path to motion.
+- Final autonomous command is clamped to ±`GROUND_CRAWL_MAX_CMD` (default
+  `0.08`).
+- After `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms) of continuous AUTO, the
+  harness latches a hard stop (`final_left_cmd=0.000`, `final_right_cmd=0.000`,
+  `ground_crawl_latched_stop=true`). The latch clears ONLY on a return to MANUAL.
+- Crawl will not move unless RC sticks are neutral (`ground_crawl_neutral_ok`),
+  GPS is motion-grade (`gps_motion_ready`), the single-waypoint safety gate
+  passes (`safety_ready`), and the target distance is in the near-field window
+  (`GROUND_CRAWL_MIN_TARGET_DISTANCE_M=5.0` to
+  `GROUND_CRAWL_MAX_TARGET_DISTANCE_M=20.0`). Any failed gate forces zero output;
+  the reason is printed as `ground_crawl_block_reason`.
+- Raise the cap past the deadband only via `-DGROUND_CRAWL_MAX_CMD` in small
+  steps, wheels-off-ground or open-area-with-kill-switch only.
+- Ground crawl is NOT full autonomous driving. Floor driving remains not
+  approved.
+
 ## Station Defaults
 
 Allowed by default:

@@ -26,7 +26,8 @@ Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
 | Default `openrb_robot_controller` | none | HC-12/manual legacy mode | default firmware reads `Serial3`; current fixed GPS wiring is not available here | enabled | normal safety-gated behavior |
 | GPS-only diagnostic | `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | fixed GPS `Serial2` debug over USB | `Serial2` at `9600` | disabled/ignored | forced neutral |
 | MANUAL RC + AUTO GPS dry-run | `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | RC manual driving plus AUTO GPS distance/bearing computation | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO forced neutral |
-| Single-waypoint experiment | `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | guarded one-target candidate-command experiment | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO is neutral unless `AUTO_MOTION_ARMED=1` |
+| Single-waypoint experiment | `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | guarded one-target candidate-command experiment | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO is neutral unless `AUTO_MOTION_ARMED=1` AND `GROUND_CRAWL_TEST_MODE=1` |
+| Guarded ground crawl | `...SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1` | only path to armed motion; clamps to ±`GROUND_CRAWL_MAX_CMD` and latches stop after `GROUND_CRAWL_MAX_AUTO_MS` | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO crawls clamped/latched, else neutral |
 
 Exact macOS Arduino CLI path used in this repo:
 
@@ -138,8 +139,47 @@ Expected single-waypoint USB debug additions:
 
 ```text
 gps_location_valid=... gps_location_fresh=... gps_solution_valid=... gps_dryrun_ready=... gps_motion_ready=... gps_age_ok=... gps_sats_ok=... gps_hdop_ok=... gps_ready=... gps_block_reason=... gps_dryrun_block_reason=... gps_motion_block_reason=... gps_dryrun_stale_ms=2000 gps_dryrun_min_sats=4 gps_dryrun_max_hdop=6.0 gps_motion_stale_ms=2000 gps_motion_min_sats=5 gps_motion_max_hdop=2.5 gps_lat=... gps_lon=... gps_cached_lat=... gps_cached_lon=... gps_cached_age_ms=... last_rmc_status=... last_gga_fix_quality=...
-single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true active_gps_ready=... dryrun_ready=... motion_ready=... safety_ready_source=... gps_coord_sane=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 max_coord_sanity_distance_m=1000.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true active_gps_ready=... dryrun_ready=... motion_ready=... safety_ready_source=... gps_coord_sane=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 max_coord_sanity_distance_m=1000.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000 ground_crawl_test_mode=false ground_crawl_max_cmd=0.080 ground_crawl_max_auto_ms=1200 ground_crawl_elapsed_ms=... ground_crawl_latched_stop=false ground_crawl_neutral_ok=... ground_crawl_ready=false ground_crawl_block_reason=MODE_OFF ground_crawl_min_target_distance_m=5.0 ground_crawl_max_target_distance_m=20.0 unclamped_final_left_cmd=... unclamped_final_right_cmd=...
 ```
+
+### Guarded ground crawl build (armed-motion harness)
+
+Armed AUTO motion is permitted ONLY through the guarded ground crawl harness.
+On 2026-05-29 the armed build reached `final_left_cmd=0.100` /
+`final_right_cmd=0.100` with all gates passing but produced no visible motion
+(motor/ESC/friction deadband: `0.100` ≈ 1530 µs, 30 µs above neutral). Do NOT
+raise the AUTO command ungated. Any armed build without `GROUND_CRAWL_TEST_MODE=1`
+now holds final commands at zero.
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-ground-crawl --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1 -DGROUND_CRAWL_MAX_CMD=0.08 -DGROUND_CRAWL_MAX_AUTO_MS=1200 -DSINGLE_WP_TARGET_LAT=35.5706361 -DSINGLE_WP_TARGET_LON=129.1870540' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-ground-crawl firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Ground crawl USB debug fields (added to the single-waypoint block):
+
+```text
+ground_crawl_test_mode=true ground_crawl_max_cmd=0.080 ground_crawl_max_auto_ms=1200 ground_crawl_elapsed_ms=... ground_crawl_latched_stop=... ground_crawl_neutral_ok=... ground_crawl_ready=... ground_crawl_block_reason=... ground_crawl_min_target_distance_m=5.0 ground_crawl_max_target_distance_m=20.0 unclamped_final_left_cmd=... unclamped_final_right_cmd=...
+```
+
+Ground crawl safety gates and stop conditions:
+
+- Final command is clamped to ±`GROUND_CRAWL_MAX_CMD` (default `0.08`).
+- Latch hard-stop after `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms) of
+  continuous AUTO: forces `final_left_cmd=0.000`, `final_right_cmd=0.000`,
+  `ground_crawl_latched_stop=true`. The latch clears ONLY on a return to MANUAL.
+- Motion requires `ground_crawl_neutral_ok=true` (RC sticks centered),
+  `gps_motion_ready=true`, `safety_ready=true`, and the target distance within
+  `[5.0, 20.0]` m. Any failed gate forces zero output and reports
+  `ground_crawl_block_reason` (e.g. `MODE_OFF`, `LATCHED_STOP`, `RC_NOT_NEUTRAL`,
+  `GPS_NOT_MOTION_READY`, `SAFETY_NOT_READY`, `DISTANCE_OUT_OF_RANGE`, `OK`).
+- `unclamped_final_left_cmd` / `unclamped_final_right_cmd` show the raw candidate
+  (e.g. `0.100`) for deadband diagnosis.
+- The 0.08 cap is intentionally below the observed deadband. Raise it only via
+  `-DGROUND_CRAWL_MAX_CMD` in small steps, under latch protection,
+  wheels-off-ground or open-area-with-kill-switch only. Ground crawl is NOT full
+  autonomous driving; floor driving remains not approved.
 
 Target override rule:
 
@@ -271,10 +311,14 @@ Safety gates:
 - Target distance no more than `SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M` (`30` m).
 - AUTO state age no more than `SINGLE_WAYPOINT_AUTO_TIMEOUT_MS` (`15000` ms).
 
-`AUTO_MOTION_ARMED=1` is reserved for a later explicit wheel-off-ground bench
-test. The current inhibited build computes candidate commands but forces final
-left/right outputs to zero. This mode does not load `mission.json`, does not
-run multi-waypoint missions, and does not implement coverage/lawnmower driving.
+`AUTO_MOTION_ARMED=1` alone no longer produces motion: armed motion is gated to
+zero unless `GROUND_CRAWL_TEST_MODE=1` is also set, in which case the guarded
+ground crawl harness (clamp + latch + neutral/GPS/near-field gates) applies. The
+armed build is reserved for an explicit wheel-off-ground / open-area bench test.
+The inhibited build (`AUTO_MOTION_ARMED=0`) computes candidate commands but
+forces final left/right outputs to zero. This mode does not load `mission.json`,
+does not run multi-waypoint missions, and does not implement coverage/lawnmower
+driving.
 Candidate commands are straight low-speed placeholders; target bearing is
 printed for inspection, but heading control is not implemented yet.
 
