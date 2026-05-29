@@ -20,10 +20,11 @@
 - GPS module baudrate: confirmed `9600`
 - GPS NMEA output: working; `$GPRMC`, `$GPVTG`, `$GPGGA`, `$GPGSV`, and
   `$GPGLL` observed
-- GPS FIX: has been demonstrated on the current `Serial2` probe path and in the
-  integrated GPS `Serial2` diagnostic build, but the latest GPS-only
-  `Serial2/9600` probe showed intermittent satellite acquisition rather than a
-  stable current fix
+- GPS FIX: confirmed on the current `Serial2/9600` probe path when the
+  rover/GPS is moved farther outdoors with clearer sky view. Latest
+  `gps_uart_probe` logs reached `gps_probe_state=STABLE_FIX`,
+  `current_valid_fix=true`, RMC `A`, GGA fix quality `2`, `sats=9`,
+  `hdop=3.56`, and `valid_fix_seconds_consecutive=58..60`.
 - Integrated GPS `Serial2` diagnostic build: confirmed `gps_chars` increase,
   `gps_fix=true`, valid latitude/longitude, valid satellites/HDOP, HC-12
   disabled, and motors neutral
@@ -392,6 +393,13 @@ Current status:
   lat/lon, `sats=4..5`, and `hdop≈1.77..2.48`, then fell back to no-fix.
   Treat this as an intermittent GPS acquisition failure. TinyGPS++ cached
   coordinates after fallback to RMC `V` are not a stable current rover position.
+- GPS fix recovery was confirmed after moving the rover/GPS farther outdoors.
+  The same `Serial2/9600` probe then transitioned through
+  `INTERMITTENT_FIX` and reached `STABLE_FIX` with
+  `valid_fix_seconds_consecutive=58..60`, RMC `A`, GGA quality `2`, `sats=9`,
+  `hdop=3.56`, `age_ms≈85..89`, and lat/lon around
+  `35.57029,129.187078`. This attributes the previous no-fix primarily to
+  placement/sky view, not firmware or UART.
 - GPS readiness diagnostics have been hardened. USBDBG now separates
   `gps_location_valid` from `gps_ready`, prints `gps_age_ok`, `gps_sats_ok`,
   `gps_hdop_ok`, readiness constants, and `gps_block_reason`, and only prints
@@ -422,8 +430,9 @@ Current status:
   `distance_allowed` / `safety_ready`.
 - Next required validation before motion:
   - go fully outdoors with the rover and GPS fixed together
-  - acquire a stable GPS fix in MANUAL; one-second RMC `A` bursts are not
-    enough
+  - acquire a stable GPS fix in MANUAL or with `gps_uart_probe`; one-second RMC
+    `A` bursts are not enough, and the standalone probe stable rule is
+    `valid_fix_seconds_consecutive >= 30`
   - do not proceed to AUTO candidate validation while `gps_fix=false`,
     RMC status is `V`, GGA fix quality is `0`, `gps_sats=0`, or
     `gps_hdop=99.99`

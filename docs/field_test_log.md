@@ -1437,6 +1437,57 @@ Safety decision:
   `>=1`, nonzero satellites, acceptable HDOP, fresh age, and no immediate
   fallback to RMC `V` / GGA quality `0`.
 
+## 2026-05-29: GPS Fix Recovered After Moving Rover Farther Outdoors
+
+Setup:
+
+- Sketch: `firmware/gps_uart_probe`
+- Build flags:
+  - `GPS_PROBE_MODE=2`
+  - `GPS_PROBE_BAUD=9600`
+- Physical path: current GPS wiring on OpenRB `Serial2`
+- Change from previous failed/intermittent runs: rover/GPS was moved farther
+  outdoors with clearer sky view.
+
+Observed recovery sequence:
+
+- Previous persistent no-fix was primarily caused by rover/GPS placement.
+- After moving farther outside, the probe transitioned from `NO_FIX` to
+  `INTERMITTENT_FIX`.
+- Valid fix fields appeared with RMC status `A`, GGA fix quality `>=1`,
+  valid lat/lon around `35.5708,129.1870`, satellites around `5`, and HDOP
+  around `4.0`.
+- The latest pasted lines then reached stable fix:
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=2`
+  - `current_valid_fix=true`
+  - `gps_probe_state=STABLE_FIX`
+  - `lat≈35.570284..35.570296`
+  - `lon≈129.187078`
+  - `age_ms≈85..89`
+  - `sats=9`
+  - `hdop=3.56`
+  - `valid_fix_seconds_consecutive=58..60`
+
+Interpretation:
+
+- GPS UART and the GPS module are working on `Serial2/9600`.
+- GPS RF/sky-view placement is the dominant issue. Indoor, near-building, or
+  partially covered positions can produce persistent `NO_FIX` even with
+  continuous NMEA.
+- `STABLE_FIX` requires sustained valid fix, not a momentary RMC `A` burst.
+  The current probe rule is `valid_fix_seconds_consecutive >= 30`.
+
+Safety decision:
+
+- This clears the standalone GPS probe stability check for the current outdoor
+  placement.
+- Do not proceed to floor driving.
+- The next software validation is main-controller
+  `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` with
+  `AUTO_MOTION_ARMED=0`, after confirming `STABLE_FIX` outdoors and recomputing
+  the target from the actual runtime GPS position.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

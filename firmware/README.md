@@ -210,6 +210,13 @@ Target override rule:
   Short bursts reached RMC `A`, valid lat/lon, `sats=4..5`, and
   `hdop≈1.77..2.48`, then returned to no-fix. Do not proceed to AUTO dry-run,
   bench test, or floor driving until stable fix is observed.
+- Follow-up placement recovery: moving the rover/GPS farther outdoors recovered
+  stable fix in `gps_uart_probe`. The latest lines showed
+  `gps_probe_state=STABLE_FIX`, `current_valid_fix=true`, RMC `A`, GGA quality
+  `2`, `sats=9`, `hdop=3.56`, `age_ms≈85..89`, lat/lon around
+  `35.57029,129.187078`, and `valid_fix_seconds_consecutive=58..60`. Treat
+  this as proof that the GPS module and UART work when placement is good. It is
+  not approval for floor driving.
 - GPS readiness update: readiness is tiered. `gps_solution_valid` checks
   valid/fresh location plus NMEA fix status when available. `gps_dryrun_ready`
   allows no-motion candidate calculation with `GPS_DRYRUN_MIN_SATS=4` and
@@ -345,6 +352,12 @@ If the probe prints `warning="TinyGPS cached fix is not stable current fix"`,
 RMC has returned to `V` while TinyGPS++ still has cached coordinates. Treat
 those coordinates as debug-only and do not use them for target distance or
 autonomy decisions.
+
+Latest placement lesson: indoor, near-building, or partially covered positions
+can produce persistent `NO_FIX`. Move the rover/GPS farther outdoors and wait
+for `gps_probe_state=STABLE_FIX` or
+`valid_fix_seconds_consecutive >= 30` before returning to main-controller
+`AUTO_MOTION_ARMED=0` dry-run validation.
 
 ## I2C Scanner Test
 

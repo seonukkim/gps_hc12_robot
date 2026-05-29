@@ -525,6 +525,15 @@ The standalone GPS probe now prints `gps_probe_state=NO_FIX`,
 `INTERMITTENT_FIX`, or `STABLE_FIX`. Treat `STABLE_FIX` as the required probe
 result before returning to AUTO dry-run validation.
 
+Latest recovery: after moving the rover/GPS farther outdoors with clearer sky
+view, the `Serial2/9600` probe reached `gps_probe_state=STABLE_FIX` with
+`valid_fix_seconds_consecutive=58..60`, RMC `A`, GGA quality `2`, `sats=9`,
+`hdop=3.56`, and lat/lon around `35.57029,129.187078`. This confirms GPS
+module and UART operation; placement/sky view was the main no-fix cause. This
+does not approve floor driving. The next autonomy step is main-controller
+`AUTO_MOTION_ARMED=0` dry-run only, after recomputing a nearby target from the
+actual outdoor GPS position.
+
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.
 

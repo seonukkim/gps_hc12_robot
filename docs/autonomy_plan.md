@@ -702,15 +702,31 @@ Latest GPS-only Serial2 probe:
 - Treat this as intermittent GPS satellite acquisition. It is not a target
   override issue, RC issue, or timeout issue.
 
+GPS fix recovery after placement change:
+
+- After moving the rover/GPS farther outdoors with clearer sky view, the same
+  `Serial2/9600` probe transitioned from `NO_FIX` through `INTERMITTENT_FIX`
+  to `STABLE_FIX`.
+- Latest stable lines showed `current_valid_fix=true`, RMC `A`, GGA fix
+  quality `2`, `sats=9`, `hdop=3.56`, `age_ms≈85..89`, lat/lon around
+  `35.57029,129.187078`, and `valid_fix_seconds_consecutive=58..60`.
+- The GPS RF issue is now attributed primarily to rover/GPS placement and sky
+  view, not UART, target override, RC mode mapping, or timeout semantics.
+
 Autonomy block:
 
-- Do not proceed to AUTO candidate dry-run, wheel-off-ground bench test, or
-  floor driving until stable GPS fix is confirmed.
+- Do not proceed to wheel-off-ground bench test or floor driving from this
+  result alone.
 - A one-second RMC `A` burst is not enough. Require sustained usable fix fields:
   RMC `A` or GGA fix quality `>=1`, nonzero satellites, acceptable HDOP, fresh
   age, and no immediate fallback to RMC `V` / GGA quality `0`.
 - TinyGPS++ cached lat/lon after RMC returns to `V` must not be used for target
   distance or candidate commands.
+- Next step is main-controller
+  `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` with
+  `AUTO_MOTION_ARMED=0` only, after confirming outdoor `STABLE_FIX`,
+  recomputing the nearby target from the actual runtime GPS position, and
+  keeping final motor outputs inhibited.
 
 ## Safety Rules
 
@@ -725,8 +741,10 @@ Autonomy block:
 
 Next milestone:
 
-- Go fully outdoors with the rover and GPS fixed together, acquire a fresh
-  MANUAL fix, recompute a nearby target from that actual fix, and rerun
+- Go fully outdoors with the rover and GPS fixed together, confirm stable GPS
+  first (`gps_probe_state=STABLE_FIX` or `valid_fix_seconds_consecutive >= 30`
+  in the standalone probe, then fresh GPS fields in the main controller),
+  recompute a nearby target from that actual fix, and rerun
   `AUTO_MOTION_ARMED=0` promptly after upload/reset or AUTO entry. Continue IMU
   electrical diagnostics separately, but do not block GPS+RC candidate dry-run
   on IMU availability.

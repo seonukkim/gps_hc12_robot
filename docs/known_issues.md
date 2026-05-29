@@ -448,12 +448,21 @@ Interpretation:
   intermittent fix. Most lines reported RMC status `V`, GGA fix quality `0`,
   `sats=0`, and `hdop=99.99`; a few short bursts reached RMC `A`, valid
   lat/lon, `sats=4..5`, and `hdop≈1.77..2.48`, then returned to no-fix.
+- Moving the rover/GPS farther outdoors recovered stable fix in the standalone
+  probe. The latest stable lines showed `gps_probe_state=STABLE_FIX`,
+  `current_valid_fix=true`, RMC `A`, GGA quality `2`, `sats=9`, `hdop=3.56`,
+  and `valid_fix_seconds_consecutive=58..60`.
+- Treat the previous persistent `NO_FIX` primarily as a placement/sky-view
+  issue. Indoor, near-building, window-side, or partially covered positions can
+  keep reporting RMC `V`, GGA quality `0`, `sats=0`, and `hdop=99.99` even
+  while UART data is continuous.
 - `gps_chars` increasing only proves serial/NMEA input. It does not prove a
   usable GPS position.
 - RMC status `V`, GGA fix quality `0`, `sats=0`, and `hdop=99.99` means no
   current usable fix.
-- RMC status `A` for one second is not enough for autonomy validation; require
-  stable fix across repeated lines.
+- RMC status `A` or GGA quality `>=1` for one second is not enough for
+  autonomy validation; require sustained stable fix. In `gps_uart_probe`, use
+  `gps_probe_state=STABLE_FIX` or `valid_fix_seconds_consecutive >= 30`.
 - TinyGPS++ cached lat/lon after RMC returns to `V` must not be used for target
   distance, safety gates, or candidate commands.
 - The current blocker is unstable GPS satellite acquisition, not target

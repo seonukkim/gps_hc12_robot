@@ -138,6 +138,53 @@ Interpretation:
 - Do not proceed to AUTO dry-run, bench test, or floor driving until stable
   GPS fix is confirmed.
 
+### Latest Serial2 Probe: Moving Farther Outdoors Recovered Stable Fix
+
+Follow-up placement change:
+
+- The rover/GPS was moved farther outdoors with clearer sky view.
+- The same `firmware/gps_uart_probe` configuration was used:
+  - `GPS_PROBE_MODE=2`
+  - `GPS_PROBE_BAUD=9600`
+
+Observed:
+
+- The probe transitioned from `NO_FIX` to `INTERMITTENT_FIX`.
+- Valid fields appeared with RMC `A`, GGA fix quality `>=1`, valid lat/lon
+  around `35.5708,129.1870`, satellites around `5`, and HDOP around `4.0`.
+- The latest stable lines reached:
+  - `gps_probe_state=STABLE_FIX`
+  - `current_valid_fix=true`
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=2`
+  - `lat≈35.570284..35.570296`
+  - `lon≈129.187078`
+  - `age_ms≈85..89`
+  - `sats=9`
+  - `hdop=3.56`
+  - `valid_fix_seconds_consecutive=58..60`
+
+Interpretation:
+
+- GPS UART and module operation are confirmed on `Serial2/9600`.
+- The previous persistent no-fix was primarily a placement / sky-view problem.
+- Indoor, near-building, window-side, or partially covered positions can
+  receive NMEA continuously while still staying in `NO_FIX`.
+- Before autonomy dry-run, place the rover/GPS farther outdoors with clear sky
+  view and wait for `gps_probe_state=STABLE_FIX`.
+
+Minimum stable-fix rule:
+
+- `current_valid_fix=true`
+- RMC `A` or GGA fix quality `>=1`
+- fresh lat/lon age `<=2000 ms`
+- `sats >= 4`
+- `hdop <= 5.0`
+- `valid_fix_seconds_consecutive >= 30`
+
+This validates standalone GPS stability only. It does not approve floor
+driving.
+
 ## Architecture Decision: Fixed Wiring Plan
 
 The integrated rover firmware currently defines:
