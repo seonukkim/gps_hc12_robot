@@ -161,6 +161,10 @@ Target override rule:
   `distance_allowed=false` and `safety_ready=false` were expected.
 - `gps_fix=true` alone is not enough; check `gps_age_ms`, `gps_hdop`, and
   `gps_sats` before treating GPS as ready.
+- Latest nearby attempt: target override and GPS fix worked, but the actual fix
+  was `gps_lat=35.571384`, `gps_lon=129.187514` and the target was
+  `35.571310,129.188542`, leaving `target_distance_m=93.3`. Recompute the
+  target from the actual USBDBG GPS fix before the next inhibited run.
 
 Safety gates:
 

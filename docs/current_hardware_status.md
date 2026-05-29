@@ -297,10 +297,21 @@ Current status:
   occasionally around `4.7`.
 - `AUTO_MOTION_ARMED=0` and `auto_motor_inhibit=true` kept final outputs at
   zero.
+- Latest nearby attempt remained safely blocked. Target override was verified
+  with `SINGLE_WP_TARGET_LAT=35.5713100` and
+  `SINGLE_WP_TARGET_LON=129.1885416`; runtime printed
+  `target_lat=35.571310`, `target_lon=129.188542`. GPS UART was alive and GPS
+  fix was eventually acquired in MANUAL at `gps_lat=35.571384`,
+  `gps_lon=129.187514`, with `gps_sats=4` and `gps_hdop=3.39..4.12`.
+  However, `target_distance_m=93.3` exceeded `max_target_distance_m=30.0`, so
+  `distance_allowed=false`, `safety_ready=false`, candidate commands stayed
+  zero, and final outputs stayed zero. `gps_age_ms` was initially fresh but
+  later grew stale.
 - Target override success must be interpreted separately from
   `distance_allowed` / `safety_ready`.
 - Next required validation before motion:
-  - recompute a nearby target from the current GPS position
+  - recompute a nearby target from the actual runtime GPS fix position
+    `gps_lat=35.571384`, `gps_lon=129.187514`
   - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
   - confirm GPS freshness/quality using `gps_age_ms`, `gps_hdop`, and
     `gps_sats`; do not rely on `gps_fix=true` alone

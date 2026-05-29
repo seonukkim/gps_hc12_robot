@@ -305,6 +305,12 @@ still used the previous target (`35.567560,129.186792`). The target was about
 `448.9` m away, so `distance_allowed=false` and `safety_ready=false` were
 expected. Recalculate nearby targets whenever the antenna location changes.
 
+Latest nearby attempt: target override and GPS fix worked, but the target was
+computed from a stale or assumed position. The actual runtime fix was
+`gps_lat=35.571384`, `gps_lon=129.187514`, while the target was
+`35.571310,129.188542`, producing `target_distance_m=93.3`. Recompute the next
+target from the actual USBDBG GPS fix before rerunning `AUTO_MOTION_ARMED=0`.
+
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.
 `AUTO_MOTION_ARMED=1` is reserved for a later wheel-off-ground bench test after

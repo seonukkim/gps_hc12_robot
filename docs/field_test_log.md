@@ -911,6 +911,62 @@ Interpretation:
 - Bench test remains blocked.
 - Floor driving remains blocked.
 
+## 2026-05-29: Nearby Single-Waypoint Attempt Blocked By Actual Fix Distance
+
+Build/upload:
+
+- Build/upload succeeded with:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+  - `SINGLE_WP_TARGET_LAT=35.5713100`
+  - `SINGLE_WP_TARGET_LON=129.1885416`
+
+Observed USBDBG target fields:
+
+- `target_override_enabled=true`
+- `target_source=compile_time`
+- `target_lat_macro=35.5713100`
+- `target_lon_macro=129.1885416`
+- `target_lat=35.571310`
+- `target_lon=129.188542`
+
+Observed GPS and safety fields:
+
+- GPS UART was alive and `gps_chars` increased.
+- GPS fix was eventually acquired in MANUAL:
+  - `gps_fix=true`
+  - `gps_lat=35.571384`
+  - `gps_lon=129.187514`
+  - `gps_sats=4`
+  - `gps_hdop=3.39` to `4.12`
+  - `gps_age_ms` was initially fresh but later grew stale
+- The target was not nearby relative to the actual GPS fix:
+  - `target_distance_m=93.3`
+  - `max_target_distance_m=30.0`
+- `distance_allowed=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- `final_left_cmd=0.000`.
+- `final_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0`.
+- `auto_motor_inhibit=true`.
+
+Interpretation:
+
+- This is a safe blocked result, not a nearby candidate-command success.
+- Target override is working.
+- GPS UART and GPS fix acquisition are working.
+- The main blocker is that the target was computed from a stale or assumed GPS
+  position, not from the actual runtime GPS fix.
+- `distance_allowed=false` is expected because `target_distance_m=93.3`
+  exceeded `max_target_distance_m=30.0`.
+- The next step is to recompute the target from the actual GPS fix position:
+  `gps_lat=35.571384`, `gps_lon=129.187514`, then rerun with
+  `AUTO_MOTION_ARMED=0`.
+- Bench test remains blocked.
+- Floor driving remains blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

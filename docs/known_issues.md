@@ -318,6 +318,15 @@ Status:
 - In that next-day run, `gps_fix=true` appeared but `gps_ready=false` remained
   because `gps_age_ms` was often very large, `gps_sats` fluctuated, and
   `gps_hdop` was often `99.99` and only occasionally around `4.7`.
+- A later nearby attempt showed why the target must be calculated from the
+  actual runtime fix:
+  - override target was `target_lat=35.571310`, `target_lon=129.188542`
+  - actual GPS fix was `gps_lat=35.571384`, `gps_lon=129.187514`
+  - `gps_sats=4`
+  - `gps_hdop=3.39..4.12`
+  - `gps_age_ms` was initially fresh but later grew stale
+  - `target_distance_m=93.3`, above `max_target_distance_m=30.0`
+  - `distance_allowed=false` and `safety_ready=false`
 
 Interpretation:
 
@@ -329,6 +338,8 @@ Interpretation:
   command values.
 - Runtime GPS can move far from a previously computed target. Recompute the
   nearby target from the current GPS position before each nearby candidate run.
+- The target must be recalculated from the actual runtime GPS fix, not from an
+  assumed antenna location.
 - Compile-time nearby targets are only valid for the GPS location used when
   calculating them. If the antenna is moved on another day, the target must be
   recalculated.
@@ -336,6 +347,8 @@ Interpretation:
   `max_target_distance_m`.
 - `gps_fix=true` alone is not enough. `gps_age_ms`, `gps_hdop`, and `gps_sats`
   must also satisfy readiness gates before interpreting a run as GPS-ready.
+- `target_distance_m` must also be checked even when `gps_fix=true` and target
+  override are both valid.
 - Runtime `target_lat` and `target_lon` are the source of truth.
 
 Do not repeat:
@@ -346,6 +359,8 @@ Do not repeat:
   enough. Check `target_distance_m` against `max_target_distance_m`.
 - Do not reuse a previously computed nearby target after moving the antenna or
   on a later day without recalculating it from the current GPS position.
+- Do not compute the target from an assumed antenna location; use the actual
+  runtime GPS fix printed by USBDBG.
 - Do not treat `gps_fix=true` as sufficient when `gps_age_ms` is stale,
   `gps_hdop` is high, or satellites are unstable.
 - Do not approve bench testing or floor driving from a run where the target
