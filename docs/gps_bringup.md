@@ -185,6 +185,95 @@ Minimum stable-fix rule:
 This validates standalone GPS stability only. It does not approve floor
 driving.
 
+### Main Controller Outdoor GPS Recovery
+
+After the standalone probe reached stable fix, the main controller was tested
+farther outdoors with:
+
+```text
+FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1
+AUTO_MOTION_ARMED=0
+```
+
+Observed GPS quality in USBDBG:
+
+- `gps_location_valid=true`
+- `gps_location_fresh=true`
+- `gps_age_ok=true`
+- `gps_sats_ok=true`
+- `gps_hdop_ok=true`
+- `gps_solution_valid=true`
+- `gps_dryrun_ready=true`
+- `gps_motion_ready=true`
+- `gps_ready=true`
+- `gps_block_reason=OK`
+- `last_rmc_status=A`
+- `last_gga_fix_quality=2`
+- `gps_sats≈9..11`
+- `gps_hdop≈1.46`
+
+Interpretation:
+
+- Moving the rover farther outdoors fixed GPS acquisition in both the standalone
+  probe and the main controller.
+- The remaining dry-run blocker is not GPS. In the latest main-controller run,
+  the compile-time target was stale and `target_distance_m≈41`, which exceeded
+  `max_target_distance_m=30.0`.
+- Do not proceed to floor driving. Recompute a nearby target from the current
+  GPS position and rerun `AUTO_MOTION_ARMED=0`.
+
+### Main Controller No-Motion AUTO Waypoint Dry-Run Success
+
+The follow-up main-controller dry-run used a nearby compile-time target:
+
+```text
+target_lat_macro=35.5705010
+target_lon_macro=129.1872696
+```
+
+Observed GPS quality:
+
+- In MANUAL, GPS readiness was good enough for dry-run:
+  - `gps_location_valid=true`
+  - `gps_location_fresh=true`
+  - `gps_solution_valid=true`
+  - `gps_dryrun_ready=true`
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=2`
+  - `gps_sats≈7..9`
+  - `gps_hdop≈1.28..1.56`
+- On good samples, motion-level fields also passed:
+  - `gps_motion_ready=true`
+  - `gps_ready=true`
+
+Observed dry-run target and AUTO gates:
+
+- `target_distance_m≈8.4..15.2`
+- `distance_allowed=true`
+- `mode=AUTO_READY`
+- `auto_sw=true`
+- `mode_us≈2001`
+- `timeout_source=auto_entry`
+- `timeout_ok=true`
+- `safety_ready=true`
+- `candidate_left_cmd=0.100`
+- `candidate_right_cmd=0.100`
+- `AUTO_MOTION_ARMED=0`
+- `auto_motor_inhibit=true`
+- `final_left_cmd=0.000`
+- `final_right_cmd=0.000`
+
+Interpretation:
+
+- Main-controller GPS and AUTO gates are recovered outdoors.
+- No-motion waypoint candidate command generation is validated.
+- Some AUTO lines can still report motion-level `gps_ready=false` /
+  `gps_block_reason=BAD_HDOP` because the dry-run and motion GPS gates are
+  intentionally different. This is acceptable only for `AUTO_MOTION_ARMED=0`
+  when `gps_dryrun_ready=true` / `active_gps_ready=true`.
+- This does not approve floor driving. The next step is a wheel-off-ground
+  bench test with strict safety procedure.
+
 ## Architecture Decision: Fixed Wiring Plan
 
 The integrated rover firmware currently defines:

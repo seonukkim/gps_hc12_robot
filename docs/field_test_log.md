@@ -1488,6 +1488,158 @@ Safety decision:
   `AUTO_MOTION_ARMED=0`, after confirming `STABLE_FIX` outdoors and recomputing
   the target from the actual runtime GPS position.
 
+## 2026-05-29: Main Controller GPS And AUTO Gate Recovery
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Mode:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+- Physical change: rover/GPS moved farther outdoors.
+
+Observed GPS readiness:
+
+- The earlier GPS no-fix issue was resolved by outdoor placement.
+- Main-controller USBDBG showed good GPS quality:
+  - `gps_location_valid=true`
+  - `gps_location_fresh=true`
+  - `gps_age_ok=true`
+  - `gps_sats_ok=true`
+  - `gps_hdop_ok=true`
+  - `gps_solution_valid=true`
+  - `gps_dryrun_ready=true`
+  - `gps_motion_ready=true`
+  - `gps_ready=true`
+  - `gps_block_reason=OK`
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=2`
+  - `gps_sats≈9..11`
+  - `gps_hdop≈1.46`
+
+Observed AUTO gate:
+
+- AUTO entry was verified:
+  - `mode=AUTO_READY`
+  - `auto_sw=true`
+  - `mode_us≈2001..2002`
+  - `timeout_source=auto_entry`
+  - `timeout_ok=true`
+- Motor inhibition remained correct:
+  - `AUTO_MOTION_ARMED=0`
+  - `auto_motor_inhibit=true`
+  - `final_left_cmd=0.000`
+  - `final_right_cmd=0.000`
+
+Blocked target result:
+
+- The compile-time target was stale/far from the current GPS position:
+  - `target_lat_macro=35.5702838`
+  - `target_lon_macro=129.1869899`
+  - current GPS was around `35.57050,129.18736`
+  - `target_distance_m≈41`
+  - `max_target_distance_m=30.0`
+- Therefore:
+  - `distance_allowed=false`
+  - `safety_ready=false`
+  - `candidate_left_cmd=0.000`
+  - `candidate_right_cmd=0.000`
+
+Interpretation:
+
+- GPS placement issue is resolved when the rover is placed farther outdoors.
+- Main-controller GPS readiness and AUTO-entry timeout behavior are working.
+- This is a successful GPS/AUTO gate recovery and a safe blocked validation.
+- It is not yet a successful nearby waypoint candidate dry-run because the
+  target distance gate is still blocking.
+
+Next step:
+
+- Recompute a target from the current outdoor GPS position within roughly
+  `5..15` m.
+- Rerun the main-controller single-waypoint experiment with
+  `AUTO_MOTION_ARMED=0`.
+- At this point, bench testing remained blocked until `distance_allowed=true`,
+  `safety_ready=true`, and nonzero candidate commands are observed while final
+  outputs remain inhibited.
+- Floor driving remains blocked.
+
+## 2026-05-29: Successful No-Motion AUTO Waypoint Dry-Run
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Mode:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+- Rover/GPS placement: farther outdoors with stable enough sky view for
+  main-controller testing.
+- Compile-time target:
+  - `target_lat_macro=35.5705010`
+  - `target_lon_macro=129.1872696`
+
+Observed MANUAL GPS readiness:
+
+- GPS readiness was confirmed in MANUAL before AUTO validation:
+  - `gps_location_valid=true`
+  - `gps_location_fresh=true`
+  - `gps_age_ok=true`
+  - `gps_sats_ok=true`
+  - `gps_hdop_ok=true` on good samples
+  - `gps_solution_valid=true`
+  - `gps_dryrun_ready=true`
+  - `gps_motion_ready=true` on good samples
+  - `gps_ready=true` on good samples
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=2`
+  - `gps_sats≈7..9`
+  - `gps_hdop≈1.28..1.56`
+
+Observed target gate:
+
+- In MANUAL, the compile-time target entered a usable nearby range:
+  - `target_distance_m≈8.4..15.2`
+  - `distance_allowed=true`
+
+Observed AUTO dry-run:
+
+- AUTO entry was verified:
+  - `mode=AUTO_READY`
+  - `auto_sw=true`
+  - `mode_us≈2001`
+  - `timeout_source=auto_entry`
+  - `timeout_ok=true`
+- The no-motion candidate command gate succeeded:
+  - `safety_ready=true`
+  - `candidate_left_cmd=0.100`
+  - `candidate_right_cmd=0.100`
+- Motor output inhibition remained correct:
+  - `AUTO_MOTION_ARMED=0`
+  - `auto_motor_inhibit=true`
+  - `final_left_cmd=0.000`
+  - `final_right_cmd=0.000`
+
+Interpretation:
+
+- Outdoor GPS placement is good enough for no-motion dry-run validation.
+- MANUAL/AUTO switching works.
+- The firmware computes candidate autonomous commands when the dry-run gates
+  pass.
+- The firmware correctly suppresses final motor commands when
+  `AUTO_MOTION_ARMED=0`.
+- Some AUTO lines still showed motion-level `gps_ready=false` /
+  `gps_block_reason=BAD_HDOP` because motion-level GPS gating is stricter than
+  dry-run gating. This is acceptable only for `AUTO_MOTION_ARMED=0` dry-run
+  when `gps_dryrun_ready=true` / `active_gps_ready=true`; it is not sufficient
+  for real motion.
+
+Safety decision:
+
+- No-motion AUTO waypoint dry-run is validated.
+- Wheel-off-ground bench testing is the next step and still requires a strict
+  safety procedure.
+- Floor driving remains blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

@@ -435,8 +435,17 @@ Interpretation:
 - Compile-time nearby targets are only valid for the GPS location used when
   calculating them. If the antenna is moved on another day, the target must be
   recalculated.
+- Compile-time targets also become stale whenever the rover itself moves. A
+  target that was nearby before moving the rover can immediately exceed
+  `max_target_distance_m`.
+- The latest successful no-motion dry-run used compile-time target
+  `35.5705010,129.1872696` and target distance around `8.4..15.2` m. If the
+  rover moves before the next test, recompute the target again.
 - `distance_allowed=false` is expected when `target_distance_m` exceeds
   `max_target_distance_m`.
+- If GPS quality is good (`gps_ready=true`, RMC `A`, GGA quality `>=1`, enough
+  satellites, acceptable HDOP) but `distance_allowed=false`, the usual cause is
+  that the compile-time target is too far or stale, not that GPS is broken.
 - `gps_fix=true` alone is not enough. `gps_age_ms`, `gps_hdop`, and `gps_sats`
   must also satisfy readiness gates before interpreting a run as GPS-ready.
 - `gps_chars` increasing does not imply `gps_fix=true`; it only proves that
@@ -452,6 +461,16 @@ Interpretation:
   probe. The latest stable lines showed `gps_probe_state=STABLE_FIX`,
   `current_valid_fix=true`, RMC `A`, GGA quality `2`, `sats=9`, `hdop=3.56`,
   and `valid_fix_seconds_consecutive=58..60`.
+- Main-controller outdoor validation also recovered GPS and AUTO gates:
+  `gps_dryrun_ready=true`, `gps_motion_ready=true`, `gps_ready=true`,
+  `gps_block_reason=OK`, RMC `A`, GGA quality `2`, `gps_sats≈9..11`,
+  `gps_hdop≈1.46`, `mode=AUTO_READY`, `auto_sw=true`, and `timeout_ok=true`.
+  It was still blocked because stale target distance was about `41` m, greater
+  than `max_target_distance_m=30.0`.
+- Main-controller no-motion AUTO waypoint dry-run is now validated with
+  `AUTO_MOTION_ARMED=0`: `safety_ready=true`,
+  `candidate_left_cmd=0.100`, `candidate_right_cmd=0.100`,
+  `auto_motor_inhibit=true`, and final commands still `0.000`.
 - Treat the previous persistent `NO_FIX` primarily as a placement/sky-view
   issue. Indoor, near-building, window-side, or partially covered positions can
   keep reporting RMC `V`, GGA quality `0`, `sats=0`, and `hdop=99.99` even
@@ -484,6 +503,11 @@ Interpretation:
     up to `6.0`.
   - `gps_motion_ready` is for any future armed motion and keeps stricter HDOP
     and satellite thresholds.
+- Dry-run GPS and motion GPS gates are intentionally different.
+  `gps_ready=false` / `gps_block_reason=BAD_HDOP` can coexist with
+  `safety_ready=true` only in `AUTO_MOTION_ARMED=0` when
+  `gps_dryrun_ready=true` / `active_gps_ready=true`. It is not acceptable for
+  real motion or floor driving.
 - If motion-level `gps_ready=false`, operational `gps_lat` and `gps_lon`
   should be `NA`. In the single-waypoint experiment with
   `AUTO_MOTION_ARMED=0`, target distance and bearing may still be computed from

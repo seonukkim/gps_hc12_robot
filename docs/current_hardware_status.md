@@ -25,6 +25,12 @@
   `gps_uart_probe` logs reached `gps_probe_state=STABLE_FIX`,
   `current_valid_fix=true`, RMC `A`, GGA fix quality `2`, `sats=9`,
   `hdop=3.56`, and `valid_fix_seconds_consecutive=58..60`.
+- Main-controller GPS readiness is also recovered outdoors. In the
+  single-waypoint experiment with `AUTO_MOTION_ARMED=0`, USBDBG showed
+  `gps_location_valid=true`, `gps_location_fresh=true`, `gps_solution_valid=true`,
+  `gps_dryrun_ready=true`, `gps_motion_ready=true`, `gps_ready=true`,
+  `gps_block_reason=OK`, RMC `A`, GGA fix quality `2`, `gps_sats≈9..11`, and
+  `gps_hdop≈1.46`.
 - Integrated GPS `Serial2` diagnostic build: confirmed `gps_chars` increase,
   `gps_fix=true`, valid latitude/longitude, valid satellites/HDOP, HC-12
   disabled, and motors neutral
@@ -54,6 +60,19 @@
   `control_source=RC_MANUAL`. Manual stick input changed `steer_us` /
   `throttle_us`, and at least one MANUAL line produced nonzero
   `left_cmd` / `final_left_cmd`.
+- Latest main-controller outdoor gate recovery: AUTO entry is verified again
+  with `mode=AUTO_READY`, `auto_sw=true`, `mode_us≈2001..2002`,
+  `timeout_source=auto_entry`, and `timeout_ok=true`. `AUTO_MOTION_ARMED=0` and
+  `auto_motor_inhibit=true` kept `final_left_cmd=0.000` and
+  `final_right_cmd=0.000`.
+- Latest no-motion AUTO waypoint dry-run is successful. With compile-time
+  target `35.5705010,129.1872696`, MANUAL showed nearby
+  `target_distance_m≈8.4..15.2` and `distance_allowed=true`; AUTO entry showed
+  `mode=AUTO_READY`, `auto_sw=true`, `mode_us≈2001`, `timeout_ok=true`,
+  `safety_ready=true`, `candidate_left_cmd=0.100`, and
+  `candidate_right_cmd=0.100`. Because `AUTO_MOTION_ARMED=0`,
+  `auto_motor_inhibit=true` kept `final_left_cmd=0.000` and
+  `final_right_cmd=0.000`.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed
@@ -400,6 +419,19 @@ Current status:
   `hdop=3.56`, `age_ms≈85..89`, and lat/lon around
   `35.57029,129.187078`. This attributes the previous no-fix primarily to
   placement/sky view, not firmware or UART.
+- Main-controller GPS/AUTO gate recovery was confirmed in a prior run, but that
+  nearby waypoint candidate dry-run was incomplete. The compile-time target
+  `35.5702838,129.1869899` was stale while current GPS was around
+  `35.57050,129.18736`, so `target_distance_m≈41` exceeded
+  `max_target_distance_m=30.0`. `distance_allowed=false`,
+  `safety_ready=false`, and candidate commands stayed zero.
+- That stale-target blocker has been resolved for no-motion dry-run by
+  recompiling with target `35.5705010,129.1872696`; candidate command
+  generation has been observed while final motor outputs remained inhibited.
+- Some AUTO dry-run lines may show motion-level `gps_ready=false` /
+  `gps_block_reason=BAD_HDOP` while `safety_ready=true`. This is valid only in
+  `AUTO_MOTION_ARMED=0` when the active dry-run gate is ready. It is not
+  acceptable for any future armed motion.
 - GPS readiness diagnostics have been hardened. USBDBG now separates
   `gps_location_valid` from `gps_ready`, prints `gps_age_ok`, `gps_sats_ok`,
   `gps_hdop_ok`, readiness constants, and `gps_block_reason`, and only prints
@@ -428,27 +460,15 @@ Current status:
   localization.
 - Target override success must be interpreted separately from
   `distance_allowed` / `safety_ready`.
-- Next required validation before motion:
-  - go fully outdoors with the rover and GPS fixed together
-  - acquire a stable GPS fix in MANUAL or with `gps_uart_probe`; one-second RMC
-    `A` bursts are not enough, and the standalone probe stable rule is
-    `valid_fix_seconds_consecutive >= 30`
-  - do not proceed to AUTO candidate validation while `gps_fix=false`,
-    RMC status is `V`, GGA fix quality is `0`, `gps_sats=0`, or
-    `gps_hdop=99.99`
-  - recompute a nearby target from that actual runtime GPS fix
-  - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
-  - switch to AUTO while `distance_allowed=true` and verify
-    `auto_entry_ms` / `auto_elapsed_ms` become numeric with `timeout_ok=true`
-  - verify Manual/Auto positions first: MANUAL should show `mode_us≈1000` and
-    `control_source=RC_MANUAL`; AUTO should show `mode_us≈2000`,
-    `mode=AUTO_READY`, and `control_source=STOP` while motion remains inhibited
-  - confirm GPS freshness/quality using `gps_age_ms`, `gps_hdop`, and
-    `gps_sats`; do not rely on `gps_fix=true` alone
-  - run candidate validation promptly after AUTO entry because the timeout is
-    now based on AUTO elapsed time
-  - wheel-off-ground bench test only after safety gates and sensor assumptions
-    are clear
+- Next required validation before any armed motion:
+  - prepare a strict wheel-off-ground bench procedure
+  - keep the rover physically lifted
+  - verify RC manual override, STOP, and failsafe before any armed variant
+  - confirm outdoor GPS readiness and nearby target gates again
+  - repeat the no-motion `AUTO_MOTION_ARMED=0` validation if the rover or target
+    changes
+  - do not enable floor driving until wheel-off-ground logs prove the expected
+    behavior
   - IMU is optional for the current GPS+RC single-waypoint preparation stage;
     do not block candidate dry-run work on IMU availability
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB

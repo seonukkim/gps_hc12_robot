@@ -284,6 +284,15 @@ Compile with the nearby target override and motor output inhibited:
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-nearby-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_TARGET_LAT=35.5716800 -DSINGLE_WP_TARGET_LON=129.1866516' firmware/openrb_robot_controller
 ```
 
+Successful no-motion AUTO dry-run command pattern, using the latest validated
+nearby target:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-success-inhibit --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_TARGET_LAT=35.5705010 -DSINGLE_WP_TARGET_LON=129.1872696' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-single-waypoint-success-inhibit firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
 Upload the nearby override build using the matching build directory:
 
 ```bash
@@ -530,9 +539,28 @@ view, the `Serial2/9600` probe reached `gps_probe_state=STABLE_FIX` with
 `valid_fix_seconds_consecutive=58..60`, RMC `A`, GGA quality `2`, `sats=9`,
 `hdop=3.56`, and lat/lon around `35.57029,129.187078`. This confirms GPS
 module and UART operation; placement/sky view was the main no-fix cause. This
-does not approve floor driving. The next autonomy step is main-controller
-`AUTO_MOTION_ARMED=0` dry-run only, after recomputing a nearby target from the
-actual outdoor GPS position.
+does not approve floor driving.
+
+Main-controller outdoor validation then recovered both GPS and AUTO gates:
+`gps_dryrun_ready=true`, `gps_motion_ready=true`, `gps_ready=true`,
+`gps_block_reason=OK`, RMC `A`, GGA quality `2`, `gps_sats≈9..11`,
+`gps_hdop≈1.46`, `mode=AUTO_READY`, `auto_sw=true`, and `timeout_ok=true`.
+The run was still blocked safely because the compile-time target was stale:
+`target_distance_m≈41` exceeded `max_target_distance_m=30.0`, so
+`distance_allowed=false`, `safety_ready=false`, and candidate commands stayed
+zero. The next autonomy step is main-controller `AUTO_MOTION_ARMED=0` dry-run
+only after recomputing a target within roughly `5..15` m of the current outdoor
+GPS position.
+
+Latest no-motion AUTO waypoint dry-run succeeded with target
+`35.5705010,129.1872696`: `target_distance_m≈8.4..15.2`,
+`distance_allowed=true`, `mode=AUTO_READY`, `timeout_ok=true`,
+`safety_ready=true`, `candidate_left_cmd=0.100`, and
+`candidate_right_cmd=0.100`. Because `AUTO_MOTION_ARMED=0`,
+`auto_motor_inhibit=true` kept `final_left_cmd=0.000` and
+`final_right_cmd=0.000`. This validates candidate command generation only; it
+does not approve floor driving. The next step is wheel-off-ground bench
+testing.
 
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.
