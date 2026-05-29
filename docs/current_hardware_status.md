@@ -20,8 +20,10 @@
 - GPS module baudrate: confirmed `9600`
 - GPS NMEA output: working; `$GPRMC`, `$GPVTG`, `$GPGGA`, `$GPGSV`, and
   `$GPGLL` observed
-- GPS FIX: working on the current `Serial2` probe path and in the integrated
-  GPS `Serial2` diagnostic build
+- GPS FIX: has been demonstrated on the current `Serial2` probe path and in the
+  integrated GPS `Serial2` diagnostic build, but the latest GPS-only
+  `Serial2/9600` probe showed intermittent satellite acquisition rather than a
+  stable current fix
 - Integrated GPS `Serial2` diagnostic build: confirmed `gps_chars` increase,
   `gps_fix=true`, valid latitude/longitude, valid satellites/HDOP, HC-12
   disabled, and motors neutral
@@ -382,6 +384,35 @@ Current status:
   `gps_chars` increased continuously, but `gps_fix=false`, `gps_sats=0`, and
   `gps_hdop=99.99`. Reacquire stable GPS fix before attempting AUTO_READY
   candidate validation.
+- Latest GPS-only `Serial2` probe confirms the current blocker is still GPS
+  satellite fix stability, not UART, RC, target override, or timeout. The probe
+  was built with `GPS_PROBE_MODE=2` and `GPS_PROBE_BAUD=9600`; NMEA characters
+  streamed continuously, but most lines showed RMC status `V`, GGA fix quality
+  `0`, `sats=0`, and `hdop=99.99`. Short bursts reached RMC `A`, valid
+  lat/lon, `sats=4..5`, and `hdop≈1.77..2.48`, then fell back to no-fix.
+  Treat this as an intermittent GPS acquisition failure. TinyGPS++ cached
+  coordinates after fallback to RMC `V` are not a stable current rover position.
+- GPS readiness diagnostics have been hardened. USBDBG now separates
+  `gps_location_valid` from `gps_ready`, prints `gps_age_ok`, `gps_sats_ok`,
+  `gps_hdop_ok`, readiness constants, and `gps_block_reason`, and only prints
+  operational `gps_lat` / `gps_lon` when `gps_ready=true`. Cached coordinates
+  are available only as debug fields: `gps_cached_lat`, `gps_cached_lon`, and
+  `gps_cached_age_ms`.
+- Single-waypoint target distance and bearing are now computed only when
+  `gps_ready=true`; stale cached coordinates no longer produce operational
+  target distance/bearing values. The experiment also prints `gps_coord_sane`
+  and blocks safety when a ready coordinate is implausibly far from the
+  compile-time target.
+- GPS readiness is now tiered for single-waypoint dry-run work:
+  `gps_solution_valid` checks valid/fresh location plus NMEA fix status when
+  available, `gps_dryrun_ready` allows no-motion candidate calculations with
+  `GPS_DRYRUN_MIN_SATS=4` and `GPS_DRYRUN_MAX_HDOP=6.0`, and
+  `gps_motion_ready` keeps stricter motion gating with
+  `GPS_MOTION_MIN_SATS=5` and `GPS_MOTION_MAX_HDOP=2.5`. `gps_ready` remains
+  the stricter motion-level field.
+- In `AUTO_MOTION_ARMED=0`, target distance/bearing and candidate commands may
+  be computed from `gps_dryrun_ready`; final outputs remain inhibited. In any
+  future `AUTO_MOTION_ARMED=1` build, `gps_motion_ready` is required.
 - A brief PPM/failsafe-like glitch was observed with `mode=FAILSAFE`,
   `rc_ok=false`, `steer_us≈495`, `throttle_us≈2504`, and
   `control_source=STOP`. This is the correct safe response.
@@ -391,9 +422,11 @@ Current status:
   `distance_allowed` / `safety_ready`.
 - Next required validation before motion:
   - go fully outdoors with the rover and GPS fixed together
-  - acquire a fresh GPS fix in MANUAL
+  - acquire a stable GPS fix in MANUAL; one-second RMC `A` bursts are not
+    enough
   - do not proceed to AUTO candidate validation while `gps_fix=false`,
-    `gps_sats=0`, or `gps_hdop=99.99`
+    RMC status is `V`, GGA fix quality is `0`, `gps_sats=0`, or
+    `gps_hdop=99.99`
   - recompute a nearby target from that actual runtime GPS fix
   - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
   - switch to AUTO while `distance_allowed=true` and verify

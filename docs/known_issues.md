@@ -416,8 +416,10 @@ Interpretation:
   `distance_allowed` or candidate commands.
 - `distance_allowed=true` in MANUAL is progress, but it is not sufficient for a
   candidate dry-run success.
-- `safety_ready` must be verified in `AUTO_READY` with `gps_ready=true`,
-  `distance_allowed=true`, `timeout_ok=true`, valid RC, and the AUTO switch on.
+- `safety_ready` must be verified in `AUTO_READY` with the active GPS tier
+  ready (`active_gps_ready=true`; `dryrun_ready=true` for inhibited dry-run or
+  `motion_ready=true` for future armed motion), `distance_allowed=true`,
+  `timeout_ok=true`, valid RC, and the AUTO switch on.
 - Previous `timeout_ok=false` observations showed that the experiment timeout
   could expire while waiting in MANUAL for GPS/target setup.
 - Firmware has been updated so the single-waypoint experiment timeout starts on
@@ -442,9 +444,52 @@ Interpretation:
 - GPS fix can be lost between outdoor attempts. If `gps_sats=0` and
   `gps_hdop=99.99`, treat the run as GPS no-fix and do not proceed to AUTO
   candidate validation.
+- Latest GPS-only `Serial2/9600` probe showed continuous NMEA input but
+  intermittent fix. Most lines reported RMC status `V`, GGA fix quality `0`,
+  `sats=0`, and `hdop=99.99`; a few short bursts reached RMC `A`, valid
+  lat/lon, `sats=4..5`, and `hdop≈1.77..2.48`, then returned to no-fix.
+- `gps_chars` increasing only proves serial/NMEA input. It does not prove a
+  usable GPS position.
+- RMC status `V`, GGA fix quality `0`, `sats=0`, and `hdop=99.99` means no
+  current usable fix.
+- RMC status `A` for one second is not enough for autonomy validation; require
+  stable fix across repeated lines.
+- TinyGPS++ cached lat/lon after RMC returns to `V` must not be used for target
+  distance, safety gates, or candidate commands.
+- The current blocker is unstable GPS satellite acquisition, not target
+  override, RC mode mapping, or timeout semantics.
 - The latest post-timeout-fix run confirmed `timeout_source=auto_entry` and
   target override, but was blocked by `gps_fix=false`, `gps_lat=NA`,
   `gps_lon=NA`, `gps_sats=0`, `gps_hdop=99.99`, and `gps_age_ms=NA`.
+- The firmware now separates cached TinyGPS location validity from a usable GPS
+  solution:
+  - `gps_location_valid` means TinyGPS has a cached location.
+  - `gps_location_fresh` / `gps_age_ok` mean the cached location is recent.
+  - `gps_sats_ok` requires enough satellites.
+  - `gps_hdop_ok` requires acceptable HDOP.
+  - `gps_ready` is the stricter motion-level usable-position gate.
+- GPS readiness is tiered:
+  - `gps_solution_valid` requires valid/fresh location plus RMC `A` or GGA fix
+    quality at least `1` when those NMEA statuses are available.
+  - `gps_dryrun_ready` is for no-motion candidate calculation and allows HDOP
+    up to `6.0`.
+  - `gps_motion_ready` is for any future armed motion and keeps stricter HDOP
+    and satellite thresholds.
+- If motion-level `gps_ready=false`, operational `gps_lat` and `gps_lon`
+  should be `NA`. In the single-waypoint experiment with
+  `AUTO_MOTION_ARMED=0`, target distance and bearing may still be computed from
+  `gps_dryrun_ready=true` for no-motion diagnostics.
+- Cached coordinates may still be visible as `gps_cached_lat`,
+  `gps_cached_lon`, and `gps_cached_age_ms`, but they are debug-only and must
+  not be used for target distance or safety decisions.
+- `gps_block_reason` identifies the first blocker, such as `NO_LOCATION`,
+  `STALE_LOCATION`, `NO_SATS`, `BAD_HDOP`, `NOT_READY`, or `OK`.
+- NMEA status fields `last_rmc_status` and `last_gga_fix_quality` are
+  diagnostics only; armed-motion safety must still require `gps_motion_ready`
+  / motion-level `gps_ready`.
+- HDOP around `5` is acceptable only for no-motion dry-run candidate
+  calculation when `gps_dryrun_ready=true`. It is not approved for floor
+  driving or armed motion.
 - `target_distance_m` must also be checked even when `gps_fix=true` and target
   override are both valid.
 - `safety_ready` is the combined gate to inspect before any later motion work.
@@ -460,9 +505,10 @@ Do not repeat:
   enough. Check `target_distance_m` against `max_target_distance_m`.
 - Do not treat `distance_allowed=true` in MANUAL as a successful AUTO candidate
   dry-run.
-- Do not approve bench testing until `AUTO_READY`, `gps_ready=true`,
-  `distance_allowed=true`, `timeout_ok=true`, `safety_ready=true`, and nonzero
-  candidate commands are observed while final outputs remain inhibited.
+- Do not approve bench testing until `AUTO_READY`, `active_gps_ready=true`,
+  `dryrun_ready=true`, `distance_allowed=true`, `timeout_ok=true`,
+  `safety_ready=true`, and nonzero candidate commands are observed while final
+  outputs remain inhibited.
 - Do not reuse a previously computed nearby target after moving the antenna or
   on a later day without recalculating it from the current GPS position.
 - Do not reuse a compile-time target from an earlier outdoor location; even
@@ -474,6 +520,12 @@ Do not repeat:
 - Do not treat `gps_fix=true` as sufficient when `gps_age_ms` is stale,
   `gps_hdop` is high, or satellites are unstable.
 - Do not treat increasing `gps_chars` as a valid GPS position fix.
+- Do not treat `gps_location_valid=true` as a usable GPS fix if age, satellites,
+  or HDOP fail.
+- Do not treat `gps_dryrun_ready=true` as approval for floor driving. Armed
+  motion must require `gps_motion_ready=true`.
+- Do not use `gps_cached_lat` / `gps_cached_lon` for target distance,
+  waypoint acceptance, or safety decisions.
 - Do not proceed to AUTO candidate validation when `gps_sats=0` and
   `gps_hdop=99.99`.
 - Do not ignore `timeout_ok`; if it expires, rerun the validation promptly from

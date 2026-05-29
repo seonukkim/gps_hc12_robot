@@ -1266,6 +1266,177 @@ Interpretation:
 - Bench test remains blocked.
 - Floor driving remains blocked.
 
+## 2026-05-29: GPS Readiness And Stale-Coordinate Handling Improved
+
+Problem:
+
+- Recent USBDBG logs showed stale cached TinyGPS coordinates being printed as if
+  they were an operational position:
+  - `gps_fix=true`
+  - `gps_lat=34.944214`
+  - `gps_lon=128.985885`
+  - `gps_sats=0`
+  - `gps_hdop=99.99`
+  - `gps_age_ms` increasing above `20` to `45` seconds
+  - `gps_ready=false`
+  - `target_distance_m=71943.9`
+- This indicated that the old `gps_fix` field was based on TinyGPS cached
+  `location.isValid()`, not a fresh usable GPS solution.
+
+Firmware change:
+
+- USBDBG now splits GPS validity into explicit fields:
+  - `gps_location_valid`
+  - `gps_location_fresh`
+  - `gps_age_ok`
+  - `gps_sats_ok`
+  - `gps_hdop_ok`
+  - `gps_ready`
+  - `gps_block_reason`
+- USBDBG prints readiness constants:
+  - `gps_stale_ms`
+  - `gps_min_sats`
+  - `gps_max_hdop`
+- `gps_ready` now requires all of:
+  - valid TinyGPS location
+  - location age no more than `GPS_STALE_MS`
+  - satellites at least `GPS_MIN_SATS`
+  - HDOP no more than `GPS_MAX_HDOP`
+- Operational `gps_lat` / `gps_lon` now print `NA` unless `gps_ready=true`.
+- Cached TinyGPS coordinates are separated into debug-only fields:
+  - `gps_cached_lat`
+  - `gps_cached_lon`
+  - `gps_cached_age_ms`
+- `target_distance_m` and `target_bearing_deg` are computed only when
+  `gps_ready=true`.
+- The single-waypoint experiment now prints `gps_coord_sane` and blocks safety
+  if the ready GPS position is absurdly far from the compile-time target.
+- USBDBG now includes lightweight NMEA status diagnostics:
+  - `last_rmc_status` for `GPRMC` / `GNRMC`
+  - `last_gga_fix_quality` for `GPGGA` / `GNGGA`
+
+Safety:
+
+- No motion was enabled.
+- `AUTO_MOTION_ARMED=0` behavior remains inhibited.
+- RC manual behavior, RC channel mapping, motor mixing, and default safety
+  behavior were preserved.
+
+Validation:
+
+- Default `openrb_robot_controller` build compiled successfully.
+- Single-waypoint experiment with `AUTO_MOTION_ARMED=0` compiled successfully.
+
+## 2026-05-29: GPS Readiness Tiers Added For No-Motion Dry-Run
+
+Problem:
+
+- Recent outdoor logs showed a real but lower-quality GPS solution:
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=1`
+  - `gps_location_valid=true`
+  - `gps_location_fresh=true`
+  - `gps_age_ok=true`
+  - `gps_sats` around `3` to `5`
+  - `gps_hdop` around `4.95` to `5.00`
+- The previous `gps_ready` gate required strict motion-level quality
+  (`gps_max_hdop=2.5`, `gps_min_sats=4`), so `target_distance_m` remained `NA`
+  and no-motion candidate-command calculation could not be validated.
+
+Firmware change:
+
+- GPS readiness is now tiered:
+  - `gps_solution_valid`: valid, fresh location with RMC status `A` or GGA fix
+    quality at least `1` when those NMEA fields are available.
+  - `gps_dryrun_ready`: solution valid, dry-run age limit, at least
+    `GPS_DRYRUN_MIN_SATS=4`, and `GPS_DRYRUN_MAX_HDOP=6.0`.
+  - `gps_motion_ready`: solution valid, motion age limit, at least
+    `GPS_MOTION_MIN_SATS=5`, and `GPS_MOTION_MAX_HDOP=2.5`.
+- `gps_ready` remains the stricter motion-level alias.
+- USBDBG now prints:
+  - `gps_solution_valid`
+  - `gps_dryrun_ready`
+  - `gps_motion_ready`
+  - `gps_dryrun_block_reason`
+  - `gps_motion_block_reason`
+  - `gps_dryrun_stale_ms`
+  - `gps_dryrun_min_sats`
+  - `gps_dryrun_max_hdop`
+  - `gps_motion_stale_ms`
+  - `gps_motion_min_sats`
+  - `gps_motion_max_hdop`
+  - `dryrun_ready`
+  - `motion_ready`
+  - `safety_ready_source`
+- In the single-waypoint experiment:
+  - `AUTO_MOTION_ARMED=0` uses dry-run readiness for distance/bearing and
+    candidate-command computation.
+  - `AUTO_MOTION_ARMED=1` still requires motion readiness.
+  - final outputs remain inhibited when `AUTO_MOTION_ARMED=0`.
+
+Safety:
+
+- No motion was enabled.
+- Manual control, RC mapping, and motor mixing were preserved.
+- HDOP around `5` is acceptable only for no-motion dry-run candidate
+  calculation.
+- HDOP around `5` is not approved for floor driving.
+- Wheel-off-ground bench test remains blocked until dry-run candidate commands
+  are observed with final commands inhibited.
+
+Validation:
+
+- Default `openrb_robot_controller` build compiled successfully.
+- Single-waypoint experiment with `AUTO_MOTION_ARMED=0` compiled successfully.
+
+## 2026-05-29: GPS-only Serial2 Probe Shows Intermittent Fix
+
+Setup:
+
+- Sketch: `firmware/gps_uart_probe`
+- Build flags:
+  - `GPS_PROBE_MODE=2`
+  - `GPS_PROBE_BAUD=9600`
+- Physical path: current GPS wiring on OpenRB `Serial2`
+
+Observed:
+
+- `Serial2` at `9600` continuously received NMEA characters.
+- The probe output showed readable GPS data, so the GPS UART wiring and baudrate
+  are likely correct.
+- Most lines showed no usable satellite solution:
+  - RMC status `V`
+  - GGA fix quality `0`
+  - `sats=0`
+  - `hdop=99.99`
+  - `fix=false`, or a stale cached TinyGPS++ fix
+  - `lat` / `lon` as `NA`, or stale cached coordinates
+- A few short bursts showed valid fixes:
+  - RMC status `A`
+  - valid latitude/longitude
+  - `sats=4..5`
+  - `hdop≈1.77..2.48`
+- The valid fix did not remain stable. The output returned to RMC `V`, GGA
+  quality `0`, `sats=0`, and `hdop=99.99`.
+
+Interpretation:
+
+- GPS UART receive is alive on `Serial2/9600`.
+- GPS satellite acquisition is intermittent and currently not stable enough for
+  autonomy validation.
+- This is not a target override issue, not an RC issue, and not a timeout
+  issue.
+- TinyGPS++ may keep cached fix/lat/lon after RMC returns to `V`; cached
+  coordinates must not be used for target distance or safety decisions.
+
+Safety decision:
+
+- Do not proceed to AUTO dry-run validation, wheel-off-ground bench testing, or
+  floor driving until a stable GPS fix is observed.
+- Stable GPS validation should require sustained RMC `A` or GGA fix quality
+  `>=1`, nonzero satellites, acceptable HDOP, fresh age, and no immediate
+  fallback to RMC `V` / GGA quality `0`.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

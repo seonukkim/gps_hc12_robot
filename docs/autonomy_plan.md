@@ -30,7 +30,12 @@ single-waypoint timeout semantics have now been improved so the timeout starts
 on AUTO entry instead of being consumed during long MANUAL GPS waiting. The
 latest post-timeout-fix outdoor attempt confirmed the new timeout fields and
 target override, but it was blocked by `gps_fix=false`, `gps_sats=0`, and
-`gps_hdop=99.99`. Bench testing and floor waypoint driving are not approved yet.
+`gps_hdop=99.99`. GPS readiness and stale-coordinate handling have now been
+tightened so cached TinyGPS coordinates are no longer used as operational
+position or target-distance input unless a readiness tier passes. GPS readiness
+is now tiered so no-motion dry-run can use `gps_dryrun_ready` while any armed
+motion still requires `gps_motion_ready`. Bench testing and floor waypoint
+driving are not approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -65,17 +70,28 @@ Staged plan:
 8. GPS reacquisition required: the latest attempt showed `gps_chars` increasing
    but no valid GPS fix. Reacquire stable outdoor GPS in MANUAL before the next
    AUTO_READY candidate validation.
-9. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
+9. GPS readiness hardening complete: operational `gps_lat` / `gps_lon`, target
+   distance, and target bearing no longer use stale cached TinyGPS coordinates.
+   No-motion dry-run uses the dry-run GPS tier; armed motion uses the motion GPS
+   tier.
+10. GPS readiness tiers complete:
+   - `gps_solution_valid` confirms a valid fresh solution with usable NMEA fix
+     status when available.
+   - `gps_dryrun_ready` allows no-motion candidate calculations with
+     `GPS_DRYRUN_MIN_SATS=4` and `GPS_DRYRUN_MAX_HDOP=6.0`.
+   - `gps_motion_ready` keeps stricter motion gating with
+     `GPS_MOTION_MIN_SATS=5` and `GPS_MOTION_MAX_HDOP=2.5`.
+11. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
    sky. IMU diagnostics remain useful, but IMU is optional for the current
    GPS+RC single-waypoint preparation stage and must not block candidate dry-run
    work.
-10. Bench test with wheels lifted: compile the same experiment with
+12. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
-11. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
+13. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
    assumptions are validated.
-12. Multi-waypoint motion: only after single-waypoint behavior is proven.
-13. Coverage path / lawnmower driving: last step, after mission sequencing,
+14. Multi-waypoint motion: only after single-waypoint behavior is proven.
+15. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
@@ -114,13 +130,25 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 - Confirm the target override fields still match the intended target, then
   interpret `target_distance_m`, `distance_allowed`, and `safety_ready`.
 - `distance_allowed=true` in MANUAL is not enough; verify the same nearby-target
-  condition in `AUTO_READY` with `gps_ready=true`, `timeout_ok=true`, and
-  `safety_ready=true`.
+  condition in `AUTO_READY` with `active_gps_ready=true`, `timeout_ok=true`,
+  and `safety_ready=true`.
 - Confirm GPS readiness using `gps_age_ms`, `gps_hdop`, and `gps_sats`; do not
   rely on `gps_fix=true` alone.
 - `gps_chars` increasing only proves serial/NMEA input is alive. Do not proceed
   to AUTO candidate validation when `gps_fix=false`, `gps_lat=NA`,
   `gps_lon=NA`, `gps_sats=0`, or `gps_hdop=99.99`.
+- In updated USBDBG, `gps_ready` remains the stricter motion-level field.
+  `gps_location_valid=true` only means TinyGPS has a cached location; it is not
+  enough by itself.
+- `AUTO_MOTION_ARMED=0` no-motion candidate calculations may use
+  `gps_dryrun_ready=true`; this is reported as `active_gps_ready=true` in the
+  single-waypoint debug fields.
+- Any future `AUTO_MOTION_ARMED=1` build must require `gps_motion_ready=true`.
+- HDOP around `5` is acceptable only for no-motion dry-run candidate
+  calculation. It is not approved for floor driving.
+- If the relevant readiness tier is false, target-distance and bearing should
+  print `NA`. Inspect `gps_cached_lat`, `gps_cached_lon`, and
+  `gps_cached_age_ms` only as debug-only cached data.
 - Run candidate validation after entering AUTO; MANUAL GPS waiting no longer
   consumes the single-waypoint AUTO timeout in the updated firmware.
 - In MANUAL, expect `auto_entry_ms=NA` and `auto_elapsed_ms=NA`; after switching
@@ -203,9 +231,11 @@ The Arduino-side geodesy helpers are:
 These helpers are currently Arduino-side only, so there is no Python unit test
 for them. Manual validation is by USB debug output in the dry-run build:
 
-- verify `target_distance_m` is finite when `gps_fix=true`;
+- verify `target_distance_m` is finite when the active GPS tier is ready
+  (`gps_dryrun_ready=true` for inhibited dry-run);
 - verify `target_bearing_deg` stays in `0..360`;
-- verify `gps_ready=true` only when GPS has a valid recent location;
+- verify motion-level `gps_ready=true` only when GPS has a valid recent
+  high-quality location;
 - verify AUTO mode still reports `left_cmd=0` and `right_cmd=0`;
 - verify switching RC back to MANUAL restores `control_source=RC_MANUAL`.
 
@@ -251,10 +281,12 @@ Rule:
 
 ## Readiness Logic
 
-- `gps_ready=true` when GPS has a valid, recent location.
+- `gps_ready=true` is the stricter motion-level GPS gate.
+- In inhibited dry-run, `gps_dryrun_ready=true` can allow distance, bearing,
+  and candidate-command diagnostics while final motor commands remain zero.
 - `target_ready=true` when the placeholder waypoint is available.
-- `autonomy_ready=true` only when RC is valid, the RC AUTO switch is on, GPS is
-  ready, and the target is ready.
+- `autonomy_ready=true` only when RC is valid, the RC AUTO switch is on, the
+  relevant GPS tier is ready, and the target is ready.
 
 `autonomy_ready=true` is still only a dry-run state. It is not permission to
 move.
@@ -342,15 +374,17 @@ Safety constants:
 - `SINGLE_WAYPOINT_MAX_AUTO_THROTTLE=0.10`
 - `SINGLE_WAYPOINT_ARRIVAL_RADIUS_M=2.5`
 - `SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M=30.0`
-- `SINGLE_WAYPOINT_GPS_STALE_MS=2000`
-- `SINGLE_WAYPOINT_MAX_HDOP=2.5`
+- Dry-run GPS tier: `GPS_DRYRUN_STALE_MS=2000`,
+  `GPS_DRYRUN_MIN_SATS=4`, `GPS_DRYRUN_MAX_HDOP=6.0`
+- Motion GPS tier: `GPS_MOTION_STALE_MS=2000`, `GPS_MOTION_MIN_SATS=5`,
+  `GPS_MOTION_MAX_HDOP=2.5`
 - `SINGLE_WAYPOINT_AUTO_TIMEOUT_MS=15000`
 
 Safety gates:
 
-- GPS location valid.
-- GPS age below stale threshold.
-- GPS HDOP valid and below threshold.
+- GPS tier ready:
+  `gps_dryrun_ready=true` when `AUTO_MOTION_ARMED=0`, and
+  `gps_motion_ready=true` for any future `AUTO_MOTION_ARMED=1` build.
 - Target valid.
 - RC input valid.
 - RC AUTO switch on.
@@ -368,7 +402,18 @@ target_lat_macro=...
 target_lon_macro=...
 auto_motion_armed=...
 auto_motor_inhibit=...
-gps_ready=...
+active_gps_ready=...
+gps_location_valid=...
+gps_location_fresh=...
+gps_solution_valid=...
+gps_dryrun_ready=...
+gps_motion_ready=...
+gps_age_ok=...
+gps_sats_ok=...
+gps_hdop_ok=...
+gps_block_reason=...
+gps_dryrun_block_reason=...
+gps_motion_block_reason=...
 target_ready=...
 timeout_source=auto_entry
 auto_entry_ms=...
@@ -376,6 +421,10 @@ auto_elapsed_ms=...
 timeout_limit_ms=...
 timeout_ok=...
 max_target_distance_m=...
+max_coord_sanity_distance_m=...
+dryrun_ready=...
+motion_ready=...
+safety_ready_source=...
 arrival_radius_m=...
 distance_allowed=...
 safety_ready=...
@@ -574,9 +623,49 @@ Timeout semantics update:
 - MANUAL no longer consumes the AUTO candidate timeout.
 - USBDBG now prints `timeout_source=auto_entry`, `auto_entry_ms`,
   `auto_elapsed_ms`, `timeout_limit_ms`, and `timeout_ok`.
-- Next outdoor dry-run should verify `AUTO_READY`, `gps_ready=true`,
-  `distance_allowed=true`, `timeout_ok=true`, `safety_ready=true`, and nonzero
-  candidate commands while `AUTO_MOTION_ARMED=0` keeps final outputs at zero.
+- Next outdoor dry-run should verify `AUTO_READY`, `active_gps_ready=true`,
+  `dryrun_ready=true`, `distance_allowed=true`, `timeout_ok=true`,
+  `safety_ready=true`, and nonzero candidate commands while
+  `AUTO_MOTION_ARMED=0` keeps final outputs at zero.
+
+GPS readiness and stale-coordinate update:
+
+- USBDBG now splits the old ambiguous `gps_fix` meaning into
+  `gps_location_valid`, `gps_location_fresh`, `gps_age_ok`, `gps_sats_ok`,
+  `gps_hdop_ok`, `gps_ready`, and `gps_block_reason`.
+- `gps_ready` remains the stricter motion-level field. It requires valid
+  location, fresh age, enough satellites, and good HDOP.
+- USBDBG prints `gps_stale_ms`, `gps_min_sats`, and `gps_max_hdop`.
+- If motion-level `gps_ready=false`, operational `gps_lat` and `gps_lon` print
+  `NA`. In the single-waypoint experiment with `AUTO_MOTION_ARMED=0`,
+  `target_distance_m` and `target_bearing_deg` may still print when
+  `gps_dryrun_ready=true`.
+- Cached TinyGPS coordinates are printed separately as `gps_cached_lat`,
+  `gps_cached_lon`, and `gps_cached_age_ms`.
+- The single-waypoint experiment computes target distance and bearing only when
+  the active tier is ready: dry-run tier for `AUTO_MOTION_ARMED=0`, motion tier
+  for any future armed build.
+- The single-waypoint experiment also prints `gps_coord_sane`; positions more
+  than the coordinate-sanity limit from the compile-time target block safety.
+- NMEA status diagnostics now include `last_rmc_status` for `GPRMC` / `GNRMC`
+  and `last_gga_fix_quality` for `GPGGA` / `GNGGA`.
+
+GPS readiness tier update:
+
+- `gps_solution_valid` is true when the location is valid and fresh and, when
+  NMEA fix status is available, RMC status is `A` or GGA fix quality is at
+  least `1`.
+- `gps_dryrun_ready` uses `GPS_DRYRUN_STALE_MS=2000`,
+  `GPS_DRYRUN_MIN_SATS=4`, and `GPS_DRYRUN_MAX_HDOP=6.0`.
+- `gps_motion_ready` uses `GPS_MOTION_STALE_MS=2000`,
+  `GPS_MOTION_MIN_SATS=5`, and `GPS_MOTION_MAX_HDOP=2.5`.
+- In the single-waypoint experiment, `AUTO_MOTION_ARMED=0` uses
+  `gps_dryrun_ready` to compute target distance/bearing and candidate commands.
+- In any future `AUTO_MOTION_ARMED=1` build, `gps_motion_ready` is required.
+- `safety_ready_source` reports `dryrun_when_inhibited` or
+  `motion_when_armed`.
+- HDOP around `5` can be used only for no-motion diagnostics. It is not a floor
+  driving approval criterion.
 
 Latest post-timeout-fix GPS no-fix attempt:
 
@@ -597,6 +686,31 @@ Latest post-timeout-fix GPS no-fix attempt:
   zero.
 - This is a safe blocked validation. The current blocker is GPS satellite fix,
   not timeout, target override, or RC mode mapping.
+
+Latest GPS-only Serial2 probe:
+
+- `firmware/gps_uart_probe` was built and uploaded with
+  `GPS_PROBE_MODE=2` and `GPS_PROBE_BAUD=9600`.
+- `Serial2/9600` received continuous NMEA characters, so GPS UART wiring and
+  baudrate are not the current blocker.
+- Most lines showed no usable fix: RMC status `V`, GGA fix quality `0`,
+  `sats=0`, `hdop=99.99`, and either `fix=false` or stale cached TinyGPS++
+  coordinates.
+- A few short bursts showed RMC status `A`, valid lat/lon, `sats=4..5`, and
+  `hdop≈1.77..2.48`, but the state returned quickly to RMC `V` / GGA quality
+  `0`.
+- Treat this as intermittent GPS satellite acquisition. It is not a target
+  override issue, RC issue, or timeout issue.
+
+Autonomy block:
+
+- Do not proceed to AUTO candidate dry-run, wheel-off-ground bench test, or
+  floor driving until stable GPS fix is confirmed.
+- A one-second RMC `A` burst is not enough. Require sustained usable fix fields:
+  RMC `A` or GGA fix quality `>=1`, nonzero satellites, acceptable HDOP, fresh
+  age, and no immediate fallback to RMC `V` / GGA quality `0`.
+- TinyGPS++ cached lat/lon after RMC returns to `V` must not be used for target
+  distance or candidate commands.
 
 ## Safety Rules
 

@@ -305,7 +305,7 @@ Monitor:
 Expected USBDBG additions:
 
 ```text
-single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... safety_ready=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true active_gps_ready=... dryrun_ready=... motion_ready=... safety_ready_source=... target_ready=... safety_ready=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
 ```
 
 Runtime `target_lat` and `target_lon` are the source of truth. A nearby target
@@ -371,13 +371,21 @@ numeric and `timeout_ok=true` until the AUTO timeout limit is exceeded.
 
 Latest post-timeout-fix outdoor attempt: timeout fields and target override were
 confirmed, but GPS did not acquire a fix. `gps_chars` increased continuously,
-while `gps_fix=false`, `gps_lat=NA`, `gps_lon=NA`, `gps_sats=0`, and
-`gps_hdop=99.99`. This is a GPS no-fix blocked validation, not an AUTO
+while `gps_location_valid=false`, `gps_lat=NA`, `gps_lon=NA`, `gps_sats=0`,
+and `gps_hdop=99.99`. This is a GPS no-fix blocked validation, not an AUTO
 candidate success. Reacquire stable outdoor GPS fix in MANUAL before attempting
 AUTO_READY validation.
 
-Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
-target validity, target distance range, arrival radius, and AUTO timeout.
+GPS readiness update: `gps_location_valid=true` only means TinyGPS has a cached
+location. GPS readiness is now tiered: `gps_dryrun_ready=true` may be used for
+no-motion candidate calculation with HDOP up to `6.0`, while `gps_motion_ready`
+and `gps_ready` remain stricter motion-level gates. HDOP around `5` is
+acceptable only for no-motion dry-run diagnostics, not floor driving. Cached
+coordinates, if any, are printed only as `gps_cached_lat`, `gps_cached_lon`,
+and `gps_cached_age_ms`.
+
+Safety gates include GPS readiness, coordinate sanity, RC validity, AUTO switch
+state, target validity, target distance range, arrival radius, and AUTO timeout.
 `AUTO_MOTION_ARMED=1` is reserved for a later wheel-off-ground bench test after
 explicit approval. This mode does not load `mission.json` and does not implement
 multi-waypoint or lawnmower/coverage driving.
@@ -499,10 +507,23 @@ view.
 
 ### GPS Data But No Fix
 
-If `gps_chars>0` but `gps_fix=false`, GPS UART data is arriving but satellite
-fix quality is not sufficient yet. Indoor or window-side tests may receive NMEA
-bytes without acquiring a valid fix. For first fix, place the GPS antenna
-outdoors with open sky view and wait before changing firmware.
+If `gps_chars>0` but `gps_ready=false`, GPS UART data is arriving but usable
+position quality is not sufficient yet. Indoor, window-side, or temporary
+outdoor tests may receive NMEA bytes without acquiring a valid fresh fix. For
+first fix, place the GPS antenna outdoors with open sky view and wait before
+changing firmware.
+
+Latest GPS-only `Serial2/9600` probe result: GPS UART receive is alive, but
+satellite fix is intermittent. Most lines showed RMC `V`, GGA fix quality `0`,
+`sats=0`, and `hdop=99.99`; a few short bursts reached RMC `A`, valid lat/lon,
+`sats=4..5`, and `hdop≈1.77..2.48`, then returned to no-fix. Treat this as a
+GPS acquisition blocker, not a target override, RC, timeout, UART, or baudrate
+problem. Do not proceed to AUTO dry-run, bench test, or floor driving until a
+stable GPS fix is observed.
+
+The standalone GPS probe now prints `gps_probe_state=NO_FIX`,
+`INTERMITTENT_FIX`, or `STABLE_FIX`. Treat `STABLE_FIX` as the required probe
+result before returning to AUTO dry-run validation.
 
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.
@@ -510,6 +531,16 @@ configuration first.
 GPS sky-fix checklist:
 
 - `gps_chars` increasing means the selected UART and baudrate are working.
+- RMC `V` / GGA quality `0` / `sats=0` / `hdop=99.99` means no usable current
+  fix even when NMEA bytes are arriving.
+- RMC `A` for one second is not enough; require stable fix across repeated
+  lines.
+- `gps_location_valid=true` can be stale cached TinyGPS data; it is not enough
+  for target-distance computation.
+- `gps_ready=true` is the stricter motion-level gate. In the no-motion
+  single-waypoint dry-run, `gps_dryrun_ready=true` / `active_gps_ready=true`
+  may be enough to compute diagnostic distance, bearing, and candidate commands
+  while final motor outputs stay zero.
 - `gps_sats=0` and `gps_hdop=99.99` mean no satellite acquisition yet, not a
   UART or firmware failure by themselves.
 - Move the antenna outside or into open sky before suspecting code.

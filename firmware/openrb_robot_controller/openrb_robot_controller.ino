@@ -40,10 +40,19 @@ constexpr long HC12_BAUD = 9600;
 constexpr long GPS_BAUD = 9600;
 constexpr long USB_BAUD = 115200;
 
+constexpr uint32_t GPS_DRYRUN_STALE_MS = 2000;
+constexpr uint8_t GPS_DRYRUN_MIN_SATS = 4;
+constexpr double GPS_DRYRUN_MAX_HDOP = 6.0;
+constexpr uint32_t GPS_MOTION_STALE_MS = 2000;
+constexpr uint8_t GPS_MOTION_MIN_SATS = 5;
+constexpr double GPS_MOTION_MAX_HDOP = 2.5;
+constexpr uint32_t GPS_STALE_MS = GPS_MOTION_STALE_MS;
+constexpr uint8_t GPS_MIN_SATS = GPS_MOTION_MIN_SATS;
+constexpr double GPS_MAX_HDOP = GPS_MOTION_MAX_HDOP;
 constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
-constexpr uint32_t DRYRUN_GPS_READY_MAX_AGE_MS = 3000;
+constexpr uint32_t DRYRUN_GPS_READY_MAX_AGE_MS = GPS_DRYRUN_STALE_MS;
 constexpr bool SINGLE_WAYPOINT_TARGET_AVAILABLE = true;
 constexpr double SINGLE_WAYPOINT_FALLBACK_TARGET_LAT = 35.571120;
 constexpr double SINGLE_WAYPOINT_FALLBACK_TARGET_LON = 129.186050;
@@ -72,8 +81,9 @@ constexpr bool SINGLE_WAYPOINT_AUTO_MOTION_ARMED = AUTO_MOTION_ARMED != 0;
 constexpr float SINGLE_WAYPOINT_MAX_AUTO_THROTTLE = 0.10f;
 constexpr double SINGLE_WAYPOINT_ARRIVAL_RADIUS_M = 2.5;
 constexpr double SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M = 30.0;
-constexpr uint32_t SINGLE_WAYPOINT_GPS_STALE_MS = 2000;
-constexpr double SINGLE_WAYPOINT_MAX_HDOP = 2.5;
+constexpr double SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M = 1000.0;
+constexpr uint32_t SINGLE_WAYPOINT_GPS_STALE_MS = GPS_DRYRUN_STALE_MS;
+constexpr double SINGLE_WAYPOINT_MAX_HDOP = GPS_DRYRUN_MAX_HDOP;
 constexpr uint32_t SINGLE_WAYPOINT_AUTO_TIMEOUT_MS = 15000;
 
 constexpr uint8_t CHANNEL_COUNT = 8;
@@ -125,6 +135,9 @@ struct StationManualCommand {
 
 #if ENABLE_GPS_TELEMETRY
 TinyGPSPlus gps;
+String gpsNmeaLine;
+char lastRmcStatus = '\0';
+int lastGgaFixQuality = -1;
 #endif
 Servo escLeft;
 Servo escRight;
@@ -151,8 +164,12 @@ float lastLeftOutputCmd = 0.0f;
 float lastRightOutputCmd = 0.0f;
 
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
-uint32_t singleWaypointAutoStartMs = 0;
+bool singleWaypointAutoTimingActiveFlag = false;
+uint32_t singleWaypointAutoEntryMs = 0;
+uint32_t singleWaypointAutoElapsedMs = 0;
 bool singleWaypointGpsReadyFlag = false;
+bool singleWaypointDryrunReadyFlag = false;
+bool singleWaypointMotionReadyFlag = false;
 bool singleWaypointTargetReadyFlag = false;
 bool singleWaypointTimeoutOkFlag = false;
 bool singleWaypointDistanceAllowedFlag = false;
@@ -160,6 +177,7 @@ bool singleWaypointSafetyReadyFlag = false;
 bool singleWaypointArrivedFlag = false;
 bool singleWaypointAutoMotorInhibitFlag = true;
 bool singleWaypointTargetComputedFlag = false;
+bool singleWaypointGpsCoordSaneFlag = false;
 double singleWaypointTargetDistanceM = 0.0;
 double singleWaypointTargetBearingDeg = 0.0;
 float singleWaypointCandidateLeftCmd = 0.0f;
@@ -293,20 +311,174 @@ double dryrunBearingDegrees(double fromLat, double fromLon, double toLat, double
 }
 
 bool dryrunGpsReady() {
-  return gps.location.isValid() && gps.location.age() <= DRYRUN_GPS_READY_MAX_AGE_MS;
+  return gpsDryrunReady();
+}
+#endif
+
+#if ENABLE_GPS_TELEMETRY
+bool gpsLocationValid() {
+  return gps.location.isValid();
+}
+
+bool gpsAgeOk(uint32_t staleMs) {
+  return gpsLocationValid() && gps.location.age() <= staleMs;
+}
+
+bool gpsAgeOk() {
+  return gpsAgeOk(GPS_MOTION_STALE_MS);
+}
+
+bool gpsNmeaFixKnown() {
+  return lastRmcStatus != '\0' || lastGgaFixQuality >= 0;
+}
+
+bool gpsNmeaFixOk() {
+  return lastRmcStatus == 'A' || lastGgaFixQuality >= 1;
+}
+
+bool gpsSolutionValid() {
+  return gpsLocationValid() && gpsAgeOk(GPS_DRYRUN_STALE_MS) &&
+         (!gpsNmeaFixKnown() || gpsNmeaFixOk());
+}
+
+bool gpsSatsOk() {
+  return gps.satellites.isValid() && gps.satellites.value() >= GPS_MOTION_MIN_SATS;
+}
+
+bool gpsHdopOk() {
+  return gps.hdop.isValid() && gps.hdop.hdop() <= GPS_MOTION_MAX_HDOP;
+}
+
+bool gpsDryrunSatsOk() {
+  return gps.satellites.isValid() && gps.satellites.value() >= GPS_DRYRUN_MIN_SATS;
+}
+
+bool gpsDryrunHdopOk() {
+  return gps.hdop.isValid() && gps.hdop.hdop() <= GPS_DRYRUN_MAX_HDOP;
+}
+
+bool gpsMotionSatsOk() {
+  return gps.satellites.isValid() && gps.satellites.value() >= GPS_MOTION_MIN_SATS;
+}
+
+bool gpsMotionHdopOk() {
+  return gps.hdop.isValid() && gps.hdop.hdop() <= GPS_MOTION_MAX_HDOP;
+}
+
+bool gpsDryrunReady() {
+  return gpsSolutionValid() && gpsAgeOk(GPS_DRYRUN_STALE_MS) &&
+         gpsDryrunSatsOk() && gpsDryrunHdopOk();
+}
+
+bool gpsMotionReady() {
+  return gpsSolutionValid() && gpsAgeOk(GPS_MOTION_STALE_MS) &&
+         gpsMotionSatsOk() && gpsMotionHdopOk();
+}
+
+bool gpsReady() {
+  return gpsMotionReady();
+}
+
+const char *gpsTierBlockReason(uint32_t staleMs, uint8_t minSats, double maxHdop) {
+  if (!gpsLocationValid()) {
+    return "NO_LOCATION";
+  }
+  if (!gpsAgeOk(staleMs)) {
+    return "STALE_LOCATION";
+  }
+  if (gpsNmeaFixKnown() && !gpsNmeaFixOk()) {
+    return "NO_FIX_STATUS";
+  }
+  if (!gps.satellites.isValid() || gps.satellites.value() < minSats) {
+    return "NO_SATS";
+  }
+  if (!gps.hdop.isValid() || gps.hdop.hdop() > maxHdop) {
+    return "BAD_HDOP";
+  }
+  return "OK";
+}
+
+const char *gpsDryrunBlockReason() {
+  const char *reason = gpsTierBlockReason(GPS_DRYRUN_STALE_MS, GPS_DRYRUN_MIN_SATS, GPS_DRYRUN_MAX_HDOP);
+  return gpsDryrunReady() ? "OK" : reason;
+}
+
+const char *gpsMotionBlockReason() {
+  const char *reason = gpsTierBlockReason(GPS_MOTION_STALE_MS, GPS_MOTION_MIN_SATS, GPS_MOTION_MAX_HDOP);
+  return gpsMotionReady() ? "OK" : reason;
+}
+
+const char *gpsBlockReason() {
+  return gpsMotionBlockReason();
+}
+
+bool nmeaSentenceType(const String &sentence, char a, char b, char c) {
+  return sentence.length() >= 6 && sentence.charAt(0) == '$' &&
+         ((sentence.charAt(1) == 'G' && sentence.charAt(2) == 'P') ||
+          (sentence.charAt(1) == 'G' && sentence.charAt(2) == 'N')) &&
+         sentence.charAt(3) == a && sentence.charAt(4) == b && sentence.charAt(5) == c;
+}
+
+bool nmeaField(const String &sentence, uint8_t index, String &field) {
+  uint8_t current = 0;
+  int start = 0;
+  while (start < sentence.length()) {
+    int end = sentence.indexOf(',', start);
+    int checksum = sentence.indexOf('*', start);
+    if (end < 0 || (checksum >= 0 && checksum < end)) {
+      end = checksum >= 0 ? checksum : sentence.length();
+    }
+    if (current == index) {
+      field = sentence.substring(start, end);
+      return true;
+    }
+    if (end >= sentence.length() || sentence.charAt(end) == '*') {
+      return false;
+    }
+    start = end + 1;
+    current++;
+  }
+  return false;
+}
+
+void updateNmeaStatus(const String &sentence) {
+  String field;
+  if (nmeaSentenceType(sentence, 'R', 'M', 'C') && nmeaField(sentence, 2, field) && field.length() > 0) {
+    lastRmcStatus = field.charAt(0);
+  } else if (nmeaSentenceType(sentence, 'G', 'G', 'A') && nmeaField(sentence, 6, field) && field.length() > 0) {
+    lastGgaFixQuality = field.toInt();
+  }
+}
+
+void processGpsChar(char c) {
+  gps.encode(c);
+  if (c == '\n') {
+    if (gpsNmeaLine.length() > 0) {
+      updateNmeaStatus(gpsNmeaLine);
+      gpsNmeaLine = "";
+    }
+  } else if (c != '\r') {
+    if (gpsNmeaLine.length() < 96) {
+      gpsNmeaLine += c;
+    } else {
+      gpsNmeaLine = "";
+    }
+  }
 }
 #endif
 
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 bool singleWaypointGpsReady() {
-  return gps.location.isValid() && gps.location.age() <= SINGLE_WAYPOINT_GPS_STALE_MS &&
-         gps.hdop.isValid() && gps.hdop.hdop() <= SINGLE_WAYPOINT_MAX_HDOP;
+  return SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? gpsMotionReady() : gpsDryrunReady();
 }
 
 void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32_t now) {
   singleWaypointTargetReadyFlag = SINGLE_WAYPOINT_TARGET_AVAILABLE;
+  singleWaypointDryrunReadyFlag = gpsDryrunReady();
+  singleWaypointMotionReadyFlag = gpsMotionReady();
   singleWaypointGpsReadyFlag = singleWaypointGpsReady();
-  singleWaypointTargetComputedFlag = singleWaypointTargetReadyFlag && gps.location.isValid();
+  singleWaypointTargetComputedFlag = singleWaypointTargetReadyFlag && singleWaypointGpsReadyFlag;
+  singleWaypointGpsCoordSaneFlag = false;
   singleWaypointTargetDistanceM = 0.0;
   singleWaypointTargetBearingDeg = 0.0;
   singleWaypointArrivedFlag = false;
@@ -317,26 +489,33 @@ void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32
         gps.location.lat(), gps.location.lng(), SINGLE_WAYPOINT_TARGET_LAT, SINGLE_WAYPOINT_TARGET_LON);
     singleWaypointTargetBearingDeg = dryrunBearingDegrees(
         gps.location.lat(), gps.location.lng(), SINGLE_WAYPOINT_TARGET_LAT, SINGLE_WAYPOINT_TARGET_LON);
+    singleWaypointGpsCoordSaneFlag =
+        singleWaypointTargetDistanceM <= SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M;
     singleWaypointArrivedFlag = singleWaypointTargetDistanceM <= SINGLE_WAYPOINT_ARRIVAL_RADIUS_M;
     singleWaypointDistanceAllowedFlag =
+        singleWaypointGpsCoordSaneFlag &&
         singleWaypointTargetDistanceM > SINGLE_WAYPOINT_ARRIVAL_RADIUS_M &&
         singleWaypointTargetDistanceM <= SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M;
   }
 
-  if (rcValid && autoSwitchOn) {
-    if (singleWaypointAutoStartMs == 0) {
-      singleWaypointAutoStartMs = now;
+  bool autoCandidateActive = rcValid && autoSwitchOn;
+  if (autoCandidateActive) {
+    if (!singleWaypointAutoTimingActiveFlag) {
+      singleWaypointAutoTimingActiveFlag = true;
+      singleWaypointAutoEntryMs = now;
     }
+    singleWaypointAutoElapsedMs = now - singleWaypointAutoEntryMs;
+    singleWaypointTimeoutOkFlag = singleWaypointAutoElapsedMs <= SINGLE_WAYPOINT_AUTO_TIMEOUT_MS;
   } else {
-    singleWaypointAutoStartMs = 0;
+    singleWaypointAutoTimingActiveFlag = false;
+    singleWaypointAutoEntryMs = 0;
+    singleWaypointAutoElapsedMs = 0;
+    singleWaypointTimeoutOkFlag = true;
   }
 
-  singleWaypointTimeoutOkFlag =
-      singleWaypointAutoStartMs != 0 &&
-      now - singleWaypointAutoStartMs <= SINGLE_WAYPOINT_AUTO_TIMEOUT_MS;
   singleWaypointSafetyReadyFlag =
       rcValid && autoSwitchOn && singleWaypointGpsReadyFlag && singleWaypointTargetReadyFlag &&
-      singleWaypointDistanceAllowedFlag && singleWaypointTimeoutOkFlag;
+      singleWaypointGpsCoordSaneFlag && singleWaypointDistanceAllowedFlag && singleWaypointTimeoutOkFlag;
 
   if (singleWaypointSafetyReadyFlag) {
     // Heading control is not implemented yet; this candidate is straight low-speed only.
@@ -562,6 +741,14 @@ void debugPrintStatus() {
   float manualSteering = 0.0f;
   float manualThrottle = 0.0f;
   mapRcManualAxes(steeringNorm, throttleNorm, manualSteering, manualThrottle);
+  bool gpsLocValid = gpsLocationValid();
+  bool gpsLocFresh = gpsAgeOk();
+  bool gpsSatellitesOk = gpsSatsOk();
+  bool gpsDilutionOk = gpsHdopOk();
+  bool gpsIsReady = gpsReady();
+  bool gpsSolutionOk = gpsSolutionValid();
+  bool gpsDryrunOk = gpsDryrunReady();
+  bool gpsMotionOk = gpsMotionReady();
 
   Serial.print(F("USBDBG mode="));
   Serial.print(modeName(currentMode));
@@ -619,17 +806,75 @@ void debugPrintStatus() {
   Serial.print(HC12_LINK_ENABLED ? F("true") : F("false"));
   Serial.print(F(" gps_chars="));
   Serial.print(gps.charsProcessed());
-  Serial.print(F(" gps_fix="));
-  Serial.print(gps.location.isValid() ? F("true") : F("false"));
+  Serial.print(F(" gps_location_valid="));
+  Serial.print(gpsLocValid ? F("true") : F("false"));
+  Serial.print(F(" gps_location_fresh="));
+  Serial.print(gpsLocFresh ? F("true") : F("false"));
+  Serial.print(F(" gps_age_ok="));
+  Serial.print(gpsLocFresh ? F("true") : F("false"));
+  Serial.print(F(" gps_sats_ok="));
+  Serial.print(gpsSatellitesOk ? F("true") : F("false"));
+  Serial.print(F(" gps_hdop_ok="));
+  Serial.print(gpsDilutionOk ? F("true") : F("false"));
+  Serial.print(F(" gps_solution_valid="));
+  Serial.print(gpsSolutionOk ? F("true") : F("false"));
+  Serial.print(F(" gps_dryrun_ready="));
+  Serial.print(gpsDryrunOk ? F("true") : F("false"));
+  Serial.print(F(" gps_motion_ready="));
+  Serial.print(gpsMotionOk ? F("true") : F("false"));
+  Serial.print(F(" gps_dryrun_block_reason="));
+  Serial.print(gpsDryrunBlockReason());
+  Serial.print(F(" gps_motion_block_reason="));
+  Serial.print(gpsMotionBlockReason());
+  Serial.print(F(" gps_ready="));
+  Serial.print(gpsIsReady ? F("true") : F("false"));
+  Serial.print(F(" gps_block_reason="));
+  Serial.print(gpsBlockReason());
+  Serial.print(F(" gps_stale_ms="));
+  Serial.print(GPS_STALE_MS);
+  Serial.print(F(" gps_min_sats="));
+  Serial.print(GPS_MIN_SATS);
+  Serial.print(F(" gps_max_hdop="));
+  Serial.print(GPS_MAX_HDOP, 1);
+  Serial.print(F(" gps_dryrun_stale_ms="));
+  Serial.print(GPS_DRYRUN_STALE_MS);
+  Serial.print(F(" gps_dryrun_min_sats="));
+  Serial.print(GPS_DRYRUN_MIN_SATS);
+  Serial.print(F(" gps_dryrun_max_hdop="));
+  Serial.print(GPS_DRYRUN_MAX_HDOP, 1);
+  Serial.print(F(" gps_motion_stale_ms="));
+  Serial.print(GPS_MOTION_STALE_MS);
+  Serial.print(F(" gps_motion_min_sats="));
+  Serial.print(GPS_MOTION_MIN_SATS);
+  Serial.print(F(" gps_motion_max_hdop="));
+  Serial.print(GPS_MOTION_MAX_HDOP, 1);
   Serial.print(F(" gps_lat="));
-  if (gps.location.isValid()) {
+  if (gpsIsReady) {
     Serial.print(gps.location.lat(), 6);
   } else {
     Serial.print(F("NA"));
   }
   Serial.print(F(" gps_lon="));
-  if (gps.location.isValid()) {
+  if (gpsIsReady) {
     Serial.print(gps.location.lng(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_cached_lat="));
+  if (gpsLocValid) {
+    Serial.print(gps.location.lat(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_cached_lon="));
+  if (gpsLocValid) {
+    Serial.print(gps.location.lng(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_cached_age_ms="));
+  if (gpsLocValid) {
+    Serial.print(gps.location.age());
   } else {
     Serial.print(F("NA"));
   }
@@ -646,8 +891,20 @@ void debugPrintStatus() {
     Serial.print(F("NA"));
   }
   Serial.print(F(" gps_age_ms="));
-  if (gps.location.isValid()) {
+  if (gpsLocValid) {
     Serial.print(gps.location.age());
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" last_rmc_status="));
+  if (lastRmcStatus != '\0') {
+    Serial.print(lastRmcStatus);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" last_gga_fix_quality="));
+  if (lastGgaFixQuality >= 0) {
+    Serial.print(lastGgaFixQuality);
   } else {
     Serial.print(F("NA"));
   }
@@ -669,13 +926,13 @@ void debugPrintStatus() {
     Serial.print(F("NA"));
   }
   Serial.print(F(" target_distance_m="));
-  if (targetReady && gps.location.isValid()) {
+  if (targetReady && gpsReady) {
     Serial.print(dryrunDistanceMeters(gps.location.lat(), gps.location.lng(), DRYRUN_TARGET_LAT, DRYRUN_TARGET_LON), 1);
   } else {
     Serial.print(F("NA"));
   }
   Serial.print(F(" target_bearing_deg="));
-  if (targetReady && gps.location.isValid()) {
+  if (targetReady && gpsReady) {
     Serial.print(dryrunBearingDegrees(gps.location.lat(), gps.location.lng(), DRYRUN_TARGET_LAT, DRYRUN_TARGET_LON), 1);
   } else {
     Serial.print(F("NA"));
@@ -701,14 +958,39 @@ void debugPrintStatus() {
   Serial.print(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? F("true") : F("false"));
   Serial.print(F(" auto_motor_inhibit="));
   Serial.print(singleWaypointAutoMotorInhibitFlag ? F("true") : F("false"));
-  Serial.print(F(" gps_ready="));
+  Serial.print(F(" active_gps_ready="));
   Serial.print(singleWaypointGpsReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" dryrun_ready="));
+  Serial.print(singleWaypointDryrunReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" motion_ready="));
+  Serial.print(singleWaypointMotionReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" safety_ready_source="));
+  Serial.print(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? F("motion_when_armed") : F("dryrun_when_inhibited"));
+  Serial.print(F(" gps_coord_sane="));
+  Serial.print(singleWaypointGpsCoordSaneFlag ? F("true") : F("false"));
   Serial.print(F(" target_ready="));
   Serial.print(singleWaypointTargetReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" timeout_source=auto_entry"));
+  Serial.print(F(" auto_entry_ms="));
+  if (singleWaypointAutoTimingActiveFlag) {
+    Serial.print(singleWaypointAutoEntryMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" auto_elapsed_ms="));
+  if (singleWaypointAutoTimingActiveFlag) {
+    Serial.print(singleWaypointAutoElapsedMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" timeout_limit_ms="));
+  Serial.print(SINGLE_WAYPOINT_AUTO_TIMEOUT_MS);
   Serial.print(F(" timeout_ok="));
   Serial.print(singleWaypointTimeoutOkFlag ? F("true") : F("false"));
   Serial.print(F(" max_target_distance_m="));
   Serial.print(SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M, 1);
+  Serial.print(F(" max_coord_sanity_distance_m="));
+  Serial.print(SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M, 1);
   Serial.print(F(" arrival_radius_m="));
   Serial.print(SINGLE_WAYPOINT_ARRIVAL_RADIUS_M, 1);
   Serial.print(F(" distance_allowed="));
@@ -772,21 +1054,24 @@ void sendErr(uint32_t seq, const char *reason) {
 void sendGpsTelemetry() {
 #if ENABLE_GPS_TELEMETRY
   String payload;
-  payload.reserve(96);
+  payload.reserve(128);
+  bool ready = gpsReady();
   payload += "fix=";
-  payload += gps.location.isValid() ? "1" : "0";
+  payload += ready ? "1" : "0";
   payload += ",lat=";
-  if (gps.location.isValid()) {
+  if (ready) {
     payload += String(gps.location.lat(), 6);
   } else {
     payload += "NA";
   }
   payload += ",lon=";
-  if (gps.location.isValid()) {
+  if (ready) {
     payload += String(gps.location.lng(), 6);
   } else {
     payload += "NA";
   }
+  payload += ",block_reason=";
+  payload += gpsBlockReason();
   payload += ",sats=";
   if (gps.satellites.isValid()) {
     payload += String(gps.satellites.value());
@@ -1019,7 +1304,7 @@ void setup() {
 void loop() {
 #if ENABLE_GPS_TELEMETRY
   while (GPS_SERIAL.available() > 0) {
-    gps.encode(GPS_SERIAL.read());
+    processGpsChar(static_cast<char>(GPS_SERIAL.read()));
   }
 #endif
 

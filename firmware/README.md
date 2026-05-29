@@ -129,7 +129,8 @@ Compile with the nearby target override and motor output inhibited:
 Expected single-waypoint USB debug additions:
 
 ```text
-single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+gps_location_valid=... gps_location_fresh=... gps_solution_valid=... gps_dryrun_ready=... gps_motion_ready=... gps_age_ok=... gps_sats_ok=... gps_hdop_ok=... gps_ready=... gps_block_reason=... gps_dryrun_block_reason=... gps_motion_block_reason=... gps_dryrun_stale_ms=2000 gps_dryrun_min_sats=4 gps_dryrun_max_hdop=6.0 gps_motion_stale_ms=2000 gps_motion_min_sats=5 gps_motion_max_hdop=2.5 gps_lat=... gps_lon=... gps_cached_lat=... gps_cached_lon=... gps_cached_age_ms=... last_rmc_status=... last_gga_fix_quality=...
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true active_gps_ready=... dryrun_ready=... motion_ready=... safety_ready_source=... gps_coord_sane=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 max_coord_sanity_distance_m=1000.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
 ```
 
 Target override rule:
@@ -159,8 +160,10 @@ Target override rule:
   `35.571310,129.188630` while the previous target remained
   `35.567560,129.186792`, making `target_distance_m≈448.9`.
   `distance_allowed=false` and `safety_ready=false` were expected.
-- `gps_fix=true` alone is not enough; check `gps_age_ms`, `gps_hdop`, and
-  `gps_sats` before treating GPS as ready.
+- `gps_location_valid=true` alone is not enough; it can be a stale TinyGPS
+  cached location. Use motion-level `gps_ready=true` for armed motion, and use
+  `gps_dryrun_ready=true` / `active_gps_ready=true` only for inhibited
+  no-motion candidate diagnostics.
 - Latest nearby attempt: target override and GPS fix worked, but the actual fix
   was `gps_lat=35.571384`, `gps_lon=129.187514` and the target was
   `35.571310,129.188542`, leaving `target_distance_m=93.3`. Recompute the
@@ -197,15 +200,41 @@ Target override rule:
   `auto_elapsed_ms` exceeds `timeout_limit_ms`.
 - Latest post-timeout-fix attempt: timeout fields and target override were
   confirmed, but GPS had no valid fix. `gps_chars` increased, proving serial
-  input was alive, but USBDBG printed `gps_fix=false`, `gps_lat=NA`,
+  input was alive, but USBDBG printed `gps_location_valid=false`, `gps_lat=NA`,
   `gps_lon=NA`, `gps_sats=0`, `gps_hdop=99.99`, and `gps_age_ms=NA`.
   Reacquire stable outdoor GPS fix before AUTO candidate validation.
+- Latest GPS-only `Serial2` probe: `firmware/gps_uart_probe` was compiled with
+  `GPS_PROBE_MODE=2` and `GPS_PROBE_BAUD=9600`. It received continuous NMEA
+  characters, confirming UART/baud are alive, but GPS fix was intermittent.
+  Most lines showed RMC `V`, GGA fix quality `0`, `sats=0`, and `hdop=99.99`.
+  Short bursts reached RMC `A`, valid lat/lon, `sats=4..5`, and
+  `hdop≈1.77..2.48`, then returned to no-fix. Do not proceed to AUTO dry-run,
+  bench test, or floor driving until stable fix is observed.
+- GPS readiness update: readiness is tiered. `gps_solution_valid` checks
+  valid/fresh location plus NMEA fix status when available. `gps_dryrun_ready`
+  allows no-motion candidate calculation with `GPS_DRYRUN_MIN_SATS=4` and
+  `GPS_DRYRUN_MAX_HDOP=6.0`. `gps_motion_ready` is stricter with
+  `GPS_MOTION_MIN_SATS=5` and `GPS_MOTION_MAX_HDOP=2.5`; `gps_ready` remains
+  motion-level. Stale cached TinyGPS coordinates are printed only as
+  `gps_cached_lat`, `gps_cached_lon`, and `gps_cached_age_ms`; they must not be
+  used for waypoint decisions. NMEA status diagnostics include
+  `last_rmc_status` for `GPRMC` / `GNRMC` and `last_gga_fix_quality` for
+  `GPGGA` / `GNGGA`.
+- With `AUTO_MOTION_ARMED=0`, single-waypoint distance/bearing and candidate
+  commands may be computed from `gps_dryrun_ready`, but final motor outputs
+  stay zero. With `AUTO_MOTION_ARMED=1`, `gps_motion_ready` is required.
 
 Safety gates:
 
-- GPS location valid.
-- GPS age no more than `SINGLE_WAYPOINT_GPS_STALE_MS` (`2000` ms).
-- HDOP valid and no more than `SINGLE_WAYPOINT_MAX_HDOP` (`2.5`).
+- GPS solution valid.
+- For no-motion dry-run: age no more than `GPS_DRYRUN_STALE_MS` (`2000` ms),
+  satellites at least `GPS_DRYRUN_MIN_SATS` (`4`), and HDOP no more than
+  `GPS_DRYRUN_MAX_HDOP` (`6.0`).
+- For any future armed motion: age no more than `GPS_MOTION_STALE_MS`
+  (`2000` ms), satellites at least `GPS_MOTION_MIN_SATS` (`5`), and HDOP no
+  more than `GPS_MOTION_MAX_HDOP` (`2.5`).
+- GPS coordinate sanity within `SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M`
+  (`1000.0` m) of the compile-time target.
 - Target available.
 - RC input valid.
 - RC AUTO switch on.
@@ -288,6 +317,34 @@ firmware/gps_uart_probe/gps_uart_probe.ino
 
 It does not attach motor outputs. Full procedure and per-variant compile/upload
 commands are in [`docs/gps_bringup.md`](../docs/gps_bringup.md).
+
+The probe now reports GPS stability, not only UART bytes. Each one-second line
+includes `last_rmc_status`, `last_gga_fix_quality`, `sats`, `hdop`, `lat`,
+`lon`, `age_ms`, `chars_1s`, `total_chars`,
+`valid_fix_seconds_consecutive`, `no_fix_seconds_consecutive`,
+`valid_fix_seconds_total`, `no_fix_seconds_total`, and `gps_probe_state`.
+
+Stable-fix criteria for this probe:
+
+- RMC status `A` or GGA fix quality `>=1`
+- TinyGPS++ latitude/longitude valid
+- location age `<=2000 ms`
+- satellites `>=4`
+- HDOP `<=5.0`
+- the valid current fix lasts for at least `30` consecutive seconds
+
+Probe states:
+
+- `NO_FIX`: no current valid fix, even if NMEA bytes are arriving.
+- `INTERMITTENT_FIX`: a current valid fix exists, but for less than `30`
+  consecutive seconds.
+- `STABLE_FIX`: the current valid fix has lasted at least `30` consecutive
+  seconds.
+
+If the probe prints `warning="TinyGPS cached fix is not stable current fix"`,
+RMC has returned to `V` while TinyGPS++ still has cached coordinates. Treat
+those coordinates as debug-only and do not use them for target distance or
+autonomy decisions.
 
 ## I2C Scanner Test
 

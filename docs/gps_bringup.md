@@ -26,6 +26,8 @@ Final status:
 - GPS module baudrate is confirmed as `9600`.
 - Valid NMEA is received.
 - GPS fix eventually became valid.
+- Latest GPS-only `Serial2/9600` probe still receives continuous NMEA, but GPS
+  fix is intermittent rather than stable.
 - Integrated GPS `Serial2` diagnostic sky-fix validation succeeded after moving
   the external GPS antenna farther outside into open sky.
 - Previous `gps_sats=0` and `gps_hdop=99.99` was poor satellite acquisition
@@ -97,6 +99,45 @@ Interpretation:
 - The next problem is the current HC-12 wiring audit and integrated firmware
   diagnostics.
 
+### Latest Serial2 Probe: UART OK, Fix Intermittent
+
+Latest GPS-only probe setup:
+
+```text
+GPS_PROBE_MODE=2
+GPS_PROBE_BAUD=9600
+```
+
+Observed:
+
+- `Serial2` at `9600` printed continuous NMEA characters.
+- This confirms GPS UART receive and baudrate on the current central connector
+  are still likely correct.
+- Most lines showed no usable fix:
+  - RMC status `V`
+  - GGA fix quality `0`
+  - `sats=0`
+  - `hdop=99.99`
+  - `fix=false`, or stale cached TinyGPS++ fix state
+  - `lat` / `lon` as `NA`, or stale cached coordinates
+- A few short bursts showed valid data:
+  - RMC status `A`
+  - valid latitude/longitude
+  - `sats=4..5`
+  - `hdop≈1.77..2.48`
+- The valid state lasted only briefly, then returned to RMC `V`, GGA quality
+  `0`, `sats=0`, and `hdop=99.99`.
+
+Interpretation:
+
+- GPS UART is alive.
+- GPS satellite acquisition is intermittent.
+- This is not a target override, RC, or timeout issue.
+- TinyGPS++ can keep cached coordinates after RMC returns to `V`; do not use
+  cached lat/lon as a stable current rover position.
+- Do not proceed to AUTO dry-run, bench test, or floor driving until stable
+  GPS fix is confirmed.
+
 ## Architecture Decision: Fixed Wiring Plan
 
 The integrated rover firmware currently defines:
@@ -158,9 +199,36 @@ Every report line prints:
 - pin assumption
 - `chars_1s`
 - `total_chars`
-- escaped `raw_preview`
 - TinyGPS++ `charsProcessed`
-- parsed `fix`, latitude/longitude age, satellites, and HDOP when available
+- `last_rmc_status`
+- `last_gga_fix_quality`
+- `sats`
+- `hdop`
+- operational `lat` / `lon` only when the current fix is valid
+- `age_ms`
+- `current_valid_fix`
+- `gps_probe_state`
+- `valid_fix_seconds_consecutive`
+- `no_fix_seconds_consecutive`
+- `valid_fix_seconds_total`
+- `no_fix_seconds_total`
+- truncated `rmc_preview` and `gga_preview`
+
+Stability states:
+
+| State | Meaning |
+|---|---|
+| `NO_FIX` | No current valid fix. NMEA may still be arriving. |
+| `INTERMITTENT_FIX` | Current valid fix is present, but consecutive valid time is less than `30` seconds. |
+| `STABLE_FIX` | Current valid fix has lasted at least `30` consecutive seconds. |
+
+Current valid fix criteria:
+
+- RMC status `A` or GGA fix quality `>=1`
+- TinyGPS++ latitude/longitude valid
+- location age `<=2000 ms`
+- satellites `>=4`
+- HDOP `<=5.0`
 
 ## Probe Matrix
 
@@ -212,11 +280,17 @@ Check these before changing firmware assumptions:
 - `chars_1s=0`: wiring, selected port, selected baudrate, module power, or GPS
   output configuration problem. Do not wait indoors for a GPS fix; no data is
   arriving.
-- `chars_1s>0` and `fix=false`: GPS bytes are arriving. Keep the same UART and
-  baudrate, move outdoors or improve antenna placement, and wait for satellite
-  acquisition.
-- `chars_1s>0` with a readable NMEA `raw_preview`: parser issues are unlikely;
-  focus on fix quality and sky view.
+- `chars_1s>0` and `gps_probe_state=NO_FIX`: GPS bytes are arriving. Keep the
+  same UART and baudrate, move outdoors or improve antenna placement, and wait
+  for satellite acquisition.
+- RMC status `V`, GGA fix quality `0`, `sats=0`, and `hdop=99.99` means no
+  usable satellite fix even if bytes are arriving.
+- A short RMC `A` burst is not enough for autonomy validation. Require stable
+  fix quality over repeated lines before interpreting target distance.
+- TinyGPS++ cached `fix`, latitude, or longitude after RMC returns to `V` must
+  not be treated as a current usable GPS solution.
+- `chars_1s>0` with readable `rmc_preview` / `gga_preview`: parser issues are
+  unlikely; focus on fix quality and sky view.
 - `tinygps_chars=0` while `chars_1s>0`: raw bytes are arriving but may not be
   NMEA text, may be wrong baud gibberish, or may be a binary-only GPS output.
 
@@ -316,11 +390,19 @@ arduino-cli monitor -p /dev/cu.usbmodem12101 --config baudrate=115200 | tee outp
 Outdoor pass criteria:
 
 - `chars_1s > 0`
-- `raw_preview` continues to show readable `$GP...` NMEA
-- `fix=true`
+- `rmc_preview` / `gga_preview` continue to show readable `$GP...` or `$GN...`
+  NMEA
+- `gps_probe_state=STABLE_FIX`
+- `valid_fix_seconds_consecutive >= 30`
+- `current_valid_fix=true`
+- RMC status `A` or GGA fix quality `>=1`
 - `lat` and `lon` are numeric
-- Prefer `sats >= 4`
-- Prefer stable HDOP below roughly `5.0`; lower is better
+- `sats >= 4`
+- HDOP `<=5.0`; lower is better
+
+Do not treat `INTERMITTENT_FIX` as an autonomy-ready state. It is useful
+evidence that the receiver can acquire satellites briefly, but the next
+autonomy step remains blocked until `STABLE_FIX` is observed.
 
 Observed passing values:
 
