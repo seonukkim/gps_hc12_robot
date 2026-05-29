@@ -29,6 +29,31 @@ Reference:
 - `docs/manual_control.md`
 - `docs/field_test_log.md`
 
+## RC Mode Switch Channel Is Not Reconfirmed
+
+Status:
+
+- Current rover USBDBG logs show `mode_us` around `1502` to `1503`,
+  `mode=MANUAL`, and `auto_sw=false`.
+- Previous logs showed `AUTO_READY` when `mode_us` was around `2000`.
+- The intended physical AUTO switch must be mapped from raw PPM channels before
+  changing `MODE_CHANNEL_INDEX`.
+
+Diagnostic:
+
+- Use `firmware/rc_channel_probe`.
+- Move one stick or switch at a time.
+- Record `ch1_us` through `ch8_us`, each channel min/max, and
+  `changed_channels`.
+- The AUTO candidate is the channel that reaches around `2000 us`.
+
+Do not repeat:
+
+- Do not assume the physical switch label matches the PPM channel number.
+- Do not change controller channel mapping based only on panel labels.
+- Do not approve AUTO, bench, or floor testing until the raw channel probe
+  identifies the intended mode switch.
+
 ## Rover Drifts Left/Right During Long Manual Movement
 
 Status:
@@ -327,6 +352,15 @@ Status:
   - `gps_age_ms` was initially fresh but later grew stale
   - `target_distance_m=93.3`, above `max_target_distance_m=30.0`
   - `distance_allowed=false` and `safety_ready=false`
+- A window/outside-antenna attempt showed another blocked case:
+  - target override was valid for `target_lat=35.571384`,
+    `target_lon=129.187426`
+  - GPS fix appeared around `gps_lat≈35.571284`, `gps_lon≈129.188456`
+  - `gps_sats` often became `0`
+  - `gps_hdop` often became `99.99`
+  - `gps_age_ms` grew very large
+  - `target_distance_m≈93.9`, above `max_target_distance_m=30.0`
+  - `distance_allowed=false`, `gps_ready=false`, and `safety_ready=false`
 
 Interpretation:
 
@@ -340,6 +374,9 @@ Interpretation:
   nearby target from the current GPS position before each nearby candidate run.
 - The target must be recalculated from the actual runtime GPS fix, not from an
   assumed antenna location.
+- A window-thrown or window/outside antenna position is not equivalent to the
+  rover body position. It can validate that GPS reception is possible, but it
+  cannot validate rover localization.
 - Compile-time nearby targets are only valid for the GPS location used when
   calculating them. If the antenna is moved on another day, the target must be
   recalculated.
@@ -349,6 +386,9 @@ Interpretation:
   must also satisfy readiness gates before interpreting a run as GPS-ready.
 - `target_distance_m` must also be checked even when `gps_fix=true` and target
   override are both valid.
+- `safety_ready` is the combined gate to inspect before any later motion work.
+- `timeout_ok` can expire while waiting too long after upload/reset or AUTO
+  entry; candidate validation should be done promptly after the run is ready.
 - Runtime `target_lat` and `target_lon` are the source of truth.
 
 Do not repeat:
@@ -361,8 +401,12 @@ Do not repeat:
   on a later day without recalculating it from the current GPS position.
 - Do not compute the target from an assumed antenna location; use the actual
   runtime GPS fix printed by USBDBG.
+- Do not treat a window/outside antenna toss as equivalent to moving the rover
+  outdoors with the GPS fixed to the rover body.
 - Do not treat `gps_fix=true` as sufficient when `gps_age_ms` is stale,
   `gps_hdop` is high, or satellites are unstable.
+- Do not ignore `timeout_ok`; if it expires, rerun the validation promptly from
+  a fresh upload/reset/AUTO entry state.
 - Do not approve bench testing or floor driving from a run where the target
   override did not take effect or where `distance_allowed=false`.
 

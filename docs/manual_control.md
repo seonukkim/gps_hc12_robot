@@ -60,6 +60,44 @@ Current channel mapping:
 | CH5 | `MODE_CHANNEL_INDEX = 4` | Manual/Auto mode |
 | CH7 | unused | reserved |
 
+## RC Channel Probe
+
+Use the safe channel probe when the physical RC mode switch is unclear or when
+`mode_us` stays near `1500` instead of reaching the AUTO range:
+
+```text
+firmware/rc_channel_probe/rc_channel_probe.ino
+```
+
+The probe uses the same PPM input pin and frame decoder style as
+`openrb_robot_controller`:
+
+- PPM input: OpenRB `D6`
+- channels: `ch1_us` through `ch8_us`
+- frame sync: pulse width greater than `3000 us`
+- interrupt edge: `RISING`
+
+It does not attach Servo or motor outputs. It prints current values, min/max
+observed values, and `changed_channels` every `0.5` seconds.
+
+Compile/upload/monitor on this macOS setup:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-rc-channel-probe firmware/rc_channel_probe
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-rc-channel-probe firmware/rc_channel_probe
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Probe procedure:
+
+1. Keep motors disconnected or wheels off ground.
+2. Move each stick and each switch one at a time.
+3. Record which `chN_us` changes and the min/max range for that channel.
+4. Treat the channel that reaches around `2000 us` as the AUTO switch
+   candidate.
+5. Do not change the controller mode-channel mapping until the raw PPM probe
+   confirms the intended switch.
+
 Current calibration and direction constants:
 
 ```cpp

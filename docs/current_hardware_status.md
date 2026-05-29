@@ -307,15 +307,29 @@ Current status:
   `distance_allowed=false`, `safety_ready=false`, candidate commands stayed
   zero, and final outputs stayed zero. `gps_age_ms` was initially fresh but
   later grew stale.
+- Latest window/outside-antenna attempt remained safely blocked. Target
+  override was verified with `SINGLE_WP_TARGET_LAT=35.5713840` and
+  `SINGLE_WP_TARGET_LON=129.1874256`; runtime printed
+  `target_lat=35.571384`, `target_lon=129.187426`. GPS fix appeared around
+  `gps_lat≈35.571284`, `gps_lon≈129.188456`, but reception was unstable:
+  `gps_sats` often became `0`, `gps_hdop` often became `99.99`, and
+  `gps_age_ms` grew very large. `target_distance_m≈93.9` exceeded
+  `max_target_distance_m=30.0`, so `distance_allowed=false`,
+  `gps_ready=false`, `safety_ready=false`, candidate commands stayed zero, and
+  final outputs stayed zero.
+- Window/outside-thrown antenna placement is not equivalent to rover body
+  localization.
 - Target override success must be interpreted separately from
   `distance_allowed` / `safety_ready`.
 - Next required validation before motion:
-  - recompute a nearby target from the actual runtime GPS fix position
-    `gps_lat=35.571384`, `gps_lon=129.187514`
+  - go fully outdoors with the rover and GPS fixed together
+  - acquire a fresh GPS fix in MANUAL
+  - recompute a nearby target from that actual runtime GPS fix
   - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
   - confirm GPS freshness/quality using `gps_age_ms`, `gps_hdop`, and
     `gps_sats`; do not rely on `gps_fix=true` alone
-  - GPS mounted/open-sky candidate retest
+  - run candidate validation promptly after upload/reset or AUTO entry because
+    `timeout_ok` can expire while waiting
   - wheel-off-ground bench test only after safety gates and sensor assumptions
     are clear
   - IMU is optional for the current GPS+RC single-waypoint preparation stage;

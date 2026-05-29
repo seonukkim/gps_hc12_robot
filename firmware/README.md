@@ -165,6 +165,11 @@ Target override rule:
   was `gps_lat=35.571384`, `gps_lon=129.187514` and the target was
   `35.571310,129.188542`, leaving `target_distance_m=93.3`. Recompute the
   target from the actual USBDBG GPS fix before the next inhibited run.
+- Window/outside-antenna retest: target override still worked, but GPS quality
+  was unstable and the antenna position was not rover body position. The run had
+  `target_distance_m≈93.9`, `gps_ready=false`, `distance_allowed=false`, and
+  `safety_ready=false`. Do the next inhibited run fully outdoors with rover and
+  GPS fixed together, and run promptly because `timeout_ok` can expire.
 
 Safety gates:
 
@@ -192,6 +197,56 @@ On Linux/WSL station hosts, the upload port may instead look like
 
 Full manual-control bring-up notes are in
 [`docs/manual_control.md`](../docs/manual_control.md).
+
+## RC Channel Probe
+
+Use this standalone sketch to identify which receiver PPM channel changes when
+each physical RC stick or switch is moved:
+
+```text
+firmware/rc_channel_probe/rc_channel_probe.ino
+```
+
+It uses the same PPM input pin and decoding style as
+`openrb_robot_controller`:
+
+- PPM input: OpenRB `D6`
+- channels printed: `ch1_us` through `ch8_us`
+- frame sync: pulse width greater than `3000 us`
+- interrupt edge: `RISING`
+
+The probe does not attach Servo or motor outputs. It prints every `0.5` seconds:
+
+- current channel pulse widths
+- min/max observed for each channel since boot
+- `changed_channels` when any channel changes by more than `100 us`
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-rc-channel-probe firmware/rc_channel_probe
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-rc-channel-probe firmware/rc_channel_probe
+```
+
+Monitor:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Probe procedure:
+
+1. Keep motors disconnected or wheels off ground.
+2. Move one stick or one switch at a time.
+3. Record which `chN_us` value changes and the observed min/max range.
+4. The AUTO candidate is the channel that reaches around `2000 us`.
+5. Do not change `MODE_CHANNEL_INDEX` in `openrb_robot_controller` until this
+   raw channel probe identifies the intended physical switch.
 
 ## GPS UART Probe
 

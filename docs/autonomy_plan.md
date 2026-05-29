@@ -14,7 +14,10 @@ blocked because the antenna was placed at a new location, making the previous
 compile-time target stale and about `448.9` m away; GPS freshness/quality also
 did not satisfy readiness. A later nearby attempt acquired GPS fix, but the
 target was still `93.3` m from the actual runtime fix, so the distance gate
-blocked it. Bench testing and floor waypoint driving are not approved yet.
+blocked it. The latest window/outside-antenna attempt also remained safely
+blocked because GPS quality was unstable and the antenna position was not the
+rover body position. Bench testing and floor waypoint driving are not approved
+yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -30,14 +33,15 @@ Staged plan:
 3. Target override diagnostics complete: USBDBG now confirms
    `target_override_enabled=true`, `target_source=compile_time`, and runtime
    `target_lat` / `target_lon` matching the compile-time macros.
-4. Nearby target recomputation: compute a new target from the current GPS
-   position and rerun with `AUTO_MOTION_ARMED=0`. Do not proceed until
-   `target_distance_m <= max_target_distance_m` and GPS freshness/quality gates
-   pass.
-5. Sensor-frame validation: retest GPS with the antenna mounted on the rover
-   body in open sky. IMU diagnostics remain useful, but IMU is optional for the
-   current GPS+RC single-waypoint preparation stage and must not block
-   candidate dry-run work.
+4. Full outdoor fixed-frame dry-run: take the rover and GPS outside together,
+   acquire a fresh fix in MANUAL, recompute the target from that actual fix, and
+   rerun with `AUTO_MOTION_ARMED=0`. Do not proceed until
+   `target_distance_m <= max_target_distance_m`, GPS freshness/quality gates
+   pass, and `timeout_ok` has not expired.
+5. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
+   sky. IMU diagnostics remain useful, but IMU is optional for the current
+   GPS+RC single-waypoint preparation stage and must not block candidate dry-run
+   work.
 6. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
@@ -71,15 +75,15 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 
 ## Next Required Validation Before Motion
 
-- Recompute a nearby target from the actual runtime GPS fix position
-  `gps_lat=35.571384`, `gps_lon=129.187514`, then rerun the single-waypoint
-  experiment with `AUTO_MOTION_ARMED=0`.
+- Go fully outdoors with the rover and GPS fixed together, acquire a fresh GPS
+  fix in MANUAL, recompute a nearby target from that actual fix, then rerun the
+  single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
 - Confirm the target override fields still match the intended target, then
   interpret `target_distance_m`, `distance_allowed`, and `safety_ready`.
 - Confirm GPS readiness using `gps_age_ms`, `gps_hdop`, and `gps_sats`; do not
   rely on `gps_fix=true` alone.
-- Re-test candidate GPS fields with the GPS antenna mounted on the rover and
-  placed in open sky.
+- Run candidate validation promptly after upload/reset or AUTO entry; `timeout_ok`
+  can expire while waiting too long.
 - Run wheel-off-ground bench testing only after safety gates and sensor-frame
   assumptions are clear.
 - Keep `AUTO_MOTION_ARMED=0` for floor or indoor tests.
@@ -283,6 +287,12 @@ Target override rule:
   GPS fix was acquired at `gps_lat=35.571384`, `gps_lon=129.187514`. The target
   was still `93.3` m away from the actual fix, so `distance_allowed=false` with
   `max_target_distance_m=30.0`.
+- The latest window/outside-antenna test compiled with
+  `SINGLE_WP_TARGET_LAT=35.5713840` and `SINGLE_WP_TARGET_LON=129.1874256`;
+  USBDBG confirmed the override, but the antenna position was around
+  `35.571284,129.188456`, the target was still about `93.9` m away, and GPS
+  quality was unstable (`gps_sats` often `0`, `gps_hdop` often `99.99`,
+  stale `gps_age_ms`).
 
 Safety constants:
 
@@ -435,6 +445,32 @@ Latest nearby attempt:
   Recompute the target from the actual GPS fix position
   `35.571384,129.187514` and rerun with `AUTO_MOTION_ARMED=0`.
 
+Latest window/outside-antenna attempt:
+
+- The user tested by placing or throwing the GPS antenna outside from indoors.
+- Build/upload succeeded with
+  `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`,
+  `AUTO_MOTION_ARMED=0`, `SINGLE_WP_TARGET_LAT=35.5713840`, and
+  `SINGLE_WP_TARGET_LON=129.1874256`.
+- USBDBG correctly printed `target_override_enabled=true`,
+  `target_source=compile_time`, `target_lat_macro=35.5713840`,
+  `target_lon_macro=129.1874256`, `target_lat=35.571384`, and
+  `target_lon=129.187426`.
+- GPS fix was eventually seen, but not stable enough for candidate validation:
+  `gps_fix=true` appeared, `gps_lat≈35.571284`, `gps_lon≈129.188456`,
+  `gps_sats` often became `0`, `gps_hdop` often became `99.99`, and
+  `gps_age_ms` grew very large.
+- The target was not nearby relative to the actual GPS position:
+  `target_distance_m≈93.9`, greater than `max_target_distance_m=30.0`.
+- `distance_allowed=false`, `gps_ready=false`, `safety_ready=false`,
+  `candidate_left_cmd=0.000`, and `candidate_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0` and `auto_motor_inhibit=true` kept
+  `final_left_cmd=0.000` and `final_right_cmd=0.000`.
+- This is a safe blocked result, not candidate-command success. Go fully
+  outdoors with the rover and GPS fixed together, acquire a fresh MANUAL fix,
+  recompute the target from that actual fix, and rerun with
+  `AUTO_MOTION_ARMED=0`.
+
 ## Safety Rules
 
 - No real autonomous motion in this mode.
@@ -448,11 +484,11 @@ Latest nearby attempt:
 
 Next milestone:
 
-- Recompute a nearby target from the actual runtime GPS fix position
-  `35.571384,129.187514` and rerun `AUTO_MOTION_ARMED=0` after GPS
-  freshness/quality stabilizes, then prepare GPS antenna/body-frame validation
-  for the GPS+RC single-waypoint workflow. Continue IMU electrical diagnostics
-  separately, but do not block GPS+RC candidate dry-run on IMU availability.
+- Go fully outdoors with the rover and GPS fixed together, acquire a fresh
+  MANUAL fix, recompute a nearby target from that actual fix, and rerun
+  `AUTO_MOTION_ARMED=0` promptly after upload/reset or AUTO entry. Continue IMU
+  electrical diagnostics separately, but do not block GPS+RC candidate dry-run
+  on IMU availability.
 - Keep the waypoint target small and explicit when motion work resumes.
 - Require GPS readiness, known GPS body-frame placement, heading/attitude plan,
   RC override, STOP/failsafe checks, and wheel-off-ground validation before any

@@ -121,9 +121,26 @@ HC-12, or motor behavior from the wrong mode.
 | Fixed-wiring GPS Serial2 diagnostic | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_DIAG=1` | OpenRB-150 | Integrated GPS-on-`Serial2` USB debug | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | forced neutral; manual driving does not work by design |
 | Fixed-wiring RC + GPS autonomy dry-run | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | OpenRB-150 | RC manual plus GPS readiness/distance/bearing dry-run | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO forces neutral and computes readiness only |
 | Single-waypoint experiment | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | OpenRB-150 | Guarded one-target candidate-command experiment | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO computes candidate commands; `AUTO_MOTION_ARMED=0` forces neutral |
+| RC channel probe | `firmware/rc_channel_probe` | OpenRB-150 | Identify which raw PPM channel changes for each RC stick/switch | not used | not used | no motor outputs |
 | Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
 | Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
 | Pin finder test | `firmware/pin_finder_test` | OpenRB-150 | Historical physical pin finder | not a GPS test | not used | no motor outputs |
+
+### RC Channel Probe
+
+Use this before changing RC mode-channel mapping. It uses OpenRB `D6` and the
+same PPM frame decoding style as the rover controller, but it does not attach
+Servo or motor outputs.
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-rc-channel-probe firmware/rc_channel_probe
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-rc-channel-probe firmware/rc_channel_probe
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Move each stick and switch one at a time, then record `changed_channels` and
+the `chN_min` / `chN_max` range. The AUTO candidate is the channel that reaches
+around `2000 us`; do not rely on physical panel labels alone.
 
 ### Default Rover Controller
 
@@ -310,6 +327,14 @@ computed from a stale or assumed position. The actual runtime fix was
 `gps_lat=35.571384`, `gps_lon=129.187514`, while the target was
 `35.571310,129.188542`, producing `target_distance_m=93.3`. Recompute the next
 target from the actual USBDBG GPS fix before rerunning `AUTO_MOTION_ARMED=0`.
+
+Window/outside-antenna retest: target override still worked, but tossing or
+placing only the antenna outside is not equivalent to rover localization. GPS
+fix appeared around `35.571284,129.188456`, but `gps_sats`, `gps_hdop`, and
+`gps_age_ms` were unstable and `target_distance_m≈93.9`, so
+`gps_ready=false`, `distance_allowed=false`, and `safety_ready=false` were
+expected. Go fully outdoors with rover and GPS fixed together before the next
+candidate dry-run.
 
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.

@@ -18,6 +18,9 @@
 #define AUTO_MOTION_ARMED 0
 #endif
 
+#define STRINGIFY_VALUE_IMPL(value) #value
+#define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
+
 #define ENABLE_GPS_TELEMETRY 1
 #if FIXED_WIRING_GPS_SERIAL2_DIAG || FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
     FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
@@ -42,8 +45,29 @@ constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
 constexpr uint32_t DRYRUN_GPS_READY_MAX_AGE_MS = 3000;
 constexpr bool SINGLE_WAYPOINT_TARGET_AVAILABLE = true;
-constexpr double SINGLE_WAYPOINT_TARGET_LAT = 35.571120;
-constexpr double SINGLE_WAYPOINT_TARGET_LON = 129.186050;
+constexpr double SINGLE_WAYPOINT_FALLBACK_TARGET_LAT = 35.571120;
+constexpr double SINGLE_WAYPOINT_FALLBACK_TARGET_LON = 129.186050;
+#if defined(SINGLE_WP_TARGET_LAT) && defined(SINGLE_WP_TARGET_LON)
+constexpr bool SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED = true;
+constexpr double SINGLE_WAYPOINT_TARGET_LAT = SINGLE_WP_TARGET_LAT;
+constexpr double SINGLE_WAYPOINT_TARGET_LON = SINGLE_WP_TARGET_LON;
+constexpr const char *SINGLE_WAYPOINT_TARGET_SOURCE = "compile_time";
+#else
+constexpr bool SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED = false;
+constexpr double SINGLE_WAYPOINT_TARGET_LAT = SINGLE_WAYPOINT_FALLBACK_TARGET_LAT;
+constexpr double SINGLE_WAYPOINT_TARGET_LON = SINGLE_WAYPOINT_FALLBACK_TARGET_LON;
+constexpr const char *SINGLE_WAYPOINT_TARGET_SOURCE = "fallback";
+#endif
+#if defined(SINGLE_WP_TARGET_LAT)
+constexpr const char *SINGLE_WAYPOINT_TARGET_LAT_MACRO = STRINGIFY_VALUE(SINGLE_WP_TARGET_LAT);
+#else
+constexpr const char *SINGLE_WAYPOINT_TARGET_LAT_MACRO = "NA";
+#endif
+#if defined(SINGLE_WP_TARGET_LON)
+constexpr const char *SINGLE_WAYPOINT_TARGET_LON_MACRO = STRINGIFY_VALUE(SINGLE_WP_TARGET_LON);
+#else
+constexpr const char *SINGLE_WAYPOINT_TARGET_LON_MACRO = "NA";
+#endif
 constexpr bool SINGLE_WAYPOINT_AUTO_MOTION_ARMED = AUTO_MOTION_ARMED != 0;
 constexpr float SINGLE_WAYPOINT_MAX_AUTO_THROTTLE = 0.10f;
 constexpr double SINGLE_WAYPOINT_ARRIVAL_RADIUS_M = 2.5;
@@ -665,6 +689,14 @@ void debugPrintStatus() {
 #endif
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
   Serial.print(F(" single_waypoint_experiment=true"));
+  Serial.print(F(" target_override_enabled="));
+  Serial.print(SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" target_source="));
+  Serial.print(SINGLE_WAYPOINT_TARGET_SOURCE);
+  Serial.print(F(" target_lat_macro="));
+  Serial.print(SINGLE_WAYPOINT_TARGET_LAT_MACRO);
+  Serial.print(F(" target_lon_macro="));
+  Serial.print(SINGLE_WAYPOINT_TARGET_LON_MACRO);
   Serial.print(F(" auto_motion_armed="));
   Serial.print(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? F("true") : F("false"));
   Serial.print(F(" auto_motor_inhibit="));
@@ -675,6 +707,10 @@ void debugPrintStatus() {
   Serial.print(singleWaypointTargetReadyFlag ? F("true") : F("false"));
   Serial.print(F(" timeout_ok="));
   Serial.print(singleWaypointTimeoutOkFlag ? F("true") : F("false"));
+  Serial.print(F(" max_target_distance_m="));
+  Serial.print(SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M, 1);
+  Serial.print(F(" arrival_radius_m="));
+  Serial.print(SINGLE_WAYPOINT_ARRIVAL_RADIUS_M, 1);
   Serial.print(F(" distance_allowed="));
   Serial.print(singleWaypointDistanceAllowedFlag ? F("true") : F("false"));
   Serial.print(F(" safety_ready="));
@@ -957,6 +993,18 @@ void setup() {
   Serial.println("RC MANUAL mode can drive normally; AUTO mode uses one placeholder waypoint only.");
   Serial.print("AUTO_MOTION_ARMED=");
   Serial.println(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? "1" : "0");
+  Serial.print("target_override_enabled=");
+  Serial.println(SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED ? "true" : "false");
+  Serial.print("target_source=");
+  Serial.println(SINGLE_WAYPOINT_TARGET_SOURCE);
+  Serial.print("target_lat_macro=");
+  Serial.println(SINGLE_WAYPOINT_TARGET_LAT_MACRO);
+  Serial.print("target_lon_macro=");
+  Serial.println(SINGLE_WAYPOINT_TARGET_LON_MACRO);
+  Serial.print("target_lat=");
+  Serial.println(SINGLE_WAYPOINT_TARGET_LAT, 7);
+  Serial.print("target_lon=");
+  Serial.println(SINGLE_WAYPOINT_TARGET_LON, 7);
   Serial.println("AUTO_MOTION_ARMED=0 computes candidate commands only and forces motor outputs neutral.");
   Serial.println("No multi-waypoint, mission.json, or coverage/lawnmower driving is implemented.");
 #else

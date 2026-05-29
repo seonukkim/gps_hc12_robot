@@ -967,6 +967,65 @@ Interpretation:
 - Bench test remains blocked.
 - Floor driving remains blocked.
 
+## 2026-05-29: Window/Outside-Antenna GPS Attempt Blocked
+
+Setup:
+
+- The GPS antenna was placed or thrown outside from indoors.
+- Build/upload used:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=0`
+  - `SINGLE_WP_TARGET_LAT=35.5713840`
+  - `SINGLE_WP_TARGET_LON=129.1874256`
+
+Observed USBDBG target fields:
+
+- `target_override_enabled=true`
+- `target_source=compile_time`
+- `target_lat_macro=35.5713840`
+- `target_lon_macro=129.1874256`
+- `target_lat=35.571384`
+- `target_lon=129.187426`
+
+Observed GPS and safety fields:
+
+- Target override is working.
+- GPS fix was eventually seen, but it was not stable enough for candidate
+  validation:
+  - `gps_fix=true` appeared
+  - `gps_lat` around `35.571284`
+  - `gps_lon` around `129.188456`
+  - `gps_sats` often became `0`
+  - `gps_hdop` often became `99.99`
+  - `gps_age_ms` grew very large
+- The target was not nearby relative to the actual GPS position:
+  - `target_distance_m` around `93.9`
+  - `max_target_distance_m=30.0`
+- `distance_allowed=false`.
+- `gps_ready=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- `final_left_cmd=0.000`.
+- `final_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0`.
+- `auto_motor_inhibit=true`.
+
+Interpretation:
+
+- This is a safe blocked result, not a candidate-command success.
+- GPS reception is possible, but indoor/window-side antenna placement is not
+  stable enough for candidate validation.
+- The GPS antenna position is not equivalent to the rover body position when
+  the rover remains indoors.
+- `gps_fix=true` alone is not enough; `gps_age_ms`, `gps_sats`, `gps_hdop`,
+  `target_distance_m`, and `safety_ready` must also be checked.
+- The next step is to go fully outdoors with the rover and GPS fixed together,
+  acquire a fresh GPS fix in MANUAL, recompute the target from that actual fix,
+  and rerun with `AUTO_MOTION_ARMED=0`.
+- Bench test remains blocked.
+- Floor driving remains blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:
