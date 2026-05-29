@@ -83,9 +83,10 @@ body frame must be fixed, measured, and modeled.
 
 ## Next Required Validation Before Motion
 
-- Fix and verify single-waypoint target override diagnostics. Runtime USBDBG
-  `target_lat` / `target_lon` must match the intended nearby target before
-  interpreting `distance_allowed` or `safety_ready`.
+- Recompute the single-waypoint target from the current GPS position and rerun
+  with `AUTO_MOTION_ARMED=0`.
+- Confirm `gps_age_ms`, `gps_hdop`, and `gps_sats`, not only `gps_fix=true`,
+  before interpreting GPS readiness.
 - Re-test GPS candidate fields with the antenna mounted on the rover and placed
   in open sky.
 - Run only wheel-off-ground bench testing after safety gates and sensor-frame
@@ -297,6 +298,12 @@ runtime `target_lat=35.571021`, `target_lon=129.186402`. It was still blocked
 because the current GPS position was about `380` to `392` m away, exceeding
 `max_target_distance_m=30.0`. Recompute the target from the current GPS position
 before the next `AUTO_MOTION_ARMED=0` run.
+
+Next-day retest: target override still worked, but the GPS antenna was placed
+at a new location (`gps_lat≈35.571310`, `gps_lon≈129.188630`) while firmware
+still used the previous target (`35.567560,129.186792`). The target was about
+`448.9` m away, so `distance_allowed=false` and `safety_ready=false` were
+expected. Recalculate nearby targets whenever the antenna location changes.
 
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.

@@ -9,10 +9,11 @@ manual driving with GPS readiness calculations.
 Unified fixed-wiring RC + GPS dry-run validation is complete. Single-waypoint
 candidate dry-run with `AUTO_MOTION_ARMED=0` confirms candidate-command safety,
 and compile-time target override is now verified in USBDBG. Nearby candidate
-command validation is still incomplete because the verified target was about
-`380` to `392` m from the current GPS position, so `distance_allowed=false` and
-`safety_ready=false`. Bench testing and floor waypoint driving are not approved
-yet.
+command validation is still incomplete. The next-day GPS retest was safely
+blocked because the antenna was placed at a new location, making the previous
+compile-time target stale and about `448.9` m away; GPS freshness/quality also
+did not satisfy readiness. Bench testing and floor waypoint driving are not
+approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -30,7 +31,8 @@ Staged plan:
    `target_lat` / `target_lon` matching the compile-time macros.
 4. Nearby target recomputation: compute a new target from the current GPS
    position and rerun with `AUTO_MOTION_ARMED=0`. Do not proceed until
-   `target_distance_m <= max_target_distance_m`.
+   `target_distance_m <= max_target_distance_m` and GPS freshness/quality gates
+   pass.
 5. Sensor-frame validation: retest GPS with the antenna mounted on the rover
    body in open sky. IMU diagnostics remain useful, but IMU is optional for the
    current GPS+RC single-waypoint preparation stage and must not block
@@ -72,6 +74,8 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
   single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
 - Confirm the target override fields still match the intended target, then
   interpret `target_distance_m`, `distance_allowed`, and `safety_ready`.
+- Confirm GPS readiness using `gps_age_ms`, `gps_hdop`, and `gps_sats`; do not
+  rely on `gps_fix=true` alone.
 - Re-test candidate GPS fields with the GPS antenna mounted on the rover and
   placed in open sky.
 - Run wheel-off-ground bench testing only after safety gates and sensor-frame
@@ -264,6 +268,14 @@ Target override rule:
 - That proves target override plumbing is fixed. It does not prove nearby
   candidate command behavior, because the current GPS position was around
   `35.56752..35.56756,129.18688`, making `target_distance_m≈380..392`.
+- A next-day retest kept target override working
+  (`target_override_enabled=true`, `target_source=compile_time`) but the antenna
+  position changed to about `35.571310,129.188630` while the firmware target was
+  `35.567560,129.186792`, producing `target_distance_m≈448.9`.
+- That next-day run was also blocked by GPS readiness: `gps_fix=true` appeared,
+  but `gps_ready=false` remained because `gps_age_ms` was often very large,
+  `gps_sats` fluctuated, and `gps_hdop` was often `99.99` with only occasional
+  readings around `4.7`.
 
 Safety constants:
 
@@ -371,6 +383,26 @@ Latest target override check:
   incomplete. Recompute a nearby target from the current GPS position and rerun
   with `AUTO_MOTION_ARMED=0`.
 
+Latest next-day GPS retest:
+
+- The GPS antenna was placed outside again on the next day.
+- Runtime GPS moved to approximately `gps_lat=35.571310`,
+  `gps_lon=129.188630`.
+- Firmware still used the previous compile-time target:
+  `target_lat=35.567560`, `target_lon=129.186792`.
+- Target override was still working:
+  `target_override_enabled=true`, `target_source=compile_time`.
+- The target was no longer nearby: `target_distance_m≈448.9` while
+  `max_target_distance_m=30.0`.
+- `distance_allowed=false` and `safety_ready=false`.
+- `gps_fix=true` appeared, but `gps_ready=false` remained because `gps_age_ms`
+  was often very large, `gps_sats` fluctuated, and `gps_hdop` was often
+  `99.99` and only occasionally around `4.7`.
+- `AUTO_MOTION_ARMED=0` and `auto_motor_inhibit=true` kept
+  `final_left_cmd=0.000` and `final_right_cmd=0.000`.
+- This was a safe blocked validation, not candidate-command success. Recompute
+  the target from the current GPS location and rerun with `AUTO_MOTION_ARMED=0`.
+
 ## Safety Rules
 
 - No real autonomous motion in this mode.
@@ -385,9 +417,10 @@ Latest target override check:
 Next milestone:
 
 - Recompute a nearby target from the current GPS position and rerun
-  `AUTO_MOTION_ARMED=0`, then prepare GPS antenna/body-frame validation for the
-  GPS+RC single-waypoint workflow. Continue IMU electrical diagnostics
-  separately, but do not block GPS+RC candidate dry-run on IMU availability.
+  `AUTO_MOTION_ARMED=0` after GPS freshness/quality stabilizes, then prepare
+  GPS antenna/body-frame validation for the GPS+RC single-waypoint workflow.
+  Continue IMU electrical diagnostics separately, but do not block GPS+RC
+  candidate dry-run on IMU availability.
 - Keep the waypoint target small and explicit when motion work resumes.
 - Require GPS readiness, known GPS body-frame placement, heading/attitude plan,
   RC override, STOP/failsafe checks, and wheel-off-ground validation before any

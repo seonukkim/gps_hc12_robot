@@ -155,6 +155,12 @@ Target override rule:
   away, greater than `max_target_distance_m=30.0`, so `distance_allowed=false`
   and `safety_ready=false` were expected. Recompute a nearby target from the
   current GPS position before the next inhibited run.
+- Next-day retest: target override still worked, but GPS moved to approximately
+  `35.571310,129.188630` while the previous target remained
+  `35.567560,129.186792`, making `target_distance_m≈448.9`.
+  `distance_allowed=false` and `safety_ready=false` were expected.
+- `gps_fix=true` alone is not enough; check `gps_age_ms`, `gps_hdop`, and
+  `gps_sats` before treating GPS as ready.
 
 Safety gates:
 

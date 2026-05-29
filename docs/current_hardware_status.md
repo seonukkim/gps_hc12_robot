@@ -283,11 +283,27 @@ Current status:
   `target_distance_m≈380..392` exceeded `max_target_distance_m=30.0`.
   Therefore `distance_allowed=false`, `safety_ready=false`, candidate commands
   stayed zero, and final outputs stayed zero.
+- Next-day GPS retest remained safely blocked. The antenna was placed outside
+  again and runtime GPS moved to approximately `gps_lat=35.571310`,
+  `gps_lon=129.188630`, while firmware still used the previous compile-time
+  target `target_lat=35.567560`, `target_lon=129.186792`.
+  `target_override_enabled=true` and `target_source=compile_time`, so target
+  override itself is working, but `target_distance_m≈448.9` exceeded
+  `max_target_distance_m=30.0`. `distance_allowed=false` and
+  `safety_ready=false` were expected.
+- In the next-day retest, `gps_fix=true` appeared but `gps_ready=false` remained
+  because GPS freshness/quality was not stable: `gps_age_ms` was very large in
+  many lines, `gps_sats` fluctuated, and `gps_hdop` was often `99.99` and only
+  occasionally around `4.7`.
+- `AUTO_MOTION_ARMED=0` and `auto_motor_inhibit=true` kept final outputs at
+  zero.
 - Target override success must be interpreted separately from
   `distance_allowed` / `safety_ready`.
 - Next required validation before motion:
   - recompute a nearby target from the current GPS position
   - rerun the single-waypoint experiment with `AUTO_MOTION_ARMED=0`
+  - confirm GPS freshness/quality using `gps_age_ms`, `gps_hdop`, and
+    `gps_sats`; do not rely on `gps_fix=true` alone
   - GPS mounted/open-sky candidate retest
   - wheel-off-ground bench test only after safety gates and sensor assumptions
     are clear

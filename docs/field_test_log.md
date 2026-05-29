@@ -864,6 +864,53 @@ Interpretation:
 - Bench test is still blocked.
 - Floor driving is still blocked.
 
+## 2026-05-29: Next-Day GPS Retest Blocked By Stale Target And GPS Quality
+
+Setup:
+
+- The GPS antenna was placed outside again on the next day.
+- Runtime GPS position changed to approximately:
+  - `gps_lat=35.571310`
+  - `gps_lon=129.188630`
+- Firmware still used the previous compile-time target:
+  - `target_lat=35.567560`
+  - `target_lon=129.186792`
+- `target_override_enabled=true`.
+- `target_source=compile_time`.
+
+Observed GPS and safety fields:
+
+- `target_distance_m` was around `448.9` m.
+- `max_target_distance_m=30.0`.
+- `distance_allowed=false`.
+- `safety_ready=false`.
+- `gps_fix=true` appeared, but `gps_ready=false` remained because GPS
+  quality/freshness was not stable:
+  - `gps_age_ms` was very large in many lines
+  - `gps_sats` fluctuated
+  - `gps_hdop` was often `99.99` and only occasionally around `4.7`
+- `AUTO_MOTION_ARMED=0`.
+- `auto_motor_inhibit=true`.
+- Final outputs stayed neutral:
+  - `final_left_cmd=0.000`
+  - `final_right_cmd=0.000`
+
+Interpretation:
+
+- This is a safe blocked validation, not a candidate-command success.
+- Safety gates worked correctly.
+- Target override is working.
+- The previous nearby target became stale because the GPS antenna was placed at
+  a new location on the next day.
+- `distance_allowed=false` is expected because `target_distance_m` exceeded
+  `max_target_distance_m`.
+- `gps_fix=true` alone is not enough; GPS age, HDOP, and satellite count must
+  also satisfy readiness gates.
+- The next step is to recompute a nearby target from the current GPS location
+  and rerun with `AUTO_MOTION_ARMED=0`.
+- Bench test remains blocked.
+- Floor driving remains blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:
