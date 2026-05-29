@@ -1157,6 +1157,115 @@ Interpretation:
 - Bench test remains blocked.
 - Floor driving remains blocked.
 
+## 2026-05-29: Single-Waypoint AUTO-Entry Timeout Semantics Updated
+
+Change:
+
+- The single-waypoint experiment timeout now starts on AUTO entry instead of
+  being consumed during boot or long MANUAL GPS-waiting time.
+- Leaving AUTO resets the AUTO entry timestamp.
+- MANUAL no longer consumes the AUTO candidate timeout.
+- USB debug now reports:
+  - `timeout_source=auto_entry`
+  - `auto_entry_ms=NA` or a numeric timestamp
+  - `auto_elapsed_ms=NA` or a numeric elapsed time
+  - `timeout_limit_ms`
+  - `timeout_ok`
+
+Safety:
+
+- Default rover behavior is preserved outside
+  `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT`.
+- `AUTO_MOTION_ARMED=0` remains the required validation build.
+- AUTO final motor outputs remain inhibited when `AUTO_MOTION_ARMED=0`.
+- RC channel mapping and motor mixing were not changed.
+- Real motion is still not enabled.
+
+Next validation:
+
+- Rebuild and upload the single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
+- Wait for outdoor GPS readiness in MANUAL without consuming AUTO timeout.
+- Switch to AUTO while nearby and verify:
+  - `mode=AUTO_READY`
+  - `gps_ready=true`
+  - `distance_allowed=true`
+  - `auto_entry_ms` is numeric
+  - `auto_elapsed_ms` is below `timeout_limit_ms`
+  - `timeout_ok=true`
+  - `safety_ready=true`
+  - candidate commands are nonzero
+  - final outputs remain zero because `AUTO_MOTION_ARMED=0`
+- Bench test remains blocked until that dry-run succeeds.
+- Floor driving remains blocked.
+
+## 2026-05-29: Outdoor Dry-Run Blocked By GPS No-Fix After Timeout Fix
+
+Observed timeout and target diagnostics:
+
+- Firmware printed the new timeout fields:
+  - `timeout_source=auto_entry`
+  - `auto_entry_ms=NA`
+  - `auto_elapsed_ms=NA`
+  - `timeout_limit_ms=15000`
+  - `timeout_ok=true`
+- This indicates the previous MANUAL-wait timeout issue is improved.
+- Runtime target override was confirmed:
+  - `target_override_enabled=true`
+  - `target_source=compile_time`
+  - `target_lat_macro=35.5708340`
+  - `target_lon_macro=129.1869576`
+  - `target_lat=35.570834`
+  - `target_lon=129.186958`
+  - `target_ready=true`
+
+Observed RC state:
+
+- RC was in MANUAL:
+  - `mode=MANUAL`
+  - `auto_sw=false`
+  - `mode_us` around `1000` to `1001`
+  - `control_source=RC_MANUAL`
+
+Observed GPS no-fix state:
+
+- GPS UART was alive:
+  - `gps_chars` increased continuously
+- GPS fix was not acquired:
+  - `gps_fix=false`
+  - `gps_lat=NA`
+  - `gps_lon=NA`
+  - `gps_sats=0`
+  - `gps_hdop=99.99`
+  - `gps_age_ms=NA`
+
+Observed safety state:
+
+- `target_distance_m=NA`.
+- `distance_allowed=false`.
+- `safety_ready=false`.
+- `candidate_left_cmd=0.000`.
+- `candidate_right_cmd=0.000`.
+- `final_left_cmd=0.000`.
+- `final_right_cmd=0.000`.
+- `AUTO_MOTION_ARMED=0` remained safe.
+
+Interpretation:
+
+- This is a safe blocked validation, not an AUTO candidate dry-run success.
+- Timeout semantics appear fixed or improved.
+- Target override is working.
+- RC MANUAL is working.
+- The current blocker is GPS satellite fix, not timeout, target override, or RC
+  mode mapping.
+- `gps_chars` increasing only proves NMEA/serial input is alive; it does not
+  mean the module has a valid position fix.
+- `gps_sats=0` and `gps_hdop=99.99` mean no usable satellite acquisition for
+  candidate validation.
+- Next step is to reacquire a stable outdoor GPS fix in MANUAL, then attempt
+  AUTO_READY validation with `AUTO_MOTION_ARMED=0`.
+- Bench test remains blocked.
+- Floor driving remains blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

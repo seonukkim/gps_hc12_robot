@@ -25,8 +25,12 @@ latest outdoor nearby dry-run then showed real progress: target override worked,
 outdoor GPS readiness was repeatedly good, and `distance_allowed=true` was
 observed after `target_distance_m` dropped below `30.0` m. It was still blocked
 because the rover stayed mostly in MANUAL, `timeout_ok=false`,
-`safety_ready=false`, and no candidate commands were produced. Bench testing and
-floor waypoint driving are not approved yet.
+`safety_ready=false`, and no candidate commands were produced. The
+single-waypoint timeout semantics have now been improved so the timeout starts
+on AUTO entry instead of being consumed during long MANUAL GPS waiting. The
+latest post-timeout-fix outdoor attempt confirmed the new timeout fields and
+target override, but it was blocked by `gps_fix=false`, `gps_sats=0`, and
+`gps_hdop=99.99`. Bench testing and floor waypoint driving are not approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -54,20 +58,24 @@ Staged plan:
    rerun with `AUTO_MOTION_ARMED=0`. Do not proceed until
    `target_distance_m <= max_target_distance_m`, GPS freshness/quality gates
    pass, and `timeout_ok` has not expired.
-7. Timeout semantics decision: either do a quick reset/reupload and immediate
-   AUTO dry-run while `distance_allowed=true`, or improve the firmware so
-   timeout is based on AUTO entry instead of total boot/manual waiting time.
-8. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
+7. Timeout semantics improvement complete in firmware: the single-waypoint
+   experiment tracks AUTO entry time, resets the AUTO timeout when leaving
+   AUTO, and reports `timeout_source=auto_entry`, `auto_entry_ms`,
+   `auto_elapsed_ms`, `timeout_limit_ms`, and `timeout_ok`.
+8. GPS reacquisition required: the latest attempt showed `gps_chars` increasing
+   but no valid GPS fix. Reacquire stable outdoor GPS in MANUAL before the next
+   AUTO_READY candidate validation.
+9. Sensor-frame validation: keep the GPS antenna fixed to the rover body in open
    sky. IMU diagnostics remain useful, but IMU is optional for the current
    GPS+RC single-waypoint preparation stage and must not block candidate dry-run
    work.
-9. Bench test with wheels lifted: compile the same experiment with
+10. Bench test with wheels lifted: compile the same experiment with
    `AUTO_MOTION_ARMED=1` only after explicit approval and verify low-speed
    output, timeout, arrival stop, GPS rejection, and manual override.
-10. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
+11. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
    assumptions are validated.
-11. Multi-waypoint motion: only after single-waypoint behavior is proven.
-12. Coverage path / lawnmower driving: last step, after mission sequencing,
+12. Multi-waypoint motion: only after single-waypoint behavior is proven.
+13. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
@@ -110,10 +118,15 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
   `safety_ready=true`.
 - Confirm GPS readiness using `gps_age_ms`, `gps_hdop`, and `gps_sats`; do not
   rely on `gps_fix=true` alone.
-- Run candidate validation promptly after upload/reset or AUTO entry; `timeout_ok`
-  can expire while waiting too long.
-- Consider changing timeout semantics so the experiment timeout starts on AUTO
-  entry rather than at boot if long MANUAL GPS waiting remains necessary.
+- `gps_chars` increasing only proves serial/NMEA input is alive. Do not proceed
+  to AUTO candidate validation when `gps_fix=false`, `gps_lat=NA`,
+  `gps_lon=NA`, `gps_sats=0`, or `gps_hdop=99.99`.
+- Run candidate validation after entering AUTO; MANUAL GPS waiting no longer
+  consumes the single-waypoint AUTO timeout in the updated firmware.
+- In MANUAL, expect `auto_entry_ms=NA` and `auto_elapsed_ms=NA`; after switching
+  to AUTO, expect `timeout_source=auto_entry`, a numeric `auto_entry_ms`, a
+  small `auto_elapsed_ms`, and `timeout_ok=true` until the AUTO timeout limit is
+  exceeded.
 - Run wheel-off-ground bench testing only after safety gates and sensor-frame
   assumptions are clear.
 - Keep `AUTO_MOTION_ARMED=0` for floor or indoor tests.
@@ -357,6 +370,10 @@ auto_motion_armed=...
 auto_motor_inhibit=...
 gps_ready=...
 target_ready=...
+timeout_source=auto_entry
+auto_entry_ms=...
+auto_elapsed_ms=...
+timeout_limit_ms=...
 timeout_ok=...
 max_target_distance_m=...
 arrival_radius_m=...
@@ -547,8 +564,39 @@ Latest outdoor nearby dry-run:
   `rc_ok=false`, `steer_us≈495`, `throttle_us≈2504`, and
   `control_source=STOP`; keeping `STOP` is the correct safe behavior.
 - This is partial progress and a safe blocked validation, not a successful AUTO
-  candidate dry-run. Next step is either immediate post-reset AUTO dry-run while
-  the rover is nearby, or a firmware change so timeout starts at AUTO entry.
+  candidate dry-run.
+
+Timeout semantics update:
+
+- The single-waypoint experiment now starts the timeout window on AUTO entry
+  rather than at boot or during MANUAL waiting.
+- Leaving AUTO resets the AUTO entry timestamp.
+- MANUAL no longer consumes the AUTO candidate timeout.
+- USBDBG now prints `timeout_source=auto_entry`, `auto_entry_ms`,
+  `auto_elapsed_ms`, `timeout_limit_ms`, and `timeout_ok`.
+- Next outdoor dry-run should verify `AUTO_READY`, `gps_ready=true`,
+  `distance_allowed=true`, `timeout_ok=true`, `safety_ready=true`, and nonzero
+  candidate commands while `AUTO_MOTION_ARMED=0` keeps final outputs at zero.
+
+Latest post-timeout-fix GPS no-fix attempt:
+
+- Firmware printed `timeout_source=auto_entry`, `auto_entry_ms=NA`,
+  `auto_elapsed_ms=NA`, `timeout_limit_ms=15000`, and `timeout_ok=true`, so the
+  previous MANUAL-wait timeout issue appears improved.
+- Target override was confirmed with `target_override_enabled=true`,
+  `target_source=compile_time`, `target_lat_macro=35.5708340`,
+  `target_lon_macro=129.1869576`, `target_lat=35.570834`,
+  `target_lon=129.186958`, and `target_ready=true`.
+- RC was in MANUAL: `mode=MANUAL`, `auto_sw=false`, `mode_us≈1000..1001`, and
+  `control_source=RC_MANUAL`.
+- GPS UART was alive because `gps_chars` increased continuously.
+- GPS fix was not acquired: `gps_fix=false`, `gps_lat=NA`, `gps_lon=NA`,
+  `gps_sats=0`, `gps_hdop=99.99`, and `gps_age_ms=NA`.
+- Therefore `target_distance_m=NA`, `distance_allowed=false`,
+  `safety_ready=false`, candidate commands were zero, and final outputs were
+  zero.
+- This is a safe blocked validation. The current blocker is GPS satellite fix,
+  not timeout, target override, or RC mode mapping.
 
 ## Safety Rules
 

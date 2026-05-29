@@ -92,9 +92,8 @@ body frame must be fixed, measured, and modeled.
   with `AUTO_MOTION_ARMED=0`.
 - Verify the nearby-target condition in `AUTO_READY`, not only in MANUAL.
   `distance_allowed=true` in MANUAL is progress but not enough.
-- If `timeout_ok=false` appears after waiting in MANUAL for GPS, either do an
-  immediate post-reset AUTO dry-run or change timeout semantics so the timer
-  starts on AUTO entry.
+- The single-waypoint timeout now starts on AUTO entry, so MANUAL GPS waiting
+  should not consume the AUTO candidate timeout.
 - Confirm `gps_age_ms`, `gps_hdop`, and `gps_sats`, not only `gps_fix=true`,
   before interpreting GPS readiness.
 - Re-test GPS candidate fields with the antenna mounted on the rover and placed
@@ -363,6 +362,19 @@ Latest outdoor nearby dry-run: target override worked with
 observed. The run was still blocked because it stayed mostly in MANUAL,
 `timeout_ok=false`, `safety_ready=false`, and candidate commands remained zero.
 This is partial progress, not a successful AUTO candidate dry-run.
+
+Timeout semantics update: the single-waypoint experiment now reports
+`timeout_source=auto_entry`, `auto_entry_ms`, `auto_elapsed_ms`,
+`timeout_limit_ms`, and `timeout_ok`. MANUAL should show `auto_entry_ms=NA` and
+`auto_elapsed_ms=NA`; after switching to AUTO, those fields should become
+numeric and `timeout_ok=true` until the AUTO timeout limit is exceeded.
+
+Latest post-timeout-fix outdoor attempt: timeout fields and target override were
+confirmed, but GPS did not acquire a fix. `gps_chars` increased continuously,
+while `gps_fix=false`, `gps_lat=NA`, `gps_lon=NA`, `gps_sats=0`, and
+`gps_hdop=99.99`. This is a GPS no-fix blocked validation, not an AUTO
+candidate success. Reacquire stable outdoor GPS fix in MANUAL before attempting
+AUTO_READY validation.
 
 Safety gates include GPS fix, GPS age, HDOP, RC validity, AUTO switch state,
 target validity, target distance range, arrival radius, and AUTO timeout.

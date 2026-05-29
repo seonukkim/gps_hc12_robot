@@ -129,7 +129,7 @@ Compile with the nearby target override and motor output inhibited:
 Expected single-waypoint USB debug additions:
 
 ```text
-single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... timeout_ok=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true gps_ready=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000
 ```
 
 Target override rule:
@@ -188,6 +188,18 @@ Target override rule:
   `distance_allowed=true` was observed. This was still not a successful AUTO
   candidate dry-run because mode stayed mostly MANUAL, `timeout_ok=false`,
   `safety_ready=false`, and candidate commands remained zero.
+- Timeout semantics update: the single-waypoint experiment now starts the
+  timeout window on AUTO entry, resets it when leaving AUTO, and does not
+  consume timeout while waiting in MANUAL for outdoor GPS. In MANUAL, USBDBG
+  should print `timeout_source=auto_entry`, `auto_entry_ms=NA`, and
+  `auto_elapsed_ms=NA`. After switching to AUTO, `auto_entry_ms` and
+  `auto_elapsed_ms` should become numeric and `timeout_ok=true` until
+  `auto_elapsed_ms` exceeds `timeout_limit_ms`.
+- Latest post-timeout-fix attempt: timeout fields and target override were
+  confirmed, but GPS had no valid fix. `gps_chars` increased, proving serial
+  input was alive, but USBDBG printed `gps_fix=false`, `gps_lat=NA`,
+  `gps_lon=NA`, `gps_sats=0`, `gps_hdop=99.99`, and `gps_age_ms=NA`.
+  Reacquire stable outdoor GPS fix before AUTO candidate validation.
 
 Safety gates:
 

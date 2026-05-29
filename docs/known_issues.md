@@ -418,10 +418,13 @@ Interpretation:
   candidate dry-run success.
 - `safety_ready` must be verified in `AUTO_READY` with `gps_ready=true`,
   `distance_allowed=true`, `timeout_ok=true`, valid RC, and the AUTO switch on.
-- The current `timeout_ok=false` observations suggest the experiment timeout can
-  expire while waiting in MANUAL for GPS/target setup. Either validate promptly
-  after reset/AUTO entry, or change the firmware so the timeout starts on AUTO
-  entry instead of total boot/manual waiting time.
+- Previous `timeout_ok=false` observations showed that the experiment timeout
+  could expire while waiting in MANUAL for GPS/target setup.
+- Firmware has been updated so the single-waypoint experiment timeout starts on
+  AUTO entry, resets when leaving AUTO, and no longer consumes time during
+  MANUAL waiting.
+- USBDBG must now be checked for `timeout_source=auto_entry`,
+  `auto_entry_ms`, `auto_elapsed_ms`, `timeout_limit_ms`, and `timeout_ok`.
 - Brief PPM/failsafe glitches can occur; the safe response is
   `control_source=STOP` with no autonomous output.
 - A window-thrown or window/outside antenna position is not equivalent to the
@@ -434,6 +437,14 @@ Interpretation:
   `max_target_distance_m`.
 - `gps_fix=true` alone is not enough. `gps_age_ms`, `gps_hdop`, and `gps_sats`
   must also satisfy readiness gates before interpreting a run as GPS-ready.
+- `gps_chars` increasing does not imply `gps_fix=true`; it only proves that
+  NMEA/serial input is alive.
+- GPS fix can be lost between outdoor attempts. If `gps_sats=0` and
+  `gps_hdop=99.99`, treat the run as GPS no-fix and do not proceed to AUTO
+  candidate validation.
+- The latest post-timeout-fix run confirmed `timeout_source=auto_entry` and
+  target override, but was blocked by `gps_fix=false`, `gps_lat=NA`,
+  `gps_lon=NA`, `gps_sats=0`, `gps_hdop=99.99`, and `gps_age_ms=NA`.
 - `target_distance_m` must also be checked even when `gps_fix=true` and target
   override are both valid.
 - `safety_ready` is the combined gate to inspect before any later motion work.
@@ -462,8 +473,14 @@ Do not repeat:
   outdoors with the GPS fixed to the rover body.
 - Do not treat `gps_fix=true` as sufficient when `gps_age_ms` is stale,
   `gps_hdop` is high, or satellites are unstable.
+- Do not treat increasing `gps_chars` as a valid GPS position fix.
+- Do not proceed to AUTO candidate validation when `gps_sats=0` and
+  `gps_hdop=99.99`.
 - Do not ignore `timeout_ok`; if it expires, rerun the validation promptly from
-  a fresh upload/reset/AUTO entry state.
+  a fresh AUTO entry state.
+- Do not interpret `timeout_ok` without checking `timeout_source=auto_entry`.
+  In MANUAL, `auto_entry_ms` / `auto_elapsed_ms` should be `NA`; after switching
+  to AUTO, they should become numeric.
 - Do not ignore PPM/failsafe glitches; any `rc_ok=false` or invalid pulse values
   must keep the rover stopped.
 - Do not approve bench testing or floor driving from a run where the target
