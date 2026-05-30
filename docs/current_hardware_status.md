@@ -14,6 +14,11 @@
 - OpenRB-150 USB debug: working
 - RC receiver PPM input: working
 - RC manual mode: working
+- RC manual sign convention: working with `MANUAL_FORWARD_SIGN=-1`,
+  `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
+  `DRIVE_CALIBRATION_ENABLE=0` for the current uncalibrated baseline. This is
+  only an RC axis sign fix; physical A/B output mapping remains
+  `A=(L+R)/2`, `B=(R-L)/2`.
 - Failsafe STOP behavior: working
 - GPS UART receive: working on `Serial2` at `9600` with current central
   connector wiring
@@ -101,13 +106,48 @@
   as `DISTANCE_OUT_OF_RANGE`. Intermittent GPS degradation also blocked motion
   as `GPS_NOT_MOTION_READY` or `LATCHED_STOP`. This validates the guarded crawl
   safety harness, but it is still **not** full autonomous driving.
-- Latest guarded crawl 0.12 cap-only observation: `GROUND_CRAWL_MAX_CMD=0.120`
+- Historical guarded crawl 0.12 cap-only observation: `GROUND_CRAWL_MAX_CMD=0.120`
   allowed the harness to cap up to 0.120, but the candidate command was still
   `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100`, so final commands
   remained `final_left_cmd=0.100` / `final_right_cmd=0.100`. The latch still
   worked. Firmware now separates candidate speed from final clamp with
-  `SINGLE_WP_CRAWL_BASE_CMD` (default `0.100`). A future 0.12 retry must set
-  both `SINGLE_WP_CRAWL_BASE_CMD=0.12` and `GROUND_CRAWL_MAX_CMD=0.12`.
+  `SINGLE_WP_CRAWL_BASE_CMD` (default `0.100`).
+- First successful guarded AUTO crawl after the manual/drive mapping fix:
+  MANUAL RC is working with `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`, and
+  `old_angle_remap_active=false`; physical output mapping remains A = throttle,
+  B = turn, `A=(logical_left+logical_right)/2`,
+  `B=(logical_right-logical_left)/2`. With `SINGLE_WP_CRAWL_BASE_CMD=0.220` and
+  `GROUND_CRAWL_MAX_CMD=0.220`, the rover briefly moved forward in
+  `AUTO_RUNNING`. USBDBG showed `gps_motion_ready=true`,
+  `gps_block_reason=OK`, `gps_sats≈9`, `gps_hdop≈1.0..1.2`,
+  `target_distance_m≈9.6`, `distance_allowed=true`,
+  `ground_crawl_ready=true`, `ground_crawl_block_reason=OK`,
+  `left_cmd=0.220`, `right_cmd=0.220`, `final_left_cmd=0.220`,
+  `final_right_cmd=0.220`, `physical_a_cmd=0.220`, and `physical_b_cmd=0.000`.
+  The latch then stopped output at roughly `ground_crawl_elapsed_ms=510` with
+  `ground_crawl_latched_stop=true`. This confirms short guarded forward motion,
+  not full autonomous waypoint or coverage driving.
+- Repeated 1000 ms guarded AUTO crawl: tested with `GROUND_CRAWL_TEST_MODE=1`,
+  `GROUND_CRAWL_MAX_CMD=0.220`, `GROUND_CRAWL_MAX_AUTO_MS=1000`,
+  `SINGLE_WP_CRAWL_BASE_CMD=0.220`, `AUTO_MOTION_ARMED=1`,
+  `MANUAL_FORWARD_SIGN=-1`, and `MANUAL_TURN_SIGN=1`. The user toggled
+  AUTO/MANUAL about `3..4` times, and `AUTO_RUNNING` was observed multiple
+  times. Valid AUTO windows showed `gps_block_reason=OK`,
+  `gps_motion_ready=true`, `distance_allowed=true`, `ground_crawl_ready=true`,
+  `ground_crawl_block_reason=OK`, `left_cmd=0.220`, `right_cmd=0.220`,
+  `final_left_cmd=0.220`, `final_right_cmd=0.220`, `physical_a_cmd=0.220`,
+  and `physical_b_cmd=0.000`. GPS quality was acceptable with `gps_sats≈8..10`,
+  `gps_hdop≈1.0..1.65`, and `last_gga_fix_quality=2`. The latch stopped output
+  after roughly `1000` ms; one attempt was shorter because the user returned to
+  MANUAL early. `target_distance_m` varied around `16.8..18.0`, which is
+  expected because this guarded crawl only drives straight with
+  `physical_b_cmd=0.000` and has no steering correction yet.
+- Single-waypoint steering dry-run diagnostics are now available behind
+  `SINGLE_WP_STEERING_DRYRUN=1`. The mode estimates course-over-ground only
+  after at least `2.0` m of GPS displacement and prints desired forward/turn,
+  logical wheel, and physical A/B commands. It does not drive motors by itself.
+  If movement is too small, USBDBG reports `heading_ready=false` and
+  `steering_block_reason=NO_HEADING`.
 - Motor pulse calibration mode is now available for GPS-independent motor
   deadband checks. Compile with `MOTOR_PULSE_TEST_MODE=1`; HC-12 is disabled,
   GPS readiness/target distance are not used, RC MANUAL is preserved, and AUTO
@@ -536,19 +576,18 @@ Current status:
   localization.
 - Target override success must be interpreted separately from
   `distance_allowed` / `safety_ready`.
-- Next required validation before any armed motion:
-  - use the guarded ground crawl build (`GROUND_CRAWL_TEST_MODE=1`) for the next
-    motion test; armed motion is now gated to zero in any build without it
-  - prepare a strict wheel-off-ground bench procedure
-  - keep the rover physically lifted
-  - verify RC manual override, STOP, and failsafe before any armed variant
-  - confirm outdoor GPS readiness and nearby target gates again
-  - repeat the no-motion `AUTO_MOTION_ARMED=0` validation if the rover or target
-    changes
-  - do not enable floor driving until wheel-off-ground logs prove the expected
-    behavior
-  - do not raise the AUTO command past the deadband except through the guarded
-    crawl harness; use `-DSINGLE_WP_CRAWL_BASE_CMD` for candidate speed and
+- Next required validation after repeated forward crawl:
+  - station-side path planning preview only, with no motor execution
+  - compute a fresh nearby target from the current outdoor GPS position before
+    every run
+  - verify RC manual override, STOP, failsafe, motion-grade GPS, near-field
+    target, neutral sticks, and latch-stop before any armed variant
+  - analyze GPS delta and target-distance change after each crawl
+  - use single-waypoint steering dry-run before longer ground motion
+  - validate heading/course estimation before physical waypoint following
+  - do not enable full waypoint following or coverage driving yet
+  - do not raise AUTO command outside the guarded crawl harness; use
+    `-DSINGLE_WP_CRAWL_BASE_CMD` for candidate speed and
     `-DGROUND_CRAWL_MAX_CMD` for the final clamp, in small steps, under the
     crawl latch stop
   - IMU is optional for the current GPS+RC single-waypoint preparation stage;

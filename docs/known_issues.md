@@ -7,9 +7,14 @@ changing control, protocol, planning, or station workflow code.
 
 Status:
 
-- Current firmware uses `rc-arcade-manual`.
+- Current firmware uses `rc-arcade-manual-fwdneg`.
 - Neutral USBDBG is verified.
-- Full straight up/down/left/right wheel-off-ground validation is still needed.
+- Working RC sign convention for the current rover/controller is
+  `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`,
+  `MOTOR_OUTPUT_SWAP_LR=0`, and `DRIVE_CALIBRATION_ENABLE=0`.
+- This is an RC axis sign fix, not a wheel mapping or physical A/B output fix.
+- Full straight up/down/left/right wheel-off-ground validation should still be
+  repeated after flashing.
 
 Current code:
 
@@ -23,6 +28,8 @@ logical_right_cmd = clamp(manual_forward_cmd - manual_turn_cmd);
 Known mistakes:
 
 - changing only throttle sign moved the problem to another diagonal
+- after the A/B mapping was fixed, `MANUAL_FORWARD_SIGN=1` made manual
+  forward/reverse inverted: pulling drove forward and pushing drove backward
 - treating left/right as forward/reverse was wrong
 - judging only wheel spin can confuse RC axis mapping with motor/ESC direction
 
@@ -689,10 +696,80 @@ Remaining cautions:
 - Intermittent GPS degradation can still block as `GPS_NOT_MOTION_READY`.
 - This validates the guarded crawl safety behavior, not full autonomous
   driving.
-- Before a 0.12 retry, reacquire current GPS and compute a fresh target
-  `10..12` m away. Compile with both `SINGLE_WP_CRAWL_BASE_CMD=0.12` and
-  `GROUND_CRAWL_MAX_CMD=0.12`; raising only the clamp does not raise the
-  `0.100` candidate command. Do not reuse stale or too-close target coordinates.
+- Historical 0.08/0.12 tests established that `SINGLE_WP_CRAWL_BASE_CMD`
+  controls candidate speed and `GROUND_CRAWL_MAX_CMD` is only the final clamp.
+  Do not reuse stale or too-close target coordinates.
+
+## First Guarded AUTO Crawl Succeeded, But It Is Not Full Autonomy
+
+Status:
+
+- After the manual/drive mapping fix, the rover briefly moved forward under
+  guarded `AUTO_RUNNING`.
+- Working manual baseline: `MANUAL_FORWARD_SIGN=-1`,
+  `MANUAL_TURN_SIGN=1`, `old_angle_remap_active=false`.
+- Physical A/B mapping remains A = throttle and B = turn:
+  `A=(logical_left+logical_right)/2`, `B=(logical_right-logical_left)/2`.
+- Successful crawl fields included `gps_motion_ready=true`,
+  `gps_block_reason=OK`, `target_distance_m≈9.6`, `distance_allowed=true`,
+  `ground_crawl_ready=true`, `ground_crawl_block_reason=OK`,
+  `left_cmd=0.220`, `right_cmd=0.220`, `final_left_cmd=0.220`,
+  `final_right_cmd=0.220`, `physical_a_cmd=0.220`, and `physical_b_cmd=0.000`.
+- The latch stopped output after roughly `510` ms.
+
+Known risk:
+
+- Do not treat a short straight guarded crawl as waypoint-following success.
+- The 1000 ms repeat is complete. The next checks are station-side path planning
+  preview only, single-waypoint steering dry-run, and heading/course estimation.
+- Full floor waypoint driving and coverage driving remain blocked.
+
+## Repeated 1000 ms Guarded Crawl Is Still Straight-Only
+
+Status:
+
+- Repeated 1000 ms guarded AUTO crawl succeeded with `GROUND_CRAWL_TEST_MODE=1`,
+  `GROUND_CRAWL_MAX_CMD=0.220`, `GROUND_CRAWL_MAX_AUTO_MS=1000`,
+  `SINGLE_WP_CRAWL_BASE_CMD=0.220`, and `AUTO_MOTION_ARMED=1`.
+- `AUTO_RUNNING` was observed multiple times after the user toggled AUTO/MANUAL
+  about `3..4` times.
+- Straight output was correct: `physical_a_cmd=0.220`,
+  `physical_b_cmd=0.000`.
+- Latch stop returned final outputs to zero after roughly `1000` ms.
+- `target_distance_m` varied around `16.8..18.0` and did not monotonically
+  decrease.
+
+Interpretation:
+
+- This is expected because the current guarded crawl only drives straight.
+- It has no steering correction, heading/course estimator, or waypoint follower
+  yet.
+- Do not diagnose this as a path-planning failure.
+
+Next:
+
+- station-side path planning preview only, no motor execution
+- single-waypoint steering dry-run
+- heading/course estimation before physical waypoint following
+
+## GPS Bearing Is Not Rover Heading
+
+Status:
+
+- `SINGLE_WP_STEERING_DRYRUN=1` adds steering diagnostics.
+- GPS position can compute `target_bearing_deg`, but it does not tell which way
+  the rover body is pointing.
+- Course-over-ground is estimated only after the rover has moved at least
+  `2.0` m between GPS samples.
+
+Known pitfall:
+
+- Do not use target bearing alone as `desired_turn_cmd`.
+- If `heading_ready=false` and `steering_block_reason=NO_HEADING`, the steering
+  dry-run must not be interpreted as ready for physical waypoint following.
+- Straight guarded crawl may move the rover but still leave
+  `target_distance_m` non-monotonic because heading/course correction is not
+  active.
 
 ## GPS-Gated Crawl Is Noisy For Motor Deadband Calibration
 

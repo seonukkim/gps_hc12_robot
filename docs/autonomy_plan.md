@@ -28,12 +28,32 @@ now complete: `AUTO_RUNNING` was reached during a good GPS window,
 target distance was blocked as `DISTANCE_OUT_OF_RANGE`, and degraded GPS was
 blocked as `GPS_NOT_MOTION_READY`. This validates the safety harness, not full
 autonomous driving. The current target is now too close and must be replaced
-with a fresh `10..12` m target before any 0.12 retry. A later cap-only 0.12 run
+with a fresh target for any future crawl. A later cap-only 0.12 run
 confirmed that `GROUND_CRAWL_MAX_CMD` only raises the final cap: the candidate
 command stayed at `0.100`, so final commands stayed at `0.100`. The firmware now
 uses `SINGLE_WP_CRAWL_BASE_CMD` for candidate speed and keeps
 `GROUND_CRAWL_MAX_CMD` as the final safety clamp. Floor waypoint driving is not
-approved yet.
+approved yet. After the manual/drive mapping fix, the first successful guarded
+AUTO crawl physically moved the rover briefly forward. The confirmed baseline
+was `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`,
+`old_angle_remap_active=false`, physical A/B mapping
+`A=(logical_left+logical_right)/2`, `B=(logical_right-logical_left)/2`,
+`SINGLE_WP_CRAWL_BASE_CMD=0.220`, and `GROUND_CRAWL_MAX_CMD=0.220`. The
+successful `AUTO_RUNNING` line showed motion-grade GPS, `target_distance_m≈9.6`,
+`distance_allowed=true`, `ground_crawl_ready=true`, straight output
+`physical_a_cmd=0.220` / `physical_b_cmd=0.000`, and final logical commands
+`0.220` / `0.220`; the latch stopped output after roughly `510` ms. This is
+short guarded forward motion only, not waypoint following or coverage driving.
+The repeated `1000` ms guarded crawl has also now been validated. With
+`GROUND_CRAWL_TEST_MODE=1`, `GROUND_CRAWL_MAX_CMD=0.220`,
+`GROUND_CRAWL_MAX_AUTO_MS=1000`, `SINGLE_WP_CRAWL_BASE_CMD=0.220`,
+`AUTO_MOTION_ARMED=1`, `MANUAL_FORWARD_SIGN=-1`, and `MANUAL_TURN_SIGN=1`, the
+user toggled AUTO/MANUAL about `3..4` times and `AUTO_RUNNING` was observed
+multiple times. Each valid AUTO window produced straight forward output
+(`physical_a_cmd=0.220`, `physical_b_cmd=0.000`) and the latch returned outputs
+to zero after about `1000` ms. `target_distance_m` varied around `16.8..18.0`
+instead of monotonically decreasing, which is expected because no steering or
+course correction is active yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -107,24 +127,37 @@ Staged plan:
    neutral RC, motion-grade GPS, near-field target window, and manual override.
    `SINGLE_WP_CRAWL_BASE_CMD` controls the candidate command; `GROUND_CRAWL_MAX_CMD`
    remains the final safety clamp. Do not reuse stale targets.
-14. Physical output pin truth table: complete. `firmware/physical_output_pin_probe`
+14. First successful guarded forward crawl complete. With
+   `SINGLE_WP_CRAWL_BASE_CMD=0.220` and `GROUND_CRAWL_MAX_CMD=0.220`, the rover
+   briefly moved forward in `AUTO_RUNNING`, then latch-stop forced neutral.
+   This validates a short bounded forward crawl, not full path execution.
+15. Physical output pin truth table: complete. `firmware/physical_output_pin_probe`
    confirmed A is throttle and B is turn. The integrated conversion now uses
    `A=(left+right)/2` and `B=(right-left)/2`.
-15. Corrected direct wheel pulse validation: first run both-wheel forward and
+16. Corrected direct wheel pulse validation: first run both-wheel forward and
    reverse tests. Single-wheel logical commands are halved at the physical pin
    level and may still be near deadband.
-16. Differential left/right motor pulse calibration: after corrected both-wheel
+17. Differential left/right motor pulse calibration: after corrected both-wheel
    behavior is verified, characterize left-only, right-only, and matched
    left/right thresholds with `MOTOR_PULSE_LEFT_CMD` and
    `MOTOR_PULSE_RIGHT_CMD` before any GPS path work.
-17. Shared drive calibration layer: apply any deadband compensation, left/right
+18. Shared drive calibration layer: apply any deadband compensation, left/right
    trim, or output scaling in one common layer used by both MANUAL and AUTO.
    This layer is behind `DRIVE_CALIBRATION_ENABLE=1`; identity/off defaults
    preserve current behavior.
-18. Low-speed floor test: only after guarded crawl behavior, drivetrain
-   calibration, and sensor-frame assumptions are validated.
-19. Multi-waypoint motion: only after single-waypoint behavior is proven.
-20. Coverage path / lawnmower driving: last step, after mission sequencing,
+19. Repeated 1000 ms guarded forward crawl complete. This proves repeated
+   short guarded autonomous forward actuation, not path execution.
+20. Station-side path planning preview only, with no motor execution.
+21. Single-waypoint steering dry-run diagnostics added with
+   `SINGLE_WP_STEERING_DRYRUN=1`. This mode prints desired steering fields but
+   does not enable motion by itself.
+22. Heading/course estimation before physical waypoint following. GPS position
+   alone is insufficient for steering; course-over-ground is only accepted after
+   at least `2.0` m of GPS displacement.
+23. Low-speed floor test: only after guarded crawl behavior, drivetrain
+   calibration, steering behavior, and sensor-frame assumptions are validated.
+24. Multi-waypoint motion: only after single-waypoint behavior is proven.
+25. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
@@ -151,12 +184,22 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 
 ## Next Required Validation Before Further Motion
 
-- Go fully outdoors with the rover and GPS fixed together, acquire a fresh GPS
-  fix in MANUAL, and compute a fresh target from that actual fix. The previous
-  target is now too close and must not be reused.
-- For the next guarded crawl run, choose a target roughly `10..12` m away so it
-  remains inside the crawl near-field window (`5..20` m) but does not
-  immediately trip the too-close block.
+- Station-side path planning preview only; do not send rover motor commands from
+  the station mission output yet.
+- Use `SINGLE_WP_STEERING_DRYRUN=1` for no-motion single-waypoint steering
+  diagnostics before longer ground motion.
+- Add heading/course estimation before physical waypoint following. If movement
+  is too small, expect `heading_ready=false` and
+  `steering_block_reason=NO_HEADING`.
+- After each guarded crawl, compare GPS delta and target-distance change against
+  the expected forward movement. Do not infer path-following quality from wheel
+  motion alone.
+- For each guarded crawl run, go fully outdoors with the rover and GPS fixed
+  together, acquire a fresh GPS fix in MANUAL, and compute a fresh target from
+  that actual fix. Do not reuse stale target coordinates.
+- Choose a target roughly `10..12` m away so it remains inside the crawl
+  near-field window (`5..20` m) but does not immediately trip the too-close
+  block.
 - Confirm the station/controller is powered on and linked before interpreting
   RC mode values; controller-off can make the PPM stream appear stuck or
   failsafe-like.
@@ -194,9 +237,10 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
   to AUTO, expect `timeout_source=auto_entry`, a numeric `auto_entry_ms`, a
   small `auto_elapsed_ms`, and `timeout_ok=true` until the AUTO timeout limit is
   exceeded.
-- If 0.08 produced no visible physical movement, retry only through the guarded
-  crawl harness with `SINGLE_WP_CRAWL_BASE_CMD=0.12`,
-  `GROUND_CRAWL_MAX_CMD=0.12`, the same duration latch, and a fresh target.
+- Repeated 1000 ms guarded forward crawl succeeded at
+  `SINGLE_WP_CRAWL_BASE_CMD=0.220`, `GROUND_CRAWL_MAX_CMD=0.220`, and
+  `GROUND_CRAWL_MAX_AUTO_MS=1000`. Future retries must still use the guarded
+  crawl harness, duration latch, and fresh target.
 - Do not run floor driving yet. Keep any indoor or non-bench validation in
   no-motion mode with `AUTO_MOTION_ARMED=0`; guarded crawl is a bounded
   deadband-calibration step, not full autonomous driving.
@@ -301,6 +345,10 @@ Observed:
 - MANUAL mode worked with RC control.
 - `control_source=RC_MANUAL` in MANUAL mode.
 - Stick input changed manual command, logical wheel, and final command fields.
+- Current MANUAL RC sign convention is `MANUAL_FORWARD_SIGN=-1`,
+  `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
+  `DRIVE_CALIBRATION_ENABLE=0`; this is an RC axis sign fix and does not alter
+  GPS, motor pulse, or physical A/B output mapping.
 - AUTO mode printed `autonomy_dryrun=true`.
 - AUTO mode printed GPS fields, `target_lat`, `target_lon`, and target
   distance/bearing fields.

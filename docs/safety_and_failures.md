@@ -92,10 +92,67 @@ Latest validation:
   m.
 - GPS degradation also blocked output as `GPS_NOT_MOTION_READY` or
   `LATCHED_STOP`.
-- Before any 0.12 retry, reacquire current GPS and compute a fresh target
-  `10..12` m away. Compile the retry with both
-  `SINGLE_WP_CRAWL_BASE_CMD=0.12` and `GROUND_CRAWL_MAX_CMD=0.12`. Do not reuse
-  the too-close target.
+- Historical 0.08/0.12 tests established that `SINGLE_WP_CRAWL_BASE_CMD`
+  controls candidate speed and `GROUND_CRAWL_MAX_CMD` is only the final clamp.
+  Reacquire current GPS and compute a fresh target before any future crawl; do
+  not reuse stale or too-close targets.
+
+First successful guarded forward crawl:
+
+- After the manual/drive mapping fix, MANUAL RC uses
+  `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`, and
+  `old_angle_remap_active=false`.
+- Physical output mapping remains A = throttle, B = turn,
+  `A=(logical_left+logical_right)/2`, `B=(logical_right-logical_left)/2`.
+- With `SINGLE_WP_CRAWL_BASE_CMD=0.220` and `GROUND_CRAWL_MAX_CMD=0.220`, the
+  rover briefly moved forward under guarded `AUTO_RUNNING`.
+- The successful line had `gps_motion_ready=true`, `gps_block_reason=OK`,
+  `target_distance_m≈9.6`, `distance_allowed=true`,
+  `ground_crawl_ready=true`, `ground_crawl_block_reason=OK`,
+  `physical_a_cmd=0.220`, and `physical_b_cmd=0.000`.
+- The latch worked at roughly `ground_crawl_elapsed_ms=510`:
+  `ground_crawl_latched_stop=true` and final outputs returned to zero.
+- This approves only short guarded crawl validation. It does not approve full
+  waypoint following, coverage driving, or ungated AUTO output.
+
+Repeated 1000 ms guarded forward crawl:
+
+- Tested with `GROUND_CRAWL_TEST_MODE=1`, `GROUND_CRAWL_MAX_CMD=0.220`,
+  `GROUND_CRAWL_MAX_AUTO_MS=1000`, `SINGLE_WP_CRAWL_BASE_CMD=0.220`,
+  `AUTO_MOTION_ARMED=1`, `MANUAL_FORWARD_SIGN=-1`, and `MANUAL_TURN_SIGN=1`.
+- AUTO/MANUAL was toggled about `3..4` times.
+- `AUTO_RUNNING` was observed multiple times with `gps_block_reason=OK`,
+  `gps_motion_ready=true`, `distance_allowed=true`, `ground_crawl_ready=true`,
+  and `ground_crawl_block_reason=OK`.
+- Straight output repeated: `left_cmd=0.220`, `right_cmd=0.220`,
+  `final_left_cmd=0.220`, `final_right_cmd=0.220`,
+  `physical_a_cmd=0.220`, `physical_b_cmd=0.000`.
+- The latch stopped output after roughly `1000` ms. One attempt was shorter
+  because the user returned to MANUAL early.
+- `target_distance_m` varied around `16.8..18.0` instead of monotonically
+  decreasing. This is expected because the current crawl is straight only and
+  does not steer toward the waypoint.
+- This proves repeated short guarded autonomous forward actuation, not path
+  planning execution.
+
+## Single-Waypoint Steering Dry-Run Safety
+
+`SINGLE_WP_STEERING_DRYRUN=1` is diagnostic only:
+
+- It does not drive motors by itself.
+- It does not relax `AUTO_MOTION_ARMED` or `GROUND_CRAWL_TEST_MODE`.
+- It must not use `target_bearing_deg` alone as a steering command.
+- GPS position gives target bearing, but not rover heading.
+- Heading is considered ready only when course-over-ground can be estimated from
+  at least `2.0` m of GPS displacement.
+- If movement is too small, USBDBG must show `heading_ready=false` and
+  `steering_block_reason=NO_HEADING`.
+
+Expected diagnostic outputs include `estimated_course_deg`,
+`bearing_error_deg`, `desired_forward_cmd`, `desired_turn_cmd`,
+`desired_logical_left_cmd`, `desired_logical_right_cmd`,
+`desired_physical_a_cmd`, and `desired_physical_b_cmd`. These are desired
+values for review, not motor execution approval.
 
 ## GPS-Independent Motor Pulse Calibration
 
@@ -231,6 +288,17 @@ direction code:
 4. Only then judge physical wheel motion.
 5. If command values are correct but a wheel spins backward, fix motor/ESC
    direction separately from RC axis mapping.
+6. Current confirmed RC sign convention is `MANUAL_FORWARD_SIGN=-1`,
+   `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
+   `DRIVE_CALIBRATION_ENABLE=0`. This is an RC axis sign convention, not a
+   physical A/B mapping change.
+
+Manual validation checklist:
+
+- stick up = forward
+- stick down = backward
+- stick right = right turn
+- stick left = left turn
 
 ## Field Test Minimum Checklist
 

@@ -2115,7 +2115,7 @@ These are recorded to prevent repeating the same fixes:
 | direct CH1/CH2 map | straight up/down did not align with forward/reverse | rejected |
 | direct CH2 inversion | upper-left became forward and lower-right became reverse | rejected |
 | old cardinal / angle remap | became harmful after physical A/B output mapping was fixed; upper-right acted like forward | rejected |
-| current arcade-to-logical-wheel mixer | throttle -> forward, steering -> turn, then `left=forward+turn`, `right=forward-turn` | implemented; needs wheel-off-ground manual direction validation |
+| current arcade mixer with `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1` | throttle -> forward, steering -> turn, then `left=forward+turn`, `right=forward-turn` | active for current rover/controller |
 
 ## 2026-05-30: MANUAL RC Arcade Mixer Fix
 
@@ -2158,8 +2158,204 @@ Validation required:
   - stick left -> left turn
   - upper-right -> forward-right arc
   - upper-left -> forward-left arc
-- If steering is reversed, test `MANUAL_TURN_SIGN=-1`; do not reintroduce the
+- Later validation finalized the sign convention as
+  `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`; do not reintroduce the
   diagonal remap.
+
+## 2026-05-30: MANUAL RC Sign Convention Finalized
+
+Observed:
+
+- After fixing the logical wheel to physical A/B mapping, motor pulse and AUTO
+  logical wheel mapping passed.
+- MANUAL RC left/right steering is correct.
+- MANUAL forward/reverse was inverted with `MANUAL_FORWARD_SIGN=1`:
+  - pulling the stick drove forward
+  - pushing the stick drove backward
+- Testing with `MANUAL_FORWARD_SIGN=-1` and `MANUAL_TURN_SIGN=1` produced the
+  correct manual sign convention for this hardware/controller setup.
+
+Final current baseline:
+
+- `MANUAL_FORWARD_SIGN=-1`
+- `MANUAL_TURN_SIGN=1`
+- `MOTOR_OUTPUT_SWAP_LR=0`
+- `DRIVE_CALIBRATION_ENABLE=0`
+
+Interpretation:
+
+- This is only an RC throttle-axis sign fix.
+- It is not a wheel mapping issue and not a physical A/B output issue.
+- Preserve the probe-confirmed physical output model:
+  - A = throttle
+  - B = turn
+  - `A=(L+R)/2`
+  - `B=(R-L)/2`
+
+Manual validation checklist:
+
+- stick up = forward
+- stick down = backward
+- stick right = right turn
+- stick left = left turn
+
+## 2026-05-30: First Successful Guarded AUTO Crawl
+
+Observed:
+
+- Manual RC drive now works with:
+  - `MANUAL_FORWARD_SIGN=-1`
+  - `MANUAL_TURN_SIGN=1`
+  - `old_angle_remap_active=false`
+- Physical output mapping is:
+  - physical A = throttle
+  - physical B = turn
+  - `A=(logical_left+logical_right)/2`
+  - `B=(logical_right-logical_left)/2`
+- Guarded AUTO crawl succeeded physically: the rover moved briefly forward.
+
+Successful `AUTO_RUNNING` log:
+
+- `gps_motion_ready=true`
+- `gps_block_reason=OK`
+- `gps_sats≈9`
+- `gps_hdop≈1.0..1.2`
+- `target_distance_m≈9.6`
+- `distance_allowed=true`
+- `ground_crawl_test_mode=true`
+- `ground_crawl_max_cmd=0.220`
+- `single_wp_crawl_base_cmd=0.220`
+- `ground_crawl_ready=true`
+- `ground_crawl_block_reason=OK`
+- `left_cmd=0.220`
+- `right_cmd=0.220`
+- `final_left_cmd=0.220`
+- `final_right_cmd=0.220`
+- `physical_a_cmd=0.220`
+- `physical_b_cmd=0.000`
+
+Safety latch:
+
+- At about `ground_crawl_elapsed_ms=510`, the duration latch asserted:
+  `ground_crawl_latched_stop=true`.
+- Final outputs returned to zero.
+
+Interpretation:
+
+- This confirms short guarded forward motion.
+- This is not full waypoint following.
+- This is not station-side path execution or coverage/lawnmower driving.
+
+Next stage:
+
+1. Repeat or extend guarded crawl to `1000` ms.
+2. Analyze GPS delta and target-distance change after the crawl.
+3. Add single-waypoint steering dry-run.
+4. Then proceed back to station-side path planning preview.
+
+## 2026-05-30: Repeated 1000 ms Guarded AUTO Crawl
+
+Setup:
+
+- Manual RC drive and physical A/B mapping were already fixed.
+- Build flags:
+  - `GROUND_CRAWL_TEST_MODE=1`
+  - `GROUND_CRAWL_MAX_CMD=0.220`
+  - `GROUND_CRAWL_MAX_AUTO_MS=1000`
+  - `SINGLE_WP_CRAWL_BASE_CMD=0.220`
+  - `AUTO_MOTION_ARMED=1`
+  - `MANUAL_FORWARD_SIGN=-1`
+  - `MANUAL_TURN_SIGN=1`
+
+Observed:
+
+- The user toggled AUTO/MANUAL about `3..4` times.
+- `AUTO_RUNNING` was observed multiple times.
+- One AUTO attempt was shorter because the user returned to MANUAL early.
+
+Valid `AUTO_RUNNING` fields:
+
+- `gps_block_reason=OK`
+- `gps_motion_ready=true`
+- `distance_allowed=true`
+- `ground_crawl_ready=true`
+- `ground_crawl_block_reason=OK`
+- `left_cmd=0.220`
+- `right_cmd=0.220`
+- `final_left_cmd=0.220`
+- `final_right_cmd=0.220`
+- `physical_a_cmd=0.220`
+- `physical_b_cmd=0.000`
+
+GPS quality:
+
+- `gps_sats≈8..10`
+- `gps_hdop≈1.0..1.65`
+- `last_gga_fix_quality=2`
+
+Safety latch:
+
+- After roughly `1000` ms, `ground_crawl_latched_stop=true`.
+- Final outputs returned to zero.
+
+Target-distance behavior:
+
+- `target_distance_m` did not monotonically decrease.
+- It varied around `16.8..18.0` m.
+- This is expected because the current guarded crawl only drives straight with
+  `physical_b_cmd=0.000`.
+- There is no steering/course correction in this mode yet.
+
+Interpretation:
+
+- This proves repeated short guarded autonomous forward actuation.
+- It does not prove waypoint following.
+- It does not prove station-side path execution or coverage driving.
+
+Next stage:
+
+1. Station-side path planning preview only, no motor execution.
+2. Single-waypoint steering dry-run.
+3. Heading/course estimation before physical waypoint following.
+
+## 2026-05-30: Single-Waypoint Steering Dry-Run Diagnostics Added
+
+Reason:
+
+- Repeated 1000 ms guarded crawl proved straight guarded actuation.
+- The crawl used `physical_a_cmd=0.220` and `physical_b_cmd=0.000`.
+- `target_distance_m` did not monotonically decrease because the rover was not
+  necessarily facing the target.
+- GPS position can provide bearing to target, but not rover heading by itself.
+
+Firmware addition:
+
+- Added compile-time flag `SINGLE_WP_STEERING_DRYRUN`, default `0`.
+- When enabled, the single-waypoint experiment prints:
+  - `current_gps_lat`, `current_gps_lon`
+  - `steering_target_lat`, `steering_target_lon`
+  - `target_distance_m`, `target_bearing_deg`
+  - `heading_ready`, `heading_source`
+  - `estimated_course_deg`, `bearing_error_deg`
+  - `desired_forward_cmd`, `desired_turn_cmd`
+  - `desired_logical_left_cmd`, `desired_logical_right_cmd`
+  - `desired_physical_a_cmd`, `desired_physical_b_cmd`
+  - `steering_block_reason`
+
+Heading/course policy:
+
+- Course-over-ground is estimated only after at least `2.0` m of GPS
+  displacement.
+- If movement is too small, `heading_ready=false` and
+  `steering_block_reason=NO_HEADING`.
+- `target_bearing_deg` alone must not be used as a motor steering command.
+
+Safety:
+
+- This diagnostic does not drive motors by itself.
+- It does not change `GROUND_CRAWL_TEST_MODE` or `AUTO_MOTION_ARMED` behavior.
+- Physical waypoint following remains blocked until heading/course and steering
+  behavior are validated.
 
 ## 2026-05-03: Historical Verified Status From Existing Docs
 

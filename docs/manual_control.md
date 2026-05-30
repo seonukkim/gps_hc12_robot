@@ -41,7 +41,7 @@ After flashing the expected integrated firmware, the OpenRB USB serial output
 should include:
 
 ```text
-Firmware: openrb_robot_controller station-manual rc-arcade-manual 2026-05-30
+Firmware: openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05-30
 ```
 
 If USB serial prints older lines such as `STAT,...,MANUAL_CENTER_STOP,...`, the
@@ -157,9 +157,15 @@ logical_left_cmd / logical_right_cmd
 -> Servo PWM writes
 ```
 
-`MANUAL_FORWARD_SIGN` and `MANUAL_TURN_SIGN` are compile-time signs. Defaults
-are both `1`; if steering is reversed, test only `MANUAL_TURN_SIGN=-1` instead
-of changing the mixer structure.
+The working sign convention for the current rover/controller is:
+
+- `MANUAL_FORWARD_SIGN=-1`
+- `MANUAL_TURN_SIGN=1`
+- `MOTOR_OUTPUT_SWAP_LR=0`
+- `DRIVE_CALIBRATION_ENABLE=0` for the current uncalibrated baseline
+
+This is an RC axis sign fix only. It does not change the wheel mapping or the
+probe-confirmed physical A/B output model.
 
 Target behavior:
 
@@ -306,6 +312,16 @@ direction can also invert the final physical wheel direction.
    wrong way, fix motor/ESC side direction separately instead of changing the RC
    axis map.
 
+Recommended current manual RC test build:
+
+```bash
+arduino-cli compile \
+  --fqbn OpenRB-150:samd:OpenRB-150 \
+  --build-path /private/tmp/openrb-manual-final-sign \
+  --build-property 'compiler.cpp.extra_flags=-DMANUAL_FORWARD_SIGN=-1 -DMANUAL_TURN_SIGN=1 -DMOTOR_OUTPUT_SWAP_LR=0 -DDRIVE_CALIBRATION_ENABLE=0' \
+  firmware/openrb_robot_controller
+```
+
 The current correction was chosen from the observed failure sequence:
 
 | Attempt | Observed Problem | Result |
@@ -314,7 +330,8 @@ The current correction was chosen from the observed failure sequence:
 | direct CH1/CH2 map | straight up/down did not become forward/reverse | rejected |
 | direct CH2 inversion | upper-left became forward and lower-right became reverse | rejected |
 | old cardinal / angle remap | became harmful after physical A/B output mapping was fixed; upper-right became forward | rejected |
-| current arcade-to-logical-wheel mixer | throttle is forward, steering is turn, then `left=forward+turn`, `right=forward-turn` | active; needs wheel-off-ground validation |
+| arcade mixer with `MANUAL_FORWARD_SIGN=1`, `MANUAL_TURN_SIGN=1` | steering correct, but forward/reverse inverted | rejected for current controller |
+| current arcade mixer with `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1` | stick up forward, down backward, right right-turn, left left-turn | active |
 
 ## Station Keyboard Manual Tool
 
@@ -401,7 +418,7 @@ Important defaults:
 
 1. Keep rover wheels off ground.
 2. Flash `firmware/openrb_robot_controller/openrb_robot_controller.ino`.
-3. Confirm firmware marker is `rc-arcade-manual`.
+3. Confirm firmware marker is `rc-arcade-manual-fwdneg`.
 4. Confirm the station/controller is powered on and linked.
 5. Confirm MANUAL shows `mode_us≈1000` and `control_source=RC_MANUAL`.
 6. Confirm AUTO shows `mode_us≈2000`, `mode=AUTO_READY`, and

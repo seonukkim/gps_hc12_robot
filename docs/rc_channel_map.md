@@ -25,8 +25,10 @@ The station panel can physically look like `CH7`, but the firmware uses the rece
 - `THROTTLE_CENTER_US = 1500`
 - `RC_DEADBAND_US = 80`
 - `RC_AUTO_SWITCH_ON_US = 1600`
-- `MANUAL_FORWARD_SIGN = 1` by default
-- `MANUAL_TURN_SIGN = 1` by default
+- `MANUAL_FORWARD_SIGN = -1` for the current rover/controller
+- `MANUAL_TURN_SIGN = 1` for the current rover/controller
+- `MOTOR_OUTPUT_SWAP_LR = 0`
+- `DRIVE_CALIBRATION_ENABLE = 0` for the current uncalibrated baseline
 
 RC manual mode no longer uses the old 45-degree remap in the final drive path.
 The raw CH1/CH2 stick axes are interpreted as steering and throttle, then mixed
@@ -52,6 +54,9 @@ Target behavior:
 - physical stick straight up -> forward
 - physical stick straight down -> reverse
 - physical stick straight left/right -> steering without forward/reverse bias
+
+This is an RC axis sign convention. It does not change the physical output
+truth table: A is throttle, B is turn, `A=(L+R)/2`, and `B=(R-L)/2`.
 
 ## Mode Interpretation
 

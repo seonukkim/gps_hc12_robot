@@ -81,7 +81,7 @@ replace a rover-mounted position source. Real outdoor navigation requires the
 GPS antenna to be rigidly mounted on the rover, or its offset from the rover
 body frame must be fixed, measured, and modeled.
 
-## Next Required Validation Before Motion
+## Next Required Validation
 
 - Confirm the station/controller is powered on and linked; controller-off can
   make RC appear stuck or failsafe-like.
@@ -89,10 +89,10 @@ body frame must be fixed, measured, and modeled.
   `mode_us≈1000` and `control_source=RC_MANUAL`; AUTO should show
   `mode_us≈2000`, `mode=AUTO_READY`, and `control_source=STOP`.
 - Recompute the single-waypoint target from the current GPS position before
-  every guarded crawl attempt. The latest 0.08 run ended with the target too
-  close (`target_distance_m≈3.9..4.4`), so those coordinates must not be reused.
-- For the next guarded crawl attempt, use a fresh target roughly `10..12` m away
-  so it remains inside the crawl window (`5..20` m).
+  every guarded crawl attempt; do not reuse old target coordinates after moving
+  the rover.
+- For guarded crawl tests, use a fresh target inside the crawl window
+  (`5..20` m), typically around `10..12` m away.
 - The single-waypoint timeout now starts on AUTO entry, so MANUAL GPS waiting
   should not consume the AUTO candidate timeout.
 - Confirm `gps_age_ms`, `gps_hdop`, and `gps_sats`, not only `gps_fix=true`,
@@ -104,12 +104,40 @@ body frame must be fixed, measured, and modeled.
   `final_left_cmd=0.080` / `final_right_cmd=0.080`, latched stop after the
   duration limit, and blocked too-close target distance and degraded GPS. This
   validates the safety harness, not full autonomous driving.
-- If 0.08 showed no visible physical movement, retry only through the same
-  guarded crawl harness with both `SINGLE_WP_CRAWL_BASE_CMD=0.12` and
-  `GROUND_CRAWL_MAX_CMD=0.12`, latch protection, and a fresh target. The first
-  value raises the candidate command; the second remains the final safety clamp.
-  Do not raise ungated AUTO output.
-- Do not approve full floor waypoint driving yet.
+- Historical 0.08/0.12 crawl tests established the safe clamp/latch workflow:
+  candidate speed is set by `SINGLE_WP_CRAWL_BASE_CMD`, final clamp by
+  `GROUND_CRAWL_MAX_CMD`, and ungated AUTO output must not be raised.
+- First successful guarded AUTO crawl is now recorded after the manual/drive
+  mapping fix. With `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`,
+  `old_angle_remap_active=false`, `SINGLE_WP_CRAWL_BASE_CMD=0.220`, and
+  `GROUND_CRAWL_MAX_CMD=0.220`, the rover briefly moved forward under guarded
+  AUTO. USBDBG showed `gps_motion_ready=true`, `gps_block_reason=OK`,
+  `target_distance_m≈9.6`, `ground_crawl_ready=true`,
+  `ground_crawl_block_reason=OK`, `final_left_cmd=0.220`,
+  `final_right_cmd=0.220`, `physical_a_cmd=0.220`, and
+  `physical_b_cmd=0.000`.
+- Repeated 1000 ms guarded AUTO crawl is now recorded. The user toggled
+  AUTO/MANUAL about `3..4` times; `AUTO_RUNNING` was observed multiple times
+  with `GROUND_CRAWL_TEST_MODE=1`, `GROUND_CRAWL_MAX_CMD=0.220`,
+  `GROUND_CRAWL_MAX_AUTO_MS=1000`, `SINGLE_WP_CRAWL_BASE_CMD=0.220`,
+  `AUTO_MOTION_ARMED=1`, `MANUAL_FORWARD_SIGN=-1`, and
+  `MANUAL_TURN_SIGN=1`. Each valid AUTO window remained straight forward
+  (`physical_a_cmd=0.220`, `physical_b_cmd=0.000`) and latched back to zero
+  after roughly `1000` ms. One AUTO attempt was shorter because the user
+  returned to MANUAL early.
+- `target_distance_m` varied around `16.8..18.0` instead of monotonically
+  decreasing. This is expected for the current straight-crawl test because no
+  steering/course correction is active yet.
+- Next stage: station-side path planning preview only with no motor execution,
+  then single-waypoint steering dry-run, then heading/course estimation before
+  any physical waypoint following. Do not approve full floor waypoint driving or
+  coverage driving yet.
+- `SINGLE_WP_STEERING_DRYRUN=1` adds steering diagnostics only. It estimates
+  course-over-ground from GPS displacement after at least `2.0` m of movement,
+  then prints desired forward/turn, logical wheel, and physical A/B commands.
+  If the rover has not moved enough, USBDBG reports `heading_ready=false` and
+  `steering_block_reason=NO_HEADING`. Do not use target bearing alone as a
+  motor steering command.
 
 ## Legacy HC-12 References
 
@@ -597,18 +625,64 @@ window reached `AUTO_RUNNING`, `ground_crawl_ready=true`,
 clamped to final commands `0.080` / `0.080`, and the duration latch later forced
 zero output. The harness also blocked a too-close `3.9..4.4` m target as
 `DISTANCE_OUT_OF_RANGE` and blocked degraded GPS as `GPS_NOT_MOTION_READY`.
-Before another crawl, reacquire current GPS and compute a fresh `10..12` m
-target. If 0.08 did not visibly move, retry with
-`SINGLE_WP_CRAWL_BASE_CMD=0.12` and `GROUND_CRAWL_MAX_CMD=0.12` under the same
-latch protection. Raising only `GROUND_CRAWL_MAX_CMD` changes the cap, not the
-`candidate_left_cmd` / `candidate_right_cmd` generated by the waypoint
-candidate logic. This is still not full autonomous driving.
+For any future guarded crawl, reacquire current GPS and compute a fresh target.
+The historical 0.08/0.12 tests established that raising only
+`GROUND_CRAWL_MAX_CMD` changes the cap, not the `candidate_left_cmd` /
+`candidate_right_cmd` generated by the waypoint candidate logic. This remains
+not full autonomous driving.
 
 The latest `GROUND_CRAWL_MAX_CMD=0.120` cap-only run confirmed that distinction:
 the guarded crawl system reached `AUTO_RUNNING`, but the candidate command
 remained `0.100`, so final commands also remained `0.100`. Use
 `SINGLE_WP_CRAWL_BASE_CMD` to change candidate speed and keep
 `GROUND_CRAWL_MAX_CMD` as the final safety clamp.
+
+First successful guarded AUTO crawl after the manual/drive mapping fix:
+`MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`,
+`old_angle_remap_active=false`, physical A/B mapping
+`A=(logical_left+logical_right)/2`, `B=(logical_right-logical_left)/2`,
+`SINGLE_WP_CRAWL_BASE_CMD=0.220`, and `GROUND_CRAWL_MAX_CMD=0.220`.
+During `AUTO_RUNNING`, GPS and crawl gates passed (`gps_motion_ready=true`,
+`gps_block_reason=OK`, `gps_sats≈9`, `gps_hdop≈1.0..1.2`,
+`target_distance_m≈9.6`, `distance_allowed=true`, `ground_crawl_ready=true`,
+`ground_crawl_block_reason=OK`). The command was straight throttle:
+`left_cmd=0.220`, `right_cmd=0.220`, `final_left_cmd=0.220`,
+`final_right_cmd=0.220`, `physical_a_cmd=0.220`, `physical_b_cmd=0.000`, and
+the rover briefly moved forward. The duration latch then worked
+(`ground_crawl_elapsed_ms≈510`, `ground_crawl_latched_stop=true`) and final
+outputs returned to zero. This confirms short guarded forward motion only, not
+full waypoint following or coverage driving.
+
+Repeated 1000 ms guarded AUTO crawl result: the same fixed manual/drive mapping
+was used with `GROUND_CRAWL_TEST_MODE=1`, `GROUND_CRAWL_MAX_CMD=0.220`,
+`GROUND_CRAWL_MAX_AUTO_MS=1000`, `SINGLE_WP_CRAWL_BASE_CMD=0.220`,
+`AUTO_MOTION_ARMED=1`, `MANUAL_FORWARD_SIGN=-1`, and `MANUAL_TURN_SIGN=1`.
+The user toggled AUTO/MANUAL about `3..4` times and `AUTO_RUNNING` was observed
+multiple times. In valid AUTO windows, GPS and crawl gates passed:
+`gps_block_reason=OK`, `gps_motion_ready=true`, `distance_allowed=true`,
+`ground_crawl_ready=true`, `ground_crawl_block_reason=OK`, `gps_sats≈8..10`,
+`gps_hdop≈1.0..1.65`, and `last_gga_fix_quality=2`. Straight output was
+repeated: `left_cmd=0.220`, `right_cmd=0.220`, `final_left_cmd=0.220`,
+`final_right_cmd=0.220`, `physical_a_cmd=0.220`, `physical_b_cmd=0.000`. The
+latch stopped output after roughly `1000` ms; one attempt ended earlier because
+the user returned to MANUAL. `target_distance_m` varied around `16.8..18.0`
+rather than decreasing monotonically, which is expected because this crawl only
+drives straight and has no steering correction yet. This proves repeated short
+guarded autonomous forward actuation, not path planning execution.
+
+Single-waypoint steering dry-run diagnostics are available but do not enable
+motion by themselves:
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-steering-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_STEERING_DRYRUN=1 -DSINGLE_WP_TARGET_LAT=35.570932 -DSINGLE_WP_TARGET_LON=129.187338' firmware/openrb_robot_controller
+```
+
+This build prints `heading_ready`, `heading_source`, `estimated_course_deg`,
+`bearing_error_deg`, `desired_forward_cmd`, `desired_turn_cmd`,
+`desired_logical_left_cmd`, `desired_logical_right_cmd`,
+`desired_physical_a_cmd`, `desired_physical_b_cmd`, and
+`steering_block_reason`. GPS-only position gives bearing to target, but not
+rover heading; steering diagnostics require course-over-ground from movement.
 
 GPS-independent motor pulse calibration is now available with
 `MOTOR_PULSE_TEST_MODE=1` for drivetrain deadband checks when GPS is
@@ -650,8 +724,20 @@ pulse. The manual path computes `manual_forward_cmd` from throttle,
 `manual_turn_cmd` from steering, then mixes `left=forward+turn` and
 `right=forward-turn` before the common physical A/B conversion. The old
 upper-right-is-forward symptom was a manual mixing bug, not GPS/path planning.
-USBDBG should show `old_angle_remap_active=false`; if steering is reversed,
-test `MANUAL_TURN_SIGN=-1` rather than reintroducing the diagonal remap.
+The working sign convention for this rover/controller is
+`MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
+`DRIVE_CALIBRATION_ENABLE=0`. This is only an RC axis sign fix; preserve the
+physical A/B mapping `A=(L+R)/2`, `B=(R-L)/2`. USBDBG should show
+`old_angle_remap_active=false`.
+
+Recommended manual RC validation build:
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && mkdir -p outputs/logs && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-manual-final-sign --build-property 'compiler.cpp.extra_flags=-DMANUAL_FORWARD_SIGN=-1 -DMANUAL_TURN_SIGN=1 -DMOTOR_OUTPUT_SWAP_LR=0 -DDRIVE_CALIBRATION_ENABLE=0' firmware/openrb_robot_controller && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-manual-final-sign firmware/openrb_robot_controller && sleep 2 && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli monitor -p "$PORT" --config baudrate=115200 | tee outputs/logs/manual_final_sign_$(date +%Y%m%d_%H%M%S).log
+```
+
+Manual validation checklist: stick up = forward, stick down = backward, stick
+right = right turn, stick left = left turn.
 
 Do not use motor pulse logs to validate GPS. In `MOTOR_PULSE_TEST_MODE=1`, the
 main controller intentionally skips GPS initialization and GPS byte processing,
@@ -796,6 +882,32 @@ uv run python tools/station_mock_mission.py \
 
 ### Path Planning Preview Dry-run
 
+Generate a start/goal station-side path preview from the latest field-test area.
+This writes only local preview artifacts and does **not** open serial, send
+HC-12 frames, generate rover motor commands, or upload firmware:
+
+```bash
+uv run python tools/path_planning_preview.py \
+  --start-lat 35.571083 \
+  --start-lon 129.187290 \
+  --goal-lat 35.570932 \
+  --goal-lon 129.187338 \
+  --spacing-m 2.0 \
+  --out-dir outputs/path_preview/latest_field_test
+```
+
+Outputs:
+
+```text
+outputs/path_preview/latest_field_test/waypoints.csv
+outputs/path_preview/latest_field_test/summary.md
+outputs/path_preview/latest_field_test/preview.png
+```
+
+This is preview-only, not autonomous execution. Physical path following still
+requires single-waypoint steering dry-run plus heading/course estimation before
+any rover follows these waypoints.
+
 Generate a station-side coverage mission dry-run from GPS corner points. Point
 A is the start corner, Point B is the opposite/end corner, and
 `lane_spacing_m` is the sweep interval. The default `corner-rectangle` mode
@@ -830,9 +942,9 @@ ls -lh outputs/missions/codex_corner_rectangle_smoke/preview.png
 
 See [docs/station_path_planning.md](docs/station_path_planning.md). Path
 generation remains dry-run only and must not be sent to the rover yet. The
-tested mission output is not yet executed by the rover. The unified onboard
-RC + GPS dry-run is complete, so the next autonomy step is single-waypoint
-controlled motion preparation, not full coverage/lawnmower driving.
+tested mission output is not yet executed by the rover. Repeated guarded
+forward crawl is complete, but steering and heading/course estimation are not
+validated, so path planning remains preview-only.
 
 Edge/remainder policy: if the rectangle extent is not exactly divisible by
 `lane_spacing_m`, a small remaining margin at the edge is acceptable. Do not add

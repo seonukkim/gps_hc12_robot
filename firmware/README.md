@@ -16,7 +16,7 @@ firmware/openrb_robot_controller/openrb_robot_controller.ino
 It prints this USB startup marker when the expected firmware is running:
 
 ```text
-Firmware: openrb_robot_controller station-manual rc-arcade-manual 2026-05-30
+Firmware: openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05-30
 ```
 
 ## Firmware Modes
@@ -44,6 +44,28 @@ Default build compile/upload/monitor:
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-default firmware/openrb_robot_controller
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
 ```
+
+Recommended current MANUAL RC validation build:
+
+- `MANUAL_FORWARD_SIGN=-1`
+- `MANUAL_TURN_SIGN=1`
+- `MOTOR_OUTPUT_SWAP_LR=0`
+- `DRIVE_CALIBRATION_ENABLE=0`
+
+This fixes only the RC throttle-axis sign for the current controller. It does
+not change motor pulse behavior, GPS behavior, or the physical A/B mapping
+(`A=(L+R)/2`, `B=(R-L)/2`).
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && mkdir -p outputs/logs && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-manual-final-sign --build-property 'compiler.cpp.extra_flags=-DMANUAL_FORWARD_SIGN=-1 -DMANUAL_TURN_SIGN=1 -DMOTOR_OUTPUT_SWAP_LR=0 -DDRIVE_CALIBRATION_ENABLE=0' firmware/openrb_robot_controller && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-manual-final-sign firmware/openrb_robot_controller && sleep 2 && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli monitor -p "$PORT" --config baudrate=115200 | tee outputs/logs/manual_final_sign_$(date +%Y%m%d_%H%M%S).log
+```
+
+Manual validation checklist:
+
+- stick up = forward
+- stick down = backward
+- stick right = right turn
+- stick left = left turn
 
 Fixed-wiring GPS Serial2 diagnostic compile/upload/monitor:
 
@@ -203,12 +225,11 @@ Latest 0.08 guarded crawl result:
 - Intermittent GPS degradation also blocked as `GPS_NOT_MOTION_READY` or
   `LATCHED_STOP`.
 
-Before the next guarded crawl run, reacquire current GPS and compute a fresh
-target `10..12` m away. If `0.08` produced no visible movement, retry only by
-setting both `-DSINGLE_WP_CRAWL_BASE_CMD=0.12` and
-`-DGROUND_CRAWL_MAX_CMD=0.12` while keeping the latch and all safety gates
-enabled. Raising only `GROUND_CRAWL_MAX_CMD` changes the cap, not the candidate
-command.
+For any future guarded crawl run, reacquire current GPS and compute a fresh
+target inside the crawl window. The historical 0.08/0.12 tests established that
+`SINGLE_WP_CRAWL_BASE_CMD` controls candidate speed while
+`GROUND_CRAWL_MAX_CMD` is only the final clamp. Keep the latch and all safety
+gates enabled.
 
 Latest `GROUND_CRAWL_MAX_CMD=0.120` cap-only result:
 
@@ -220,6 +241,90 @@ Latest `GROUND_CRAWL_MAX_CMD=0.120` cap-only result:
   alone does not raise the candidate command.
 - The next 0.12 attempt should compile with both
   `-DSINGLE_WP_CRAWL_BASE_CMD=0.12` and `-DGROUND_CRAWL_MAX_CMD=0.12`.
+
+First successful guarded AUTO crawl after the manual/drive mapping fix:
+
+- Manual RC baseline was corrected with `MANUAL_FORWARD_SIGN=-1`,
+  `MANUAL_TURN_SIGN=1`, and `old_angle_remap_active=false`.
+- Physical output mapping remains A = throttle, B = turn:
+  `A=(logical_left+logical_right)/2`, `B=(logical_right-logical_left)/2`.
+- Guarded crawl build used `GROUND_CRAWL_TEST_MODE=1`,
+  `AUTO_MOTION_ARMED=1`, `SINGLE_WP_CRAWL_BASE_CMD=0.220`, and
+  `GROUND_CRAWL_MAX_CMD=0.220`.
+- A successful `AUTO_RUNNING` window showed `gps_motion_ready=true`,
+  `gps_block_reason=OK`, `gps_sats≈9`, `gps_hdop≈1.0..1.2`,
+  `target_distance_m≈9.6`, `distance_allowed=true`,
+  `ground_crawl_ready=true`, and `ground_crawl_block_reason=OK`.
+- Straight forward output was confirmed in USBDBG:
+  `left_cmd=0.220`, `right_cmd=0.220`, `final_left_cmd=0.220`,
+  `final_right_cmd=0.220`, `physical_a_cmd=0.220`, `physical_b_cmd=0.000`.
+- The rover moved briefly forward.
+- The safety latch worked: at roughly `ground_crawl_elapsed_ms=510`,
+  `ground_crawl_latched_stop=true` and final outputs returned to zero.
+
+This is the first successful short guarded forward crawl. It is not full
+waypoint following and not coverage driving.
+
+Repeated 1000 ms guarded AUTO crawl result:
+
+- Build flags included `GROUND_CRAWL_TEST_MODE=1`,
+  `GROUND_CRAWL_MAX_CMD=0.220`, `GROUND_CRAWL_MAX_AUTO_MS=1000`,
+  `SINGLE_WP_CRAWL_BASE_CMD=0.220`, `AUTO_MOTION_ARMED=1`,
+  `MANUAL_FORWARD_SIGN=-1`, and `MANUAL_TURN_SIGN=1`.
+- The user toggled AUTO/MANUAL about `3..4` times.
+- `AUTO_RUNNING` was observed multiple times.
+- In valid AUTO windows, USBDBG showed `gps_block_reason=OK`,
+  `gps_motion_ready=true`, `distance_allowed=true`,
+  `ground_crawl_ready=true`, and `ground_crawl_block_reason=OK`.
+- GPS quality was acceptable: `gps_sats≈8..10`, `gps_hdop≈1.0..1.65`, and
+  `last_gga_fix_quality=2`.
+- Straight output repeated as expected:
+  `left_cmd=0.220`, `right_cmd=0.220`, `final_left_cmd=0.220`,
+  `final_right_cmd=0.220`, `physical_a_cmd=0.220`, `physical_b_cmd=0.000`.
+- The latch stopped output after roughly `1000` ms:
+  `ground_crawl_latched_stop=true` and final outputs returned to zero.
+- One AUTO attempt was shorter because the user returned to MANUAL early.
+- `target_distance_m` varied around `16.8..18.0` instead of monotonically
+  decreasing. This is expected because this mode only drives straight with
+  `physical_b_cmd=0.000`; it does not steer toward the target yet.
+
+This proves repeated short guarded autonomous forward actuation. It is still not
+path planning execution. The next stage is station-side path planning preview
+only with no motor execution, then single-waypoint steering dry-run, then
+heading/course estimation before any physical waypoint following.
+
+### Single-Waypoint Steering Dry-Run
+
+`SINGLE_WP_STEERING_DRYRUN=1` adds diagnostics only. It does not drive motors by
+itself and does not change `GROUND_CRAWL_TEST_MODE` or `AUTO_MOTION_ARMED`
+safety behavior.
+
+Purpose:
+
+- GPS position provides bearing to target, but not rover heading by itself.
+- The firmware estimates course-over-ground only after enough GPS displacement.
+- If displacement is below `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M=2.0`,
+  USBDBG reports `heading_ready=false` and `steering_block_reason=NO_HEADING`.
+- Do not use `target_bearing_deg` alone as a motor steering command.
+
+Compile a no-motion steering diagnostic build:
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-steering-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_STEERING_DRYRUN=1 -DSINGLE_WP_TARGET_LAT=35.570932 -DSINGLE_WP_TARGET_LON=129.187338' firmware/openrb_robot_controller
+```
+
+Expected USBDBG fields:
+
+- `single_wp_steering_dryrun`
+- `current_gps_lat`, `current_gps_lon`
+- `steering_target_lat`, `steering_target_lon`
+- `target_distance_m`, `target_bearing_deg`
+- `heading_ready`, `heading_source`
+- `estimated_course_deg`, `bearing_error_deg`
+- `desired_forward_cmd`, `desired_turn_cmd`
+- `desired_logical_left_cmd`, `desired_logical_right_cmd`
+- `desired_physical_a_cmd`, `desired_physical_b_cmd`
+- `steering_block_reason`
 
 ### Motor pulse calibration build
 

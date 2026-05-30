@@ -71,7 +71,7 @@
 #endif
 
 #ifndef MANUAL_FORWARD_SIGN
-#define MANUAL_FORWARD_SIGN 1
+#define MANUAL_FORWARD_SIGN -1
 #endif
 
 #ifndef MANUAL_TURN_SIGN
@@ -94,6 +94,10 @@
 #define SINGLE_WP_CRAWL_BASE_CMD 0.100
 #endif
 
+#ifndef SINGLE_WP_STEERING_DRYRUN
+#define SINGLE_WP_STEERING_DRYRUN 0
+#endif
+
 #define STRINGIFY_VALUE_IMPL(value) #value
 #define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
 
@@ -109,7 +113,7 @@
 #define GPS_SERIAL Serial3
 #endif
 
-constexpr const char *FIRMWARE_ID = "openrb_robot_controller station-manual rc-arcade-manual 2026-05-30";
+constexpr const char *FIRMWARE_ID = "openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05-30";
 constexpr uint8_t PPM_PIN = 6;
 constexpr uint8_t ESC_LEFT_PIN = 4;
 constexpr uint8_t ESC_RIGHT_PIN = 5;
@@ -171,12 +175,14 @@ constexpr const char *SINGLE_WAYPOINT_TARGET_LON_MACRO = "NA";
 #endif
 constexpr bool SINGLE_WAYPOINT_AUTO_MOTION_ARMED = AUTO_MOTION_ARMED != 0;
 constexpr float SINGLE_WAYPOINT_CRAWL_BASE_CMD = SINGLE_WP_CRAWL_BASE_CMD;
+constexpr bool SINGLE_WAYPOINT_STEERING_DRYRUN_ENABLED = SINGLE_WP_STEERING_DRYRUN != 0;
 constexpr double SINGLE_WAYPOINT_ARRIVAL_RADIUS_M = 2.5;
 constexpr double SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M = 30.0;
 constexpr double SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M = 1000.0;
 constexpr uint32_t SINGLE_WAYPOINT_GPS_STALE_MS = GPS_DRYRUN_STALE_MS;
 constexpr double SINGLE_WAYPOINT_MAX_HDOP = GPS_DRYRUN_MAX_HDOP;
 constexpr uint32_t SINGLE_WAYPOINT_AUTO_TIMEOUT_MS = 15000;
+constexpr double SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M = 2.0;
 
 constexpr bool     GROUND_CRAWL_ENABLED = GROUND_CRAWL_TEST_MODE != 0;
 constexpr float    GROUND_CRAWL_MAX_CMD_VALUE = GROUND_CRAWL_MAX_CMD;
@@ -289,6 +295,20 @@ double singleWaypointTargetDistanceM = 0.0;
 double singleWaypointTargetBearingDeg = 0.0;
 float singleWaypointCandidateLeftCmd = 0.0f;
 float singleWaypointCandidateRightCmd = 0.0f;
+bool steeringCourseReferenceValidFlag = false;
+double steeringCourseReferenceLat = 0.0;
+double steeringCourseReferenceLon = 0.0;
+bool steeringHeadingReadyFlag = false;
+double steeringEstimatedCourseDeg = 0.0;
+double steeringBearingErrorDeg = 0.0;
+float steeringDesiredForwardCmd = 0.0f;
+float steeringDesiredTurnCmd = 0.0f;
+float steeringDesiredLogicalLeftCmd = 0.0f;
+float steeringDesiredLogicalRightCmd = 0.0f;
+float steeringDesiredPhysicalACmd = 0.0f;
+float steeringDesiredPhysicalBCmd = 0.0f;
+double steeringCourseDisplacementM = 0.0;
+const char *steeringBlockReason = "MODE_OFF";
 bool groundCrawlNeutralOkFlag = false;
 bool groundCrawlReadyFlag = false;
 bool groundCrawlLatchedStopFlag = false;
@@ -415,6 +435,16 @@ double normalizeBearingDegrees(double degrees) {
     degrees += 360.0;
   }
   while (degrees >= 360.0) {
+    degrees -= 360.0;
+  }
+  return degrees;
+}
+
+double normalizeBearingErrorDegrees(double degrees) {
+  while (degrees <= -180.0) {
+    degrees += 360.0;
+  }
+  while (degrees > 180.0) {
     degrees -= 360.0;
   }
   return degrees;
@@ -604,6 +634,81 @@ bool singleWaypointGpsReady() {
   return SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? gpsMotionReady() : gpsDryrunReady();
 }
 
+void resetSteeringDryrunOutputs(const char *reason) {
+  steeringHeadingReadyFlag = false;
+  steeringEstimatedCourseDeg = 0.0;
+  steeringBearingErrorDeg = 0.0;
+  steeringDesiredForwardCmd = 0.0f;
+  steeringDesiredTurnCmd = 0.0f;
+  steeringDesiredLogicalLeftCmd = 0.0f;
+  steeringDesiredLogicalRightCmd = 0.0f;
+  steeringDesiredPhysicalACmd = 0.0f;
+  steeringDesiredPhysicalBCmd = 0.0f;
+  steeringCourseDisplacementM = 0.0;
+  steeringBlockReason = reason;
+}
+
+void updateSingleWaypointSteeringDryrun() {
+  if (!SINGLE_WAYPOINT_STEERING_DRYRUN_ENABLED) {
+    resetSteeringDryrunOutputs("MODE_OFF");
+    return;
+  }
+
+  if (!singleWaypointGpsReadyFlag || !gps.location.isValid()) {
+    steeringCourseReferenceValidFlag = false;
+    resetSteeringDryrunOutputs("GPS_NOT_READY");
+    return;
+  }
+
+  double currentLat = gps.location.lat();
+  double currentLon = gps.location.lng();
+  if (!steeringCourseReferenceValidFlag) {
+    steeringCourseReferenceLat = currentLat;
+    steeringCourseReferenceLon = currentLon;
+    steeringCourseReferenceValidFlag = true;
+    resetSteeringDryrunOutputs("NO_HEADING");
+    return;
+  }
+
+  steeringCourseDisplacementM =
+      dryrunDistanceMeters(steeringCourseReferenceLat, steeringCourseReferenceLon, currentLat, currentLon);
+
+  if (steeringCourseDisplacementM < SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M) {
+    double displacementM = steeringCourseDisplacementM;
+    resetSteeringDryrunOutputs("NO_HEADING");
+    steeringCourseDisplacementM = displacementM;
+    return;
+  }
+
+  steeringEstimatedCourseDeg =
+      dryrunBearingDegrees(steeringCourseReferenceLat, steeringCourseReferenceLon, currentLat, currentLon);
+  steeringCourseReferenceLat = currentLat;
+  steeringCourseReferenceLon = currentLon;
+
+  if (!singleWaypointTargetComputedFlag) {
+    double displacementM = steeringCourseDisplacementM;
+    double estimatedCourseDeg = steeringEstimatedCourseDeg;
+    resetSteeringDryrunOutputs("NO_TARGET");
+    steeringCourseDisplacementM = displacementM;
+    steeringEstimatedCourseDeg = estimatedCourseDeg;
+    return;
+  }
+
+  steeringHeadingReadyFlag = true;
+  steeringBearingErrorDeg =
+      normalizeBearingErrorDegrees(singleWaypointTargetBearingDeg - steeringEstimatedCourseDeg);
+  steeringDesiredForwardCmd = SINGLE_WAYPOINT_CRAWL_BASE_CMD;
+  steeringDesiredTurnCmd =
+      clampUnit(static_cast<float>(steeringBearingErrorDeg / 90.0)) * SINGLE_WAYPOINT_CRAWL_BASE_CMD;
+  steeringDesiredLogicalLeftCmd = clampUnit(steeringDesiredForwardCmd + steeringDesiredTurnCmd);
+  steeringDesiredLogicalRightCmd = clampUnit(steeringDesiredForwardCmd - steeringDesiredTurnCmd);
+  steeringDesiredPhysicalACmd =
+      clampUnit((steeringDesiredLogicalLeftCmd + steeringDesiredLogicalRightCmd) * 0.5f);
+  steeringDesiredPhysicalBCmd =
+      clampUnit((steeringDesiredLogicalRightCmd - steeringDesiredLogicalLeftCmd) * 0.5f);
+  steeringBlockReason = "OK";
+}
+
 void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32_t now) {
   singleWaypointTargetReadyFlag = SINGLE_WAYPOINT_TARGET_AVAILABLE;
   singleWaypointDryrunReadyFlag = gpsDryrunReady();
@@ -660,6 +765,8 @@ void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32
 
   singleWaypointAutoMotorInhibitFlag =
       !SINGLE_WAYPOINT_AUTO_MOTION_ARMED || !singleWaypointSafetyReadyFlag;
+
+  updateSingleWaypointSteeringDryrun();
 }
 #endif
 
@@ -1437,6 +1544,66 @@ void debugPrintStatus() {
   } else {
     Serial.print(F("NA"));
   }
+  Serial.print(F(" single_wp_steering_dryrun="));
+  Serial.print(SINGLE_WAYPOINT_STEERING_DRYRUN_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" current_gps_lat="));
+  if (singleWaypointGpsReadyFlag && gps.location.isValid()) {
+    Serial.print(gps.location.lat(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" current_gps_lon="));
+  if (singleWaypointGpsReadyFlag && gps.location.isValid()) {
+    Serial.print(gps.location.lng(), 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" steering_target_lat="));
+  if (singleWaypointTargetReadyFlag) {
+    Serial.print(SINGLE_WAYPOINT_TARGET_LAT, 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" steering_target_lon="));
+  if (singleWaypointTargetReadyFlag) {
+    Serial.print(SINGLE_WAYPOINT_TARGET_LON, 6);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" heading_ready="));
+  Serial.print(steeringHeadingReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" heading_source="));
+  Serial.print(steeringHeadingReadyFlag ? F("course_over_ground") : F("NA"));
+  Serial.print(F(" course_min_displacement_m="));
+  Serial.print(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M, 1);
+  Serial.print(F(" course_displacement_m="));
+  Serial.print(steeringCourseDisplacementM, 2);
+  Serial.print(F(" estimated_course_deg="));
+  if (steeringHeadingReadyFlag) {
+    Serial.print(steeringEstimatedCourseDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" bearing_error_deg="));
+  if (steeringHeadingReadyFlag) {
+    Serial.print(steeringBearingErrorDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" desired_forward_cmd="));
+  Serial.print(steeringDesiredForwardCmd, 3);
+  Serial.print(F(" desired_turn_cmd="));
+  Serial.print(steeringDesiredTurnCmd, 3);
+  Serial.print(F(" desired_logical_left_cmd="));
+  Serial.print(steeringDesiredLogicalLeftCmd, 3);
+  Serial.print(F(" desired_logical_right_cmd="));
+  Serial.print(steeringDesiredLogicalRightCmd, 3);
+  Serial.print(F(" desired_physical_a_cmd="));
+  Serial.print(steeringDesiredPhysicalACmd, 3);
+  Serial.print(F(" desired_physical_b_cmd="));
+  Serial.print(steeringDesiredPhysicalBCmd, 3);
+  Serial.print(F(" steering_block_reason="));
+  Serial.print(steeringBlockReason);
   Serial.print(F(" candidate_left_cmd="));
   Serial.print(singleWaypointCandidateLeftCmd, 3);
   Serial.print(F(" candidate_right_cmd="));
@@ -1729,6 +1896,10 @@ void setup() {
   Serial.println(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? "1" : "0");
   Serial.print("SINGLE_WP_CRAWL_BASE_CMD=");
   Serial.println(SINGLE_WAYPOINT_CRAWL_BASE_CMD, 3);
+  Serial.print("SINGLE_WP_STEERING_DRYRUN=");
+  Serial.println(SINGLE_WAYPOINT_STEERING_DRYRUN_ENABLED ? "1" : "0");
+  Serial.print("SINGLE_WP_COURSE_MIN_DISPLACEMENT_M=");
+  Serial.println(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M, 1);
   Serial.print("target_override_enabled=");
   Serial.println(SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED ? "true" : "false");
   Serial.print("target_source=");

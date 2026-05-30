@@ -75,7 +75,7 @@ Manual forward/backward driving works, but the integrated station joystick axes
 have required careful remapping. The current active firmware marker is:
 
 ```text
-openrb_robot_controller station-manual rc-arcade-manual 2026-05-30
+openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05-30
 ```
 
 The current intent is:
@@ -83,6 +83,7 @@ The current intent is:
 - physical stick straight up -> forward
 - physical stick straight down -> reverse
 - physical stick left/right -> steering
+- current sign convention: `MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`
 
 Use `docs/manual_control.md` before modifying manual direction code. Previous
 mistakes included treating diagonal input as forward/reverse and moving the bug
