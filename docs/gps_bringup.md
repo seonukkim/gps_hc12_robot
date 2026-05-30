@@ -195,6 +195,13 @@ FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1
 AUTO_MOTION_ARMED=0
 ```
 
+Do not use `MOTOR_PULSE_TEST_MODE=1` for this validation. Motor pulse mode is
+GPS-independent by design and intentionally skips `GPS_SERIAL.begin(...)` and
+GPS byte processing. In motor pulse logs, `gps_chars=0`,
+`last_rmc_status=NA`, `last_gga_fix_quality=NA`, and
+`gps_block_reason=NO_LOCATION` are expected and do not indicate GPS hardware
+failure.
+
 Observed GPS quality in USBDBG:
 
 - `gps_location_valid=true`

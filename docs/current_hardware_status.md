@@ -113,6 +113,13 @@
   GPS readiness/target distance are not used, RC MANUAL is preserved, and AUTO
   emits one neutral-stick pulse for `MOTOR_PULSE_MS` before latching stop until
   MANUAL.
+- In `MOTOR_PULSE_TEST_MODE=1`, GPS is intentionally not initialized or read.
+  USBDBG fields such as `gps_chars=0`, `last_rmc_status=NA`,
+  `last_gga_fix_quality=NA`, and `gps_block_reason=NO_LOCATION` are expected in
+  that mode and must not be interpreted as GPS hardware failure. Use
+  `gps_uart_probe` or the no-motion single-waypoint main-controller build
+  (`FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`,
+  `AUTO_MOTION_ARMED=0`) for GPS validation.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed

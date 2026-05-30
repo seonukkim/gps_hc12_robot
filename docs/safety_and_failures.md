@@ -116,6 +116,10 @@ Rules:
 - The latch clears only after returning to MANUAL.
 - USBDBG must be checked for `motor_pulse_ready=true` and
   `motor_pulse_block_reason=OK` before interpreting physical movement.
+- GPS-looking USBDBG fields in this mode are not meaningful. `gps_chars=0`,
+  `last_rmc_status=NA`, `last_gga_fix_quality=NA`, and
+  `gps_block_reason=NO_LOCATION` are expected because GPS is not initialized or
+  read.
 - This mode is for motor deadband calibration only. It is not path following,
   not GPS autonomy, and not coverage driving.
 

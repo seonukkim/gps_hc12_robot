@@ -704,9 +704,24 @@ Use `MOTOR_PULSE_TEST_MODE=1` for GPS-independent deadband calibration:
 - It disables HC-12.
 - It preserves RC MANUAL behavior.
 - AUTO emits one neutral-stick pulse and then latches stop until MANUAL.
+- It intentionally skips GPS initialization and GPS byte processing. Do not use
+  motor pulse USBDBG lines to validate GPS.
 
 Do not use this mode as autonomy proof. It only answers whether a given
 `MOTOR_PULSE_CMD` produces physical drivetrain response.
+
+Expected motor pulse GPS-looking fields:
+
+- `gps_chars=0`
+- `last_rmc_status=NA`
+- `last_gga_fix_quality=NA`
+- `gps_block_reason=NO_LOCATION`
+
+These are expected in `MOTOR_PULSE_TEST_MODE=1` and do not mean the GPS module
+or `Serial2/9600` wiring failed. Validate GPS separately with
+`firmware/gps_uart_probe` or with the no-motion main-controller GPS build:
+`FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` and
+`AUTO_MOTION_ARMED=0`, with no `MOTOR_PULSE_TEST_MODE`.
 
 ## Heading / BMI160 Is Not Integrated
 

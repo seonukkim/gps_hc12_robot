@@ -617,6 +617,17 @@ distance, preserves RC MANUAL driving, and emits one AUTO-only pulse only after
 `rc_ok=true` and centered steering/throttle. After `MOTOR_PULSE_MS`, it latches
 zero output until the operator returns to MANUAL.
 
+Do not use motor pulse logs to validate GPS. In `MOTOR_PULSE_TEST_MODE=1`, the
+main controller intentionally skips GPS initialization and GPS byte processing,
+so `gps_chars=0`, `last_rmc_status=NA`, `last_gga_fix_quality=NA`, and
+`gps_block_reason=NO_LOCATION` are expected and do not contradict a successful
+`firmware/gps_uart_probe` result. Keep the test flow separate:
+
+1. GPS UART validation: `firmware/gps_uart_probe` on `Serial2/9600`.
+2. Main-controller GPS validation: `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+   with `AUTO_MOTION_ARMED=0` and no `MOTOR_PULSE_TEST_MODE`.
+3. Motor deadband validation: `MOTOR_PULSE_TEST_MODE=1`, ignoring GPS fields.
+
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.
 

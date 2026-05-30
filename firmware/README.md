@@ -229,6 +229,29 @@ steering/throttle are neutral, then latches stop until the operator returns to
 MANUAL. USBDBG runs at `100` ms in this mode so the short pulse window is
 observable.
 
+Important GPS interpretation:
+
+- `MOTOR_PULSE_TEST_MODE=1` intentionally skips `GPS_SERIAL.begin(...)` and the
+  GPS read loop.
+- Therefore `gps_chars=0`, `last_rmc_status=NA`, `last_gga_fix_quality=NA`, and
+  `gps_block_reason=NO_LOCATION` are expected in this build.
+- Those fields must not be used to judge GPS health. Validate GPS either with
+  `firmware/gps_uart_probe` or with the no-motion main-controller GPS build
+  below.
+
+Recommended no-motion main-controller GPS validation:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-validation-nomotion --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-gps-validation-nomotion firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected GPS fields in that build include increasing `gps_chars`,
+`last_rmc_status`, `last_gga_fix_quality`, `gps_lat`, `gps_lon`, `gps_sats`,
+`gps_hdop`, and readiness tiers. Motor outputs remain inhibited in AUTO because
+`AUTO_MOTION_ARMED=0`.
+
 ```bash
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-motor-pulse-018 --build-property 'compiler.cpp.extra_flags=-DMOTOR_PULSE_TEST_MODE=1 -DMOTOR_PULSE_CMD=0.18 -DMOTOR_PULSE_MS=300' firmware/openrb_robot_controller
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-motor-pulse-018 firmware/openrb_robot_controller

@@ -1836,6 +1836,40 @@ Validation status:
 - Firmware compile is required before field use.
 - Physical motor pulse calibration has not yet been run.
 
+## 2026-05-30: Motor Pulse GPS-Looking Fields Are Expected To Be Empty
+
+Observed flow:
+
+- New GPS was verified with `firmware/gps_uart_probe` on `Serial2/9600`.
+- Probe output showed healthy GPS UART/fix fields:
+  - `chars_1s≈490..508`
+  - `last_rmc_status=A`
+  - `last_gga_fix_quality=2`
+  - `sats≈6..8`
+  - `hdop≈1.31..1.71`
+- Then `openrb_robot_controller` was uploaded with:
+  - `MOTOR_PULSE_TEST_MODE=1`
+  - `MOTOR_PULSE_CMD=0.18`
+  - `MOTOR_PULSE_MS=300`
+- In the motor pulse build, USBDBG repeatedly showed:
+  - `motor_pulse_test_mode=true`
+  - `gps_chars=0`
+  - `last_rmc_status=NA`
+  - `last_gga_fix_quality=NA`
+  - `gps_block_reason=NO_LOCATION`
+
+Interpretation:
+
+- This is expected. `MOTOR_PULSE_TEST_MODE` intentionally bypasses GPS
+  initialization and GPS byte processing.
+- The motor pulse build must not be used to validate GPS hardware or GPS UART.
+- Keep test flow separated:
+  1. GPS UART validation: `firmware/gps_uart_probe`.
+  2. Main-controller GPS validation: single-waypoint experiment with
+     `AUTO_MOTION_ARMED=0`, no motor pulse mode.
+  3. Motor pulse deadband validation: `MOTOR_PULSE_TEST_MODE=1`, ignore GPS
+     fields.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:
