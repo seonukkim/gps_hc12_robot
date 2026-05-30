@@ -2114,7 +2114,52 @@ These are recorded to prevent repeating the same fixes:
 | first 45-degree remap | left/right behaved like forward/reverse | rejected |
 | direct CH1/CH2 map | straight up/down did not align with forward/reverse | rejected |
 | direct CH2 inversion | upper-left became forward and lower-right became reverse | rejected |
-| current cardinal remap | intended to rotate raw diagonal axes into straight up/down/left/right | uploaded; needs wheel-off-ground direction validation |
+| old cardinal / angle remap | became harmful after physical A/B output mapping was fixed; upper-right acted like forward | rejected |
+| current arcade-to-logical-wheel mixer | throttle -> forward, steering -> turn, then `left=forward+turn`, `right=forward-turn` | implemented; needs wheel-off-ground manual direction validation |
+
+## 2026-05-30: MANUAL RC Arcade Mixer Fix
+
+Problem:
+
+- After the physical A/B output mapping was fixed, MOTOR PULSE and AUTO logical
+  wheel commands behaved correctly.
+- MANUAL RC still behaved diagonally:
+  - upper-right -> forward
+  - upper-left -> right turn
+  - lower-left -> backward
+  - lower-right -> left turn
+
+Interpretation:
+
+- The old manual diagonal / angle remap was still the wrong final drive path.
+- The issue was manual mixing, not GPS, path planning, or the physical A/B
+  mapping.
+
+Firmware update:
+
+- MANUAL now computes direct forward and turn commands from the RC axes:
+  - `manual_forward_cmd = MANUAL_FORWARD_SIGN * throttle_norm`
+  - `manual_turn_cmd = MANUAL_TURN_SIGN * steer_norm`
+- It then uses an arcade-to-logical-wheel mixer:
+  - `manual_logical_left_cmd = clamp(manual_forward_cmd + manual_turn_cmd)`
+  - `manual_logical_right_cmd = clamp(manual_forward_cmd - manual_turn_cmd)`
+- MANUAL then uses the same common output path as AUTO and motor pulse:
+  logical wheel commands -> optional drive calibration -> physical A/B mapping
+  `A=(L+R)/2`, `B=(R-L)/2` -> Servo PWM writes.
+- The old angle remap is bypassed in the final MANUAL path. USBDBG prints
+  `old_angle_remap_active=false`.
+
+Validation required:
+
+- Wheel-off-ground manual direction test:
+  - stick up -> both wheels forward
+  - stick down -> both wheels backward
+  - stick right -> right turn
+  - stick left -> left turn
+  - upper-right -> forward-right arc
+  - upper-left -> forward-left arc
+- If steering is reversed, test `MANUAL_TURN_SIGN=-1`; do not reintroduce the
+  diagonal remap.
 
 ## 2026-05-03: Historical Verified Status From Existing Docs
 

@@ -16,7 +16,7 @@ firmware/openrb_robot_controller/openrb_robot_controller.ino
 It prints this USB startup marker when the expected firmware is running:
 
 ```text
-Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
+Firmware: openrb_robot_controller station-manual rc-arcade-manual 2026-05-30
 ```
 
 ## Firmware Modes

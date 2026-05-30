@@ -300,8 +300,7 @@ Observed:
 - HC-12 was disabled/ignored.
 - MANUAL mode worked with RC control.
 - `control_source=RC_MANUAL` in MANUAL mode.
-- Stick input changed `manual_steer_cmd`, `manual_throttle_cmd`, `left_cmd`,
-  and `right_cmd`.
+- Stick input changed manual command, logical wheel, and final command fields.
 - AUTO mode printed `autonomy_dryrun=true`.
 - AUTO mode printed GPS fields, `target_lat`, `target_lon`, and target
   distance/bearing fields.

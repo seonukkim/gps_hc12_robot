@@ -266,8 +266,7 @@ Validated:
 - This is the first firmware mode where RC MANUAL driving and fixed-wiring GPS
   dry-run coexist in one build.
 - MANUAL mode was tested with `control_source=RC_MANUAL`, and stick input
-  changed `manual_steer_cmd`, `manual_throttle_cmd`, `left_cmd`, and
-  `right_cmd`.
+  changed manual command and final command fields.
 - AUTO mode was tested with `autonomy_dryrun=true`, GPS fields,
   target distance/bearing fields, `control_source=STOP`, and `left_cmd=0` /
   `right_cmd=0`.
@@ -645,6 +644,14 @@ now converts logical wheels to physical pins with `A=(L+R)/2` and
 compatibility aliases for physical A/B pin commands, not physical left/right
 wheel commands. Single-wheel logical tests are halved at the physical pin level,
 so use both-wheel forward/reverse first when validating the mapping.
+
+Manual RC now uses the same logical-wheel output pipeline as AUTO and motor
+pulse. The manual path computes `manual_forward_cmd` from throttle,
+`manual_turn_cmd` from steering, then mixes `left=forward+turn` and
+`right=forward-turn` before the common physical A/B conversion. The old
+upper-right-is-forward symptom was a manual mixing bug, not GPS/path planning.
+USBDBG should show `old_angle_remap_active=false`; if steering is reversed,
+test `MANUAL_TURN_SIGN=-1` rather than reintroducing the diagonal remap.
 
 Do not use motor pulse logs to validate GPS. In `MOTOR_PULSE_TEST_MODE=1`, the
 main controller intentionally skips GPS initialization and GPS byte processing,

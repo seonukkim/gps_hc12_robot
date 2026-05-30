@@ -25,23 +25,33 @@ The station panel can physically look like `CH7`, but the firmware uses the rece
 - `THROTTLE_CENTER_US = 1500`
 - `RC_DEADBAND_US = 80`
 - `RC_AUTO_SWITCH_ON_US = 1600`
-- `RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678`
+- `MANUAL_FORWARD_SIGN = 1` by default
+- `MANUAL_TURN_SIGN = 1` by default
 
-RC manual mode remaps the raw CH1/CH2 stick axes through a 45-degree correction
-before motor mixing. This is required because bench tests showed that direct
-CH1/CH2 mapping placed the forward/reverse axis on a diagonal. The current
-target behavior is:
+RC manual mode no longer uses the old 45-degree remap in the final drive path.
+The raw CH1/CH2 stick axes are interpreted as steering and throttle, then mixed
+as arcade forward/turn commands into logical wheel commands:
+
+```cpp
+forward = MANUAL_FORWARD_SIGN * throttle_norm;
+turn = MANUAL_TURN_SIGN * steer_norm;
+logical_left = clamp(forward + turn);
+logical_right = clamp(forward - turn);
+```
+
+The same common output layer used by AUTO and motor pulse then maps logical
+wheels to the probe-confirmed physical A/B pins:
+
+```cpp
+A = (logical_left + logical_right) / 2;
+B = (logical_right - logical_left) / 2;
+```
+
+Target behavior:
 
 - physical stick straight up -> forward
 - physical stick straight down -> reverse
 - physical stick straight left/right -> steering without forward/reverse bias
-
-Current remap:
-
-```cpp
-steering = (rawSteering + rawThrottle) * 0.70710678;
-throttle = (rawSteering - rawThrottle) * 0.70710678;
-```
 
 ## Mode Interpretation
 

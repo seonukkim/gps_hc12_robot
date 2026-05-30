@@ -7,15 +7,17 @@ changing control, protocol, planning, or station workflow code.
 
 Status:
 
-- Current firmware uses `rc-cardinal-remap`.
+- Current firmware uses `rc-arcade-manual`.
 - Neutral USBDBG is verified.
 - Full straight up/down/left/right wheel-off-ground validation is still needed.
 
 Current code:
 
 ```cpp
-steeringOut = (rawSteering + rawThrottle) * 0.70710678f;
-throttleOut = (rawSteering - rawThrottle) * 0.70710678f;
+manual_forward_cmd = MANUAL_FORWARD_SIGN * throttle_norm;
+manual_turn_cmd = MANUAL_TURN_SIGN * steer_norm;
+logical_left_cmd = clamp(manual_forward_cmd + manual_turn_cmd);
+logical_right_cmd = clamp(manual_forward_cmd - manual_turn_cmd);
 ```
 
 Known mistakes:
@@ -613,7 +615,7 @@ Validated behavior:
 - This is the first firmware mode where MANUAL and GPS dry-run coexist in one
   firmware.
 - MANUAL mode works with `control_source=RC_MANUAL`, and stick input changes
-  `manual_steer_cmd`, `manual_throttle_cmd`, `left_cmd`, and `right_cmd`.
+  manual command and logical wheel fields.
 - AUTO mode prints `autonomy_dryrun=true`, GPS fields, and target
   distance/bearing fields.
 - AUTO mode must keep `control_source=STOP`, `left_cmd=0`, and `right_cmd=0`.

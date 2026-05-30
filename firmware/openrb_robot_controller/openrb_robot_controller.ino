@@ -70,6 +70,14 @@
 #define MOTOR_OUTPUT_SWAP_LR 0
 #endif
 
+#ifndef MANUAL_FORWARD_SIGN
+#define MANUAL_FORWARD_SIGN 1
+#endif
+
+#ifndef MANUAL_TURN_SIGN
+#define MANUAL_TURN_SIGN 1
+#endif
+
 #ifndef GROUND_CRAWL_TEST_MODE
 #define GROUND_CRAWL_TEST_MODE 0
 #endif
@@ -101,7 +109,7 @@
 #define GPS_SERIAL Serial3
 #endif
 
-constexpr const char *FIRMWARE_ID = "openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26";
+constexpr const char *FIRMWARE_ID = "openrb_robot_controller station-manual rc-arcade-manual 2026-05-30";
 constexpr uint8_t PPM_PIN = 6;
 constexpr uint8_t ESC_LEFT_PIN = 4;
 constexpr uint8_t ESC_RIGHT_PIN = 5;
@@ -131,6 +139,8 @@ constexpr float RIGHT_MOTOR_SCALE_VALUE = RIGHT_MOTOR_SCALE;
 constexpr float LEFT_MOTOR_MIN_CMD_VALUE = LEFT_MOTOR_MIN_CMD;
 constexpr float RIGHT_MOTOR_MIN_CMD_VALUE = RIGHT_MOTOR_MIN_CMD;
 constexpr bool MOTOR_OUTPUT_SWAP_LR_ENABLED = MOTOR_OUTPUT_SWAP_LR != 0;
+constexpr float MANUAL_FORWARD_SIGN_VALUE = MANUAL_FORWARD_SIGN;
+constexpr float MANUAL_TURN_SIGN_VALUE = MANUAL_TURN_SIGN;
 constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
@@ -848,9 +858,19 @@ float normRcCentered(uint16_t pulseUs, uint16_t centerUs) {
   return clampUnit(static_cast<float>(delta) / denom);
 }
 
+// Deprecated legacy diagonal remap. Do not use for the final MANUAL drive path.
 void mapRcManualAxes(float rawSteering, float rawThrottle, float &steeringOut, float &throttleOut) {
   steeringOut = clampUnit((rawSteering + rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE);
   throttleOut = clampUnit((rawSteering - rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE);
+}
+
+void computeManualArcadeCommands(float rawSteering, float rawThrottle,
+                                 float &forwardOut, float &turnOut,
+                                 float &logicalLeftOut, float &logicalRightOut) {
+  forwardOut = clampUnit(MANUAL_FORWARD_SIGN_VALUE * rawThrottle);
+  turnOut = clampUnit(MANUAL_TURN_SIGN_VALUE * rawSteering);
+  logicalLeftOut = clampUnit(forwardOut + turnOut);
+  logicalRightOut = clampUnit(forwardOut - turnOut);
 }
 
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
@@ -937,12 +957,11 @@ bool rcAutoSwitchOn() {
 void applyManualOverride(uint16_t steeringUs, uint16_t throttleUs) {
   float rawSteering = normRcCentered(steeringUs, STEERING_CENTER_US);
   float rawThrottle = normRcCentered(throttleUs, THROTTLE_CENTER_US);
-  float steering = 0.0f;
-  float throttle = 0.0f;
-  mapRcManualAxes(rawSteering, rawThrottle, steering, throttle);
-
-  float left = throttle - steering;
-  float right = throttle + steering;
+  float forward = 0.0f;
+  float turn = 0.0f;
+  float left = 0.0f;
+  float right = 0.0f;
+  computeManualArcadeCommands(rawSteering, rawThrottle, forward, turn, left, right);
   applyDriveCommand(left, right);
 }
 
@@ -1045,9 +1064,13 @@ void debugPrintStatus() {
   bool autoSwitchOn = rcAutoSwitchOn(modeUs);
   float steeringNorm = normRcCentered(steeringUs, STEERING_CENTER_US);
   float throttleNorm = normRcCentered(throttleUs, THROTTLE_CENTER_US);
-  float manualSteering = 0.0f;
-  float manualThrottle = 0.0f;
-  mapRcManualAxes(steeringNorm, throttleNorm, manualSteering, manualThrottle);
+  float manualForward = 0.0f;
+  float manualTurn = 0.0f;
+  float manualLogicalLeft = 0.0f;
+  float manualLogicalRight = 0.0f;
+  computeManualArcadeCommands(steeringNorm, throttleNorm,
+                              manualForward, manualTurn,
+                              manualLogicalLeft, manualLogicalRight);
   bool gpsLocValid = gpsLocationValid();
   bool gpsLocFresh = gpsAgeOk();
   bool gpsSatellitesOk = gpsSatsOk();
@@ -1080,9 +1103,22 @@ void debugPrintStatus() {
   Serial.print(F(" throttle_norm="));
   Serial.print(throttleNorm, 3);
   Serial.print(F(" manual_steer_cmd="));
-  Serial.print(manualSteering, 3);
+  Serial.print(manualTurn, 3);
   Serial.print(F(" manual_throttle_cmd="));
-  Serial.print(manualThrottle, 3);
+  Serial.print(manualForward, 3);
+  Serial.print(F(" manual_forward_cmd="));
+  Serial.print(manualForward, 3);
+  Serial.print(F(" manual_turn_cmd="));
+  Serial.print(manualTurn, 3);
+  Serial.print(F(" manual_forward_sign="));
+  Serial.print(MANUAL_FORWARD_SIGN_VALUE, 1);
+  Serial.print(F(" manual_turn_sign="));
+  Serial.print(MANUAL_TURN_SIGN_VALUE, 1);
+  Serial.print(F(" manual_logical_left_cmd="));
+  Serial.print(manualLogicalLeft, 3);
+  Serial.print(F(" manual_logical_right_cmd="));
+  Serial.print(manualLogicalRight, 3);
+  Serial.print(F(" old_angle_remap_active=false"));
   Serial.print(F(" station_age_ms="));
   if (lastStationFrameMs == 0) {
     Serial.print(F("NA"));

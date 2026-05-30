@@ -41,7 +41,7 @@ After flashing the expected integrated firmware, the OpenRB USB serial output
 should include:
 
 ```text
-Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
+Firmware: openrb_robot_controller station-manual rc-arcade-manual 2026-05-30
 ```
 
 If USB serial prints older lines such as `STAT,...,MANUAL_CENTER_STOP,...`, the
@@ -123,46 +123,67 @@ constexpr uint16_t STEERING_CENTER_US = 1504;
 constexpr uint16_t THROTTLE_CENTER_US = 1500;
 constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
-constexpr float RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678f;
+constexpr float MANUAL_FORWARD_SIGN_VALUE = MANUAL_FORWARD_SIGN;
+constexpr float MANUAL_TURN_SIGN_VALUE = MANUAL_TURN_SIGN;
 ```
 
-Bench observations showed that the current station stick does not map cleanly
-to cardinal directions with direct CH1/CH2 use:
+Bench observations showed that the old manual path was wrong:
 
 - A first 45-degree remap had the wrong sign and made left/right behave like
   forward/reverse.
 - Direct CH1/CH2 mapping did not make straight up/down the forward/reverse axis.
 - Direct CH2 inversion still left forward/reverse on a diagonal: upper-left
   acted like forward and lower-right acted like reverse.
+- After the physical A/B output mapping was fixed, the old 45-degree remap
+  became harmful: upper-right behaved like forward, upper-left like right turn,
+  lower-left like backward, and lower-right like left turn.
 
-The current correction treats the raw CH1/CH2 pair as a 45-degree-rotated axis
-pair and rotates it back to physical cardinal stick directions:
+The current correction bypasses the old angle remap in the final MANUAL path.
+RC MANUAL now uses an arcade-to-logical-wheel mixer:
 
 ```cpp
-steering = (rawSteering + rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE;
-throttle = (rawSteering - rawThrottle) * RC_MANUAL_AXIS_ROTATION_SCALE;
+manual_forward_cmd = MANUAL_FORWARD_SIGN * throttle_norm;
+manual_turn_cmd = MANUAL_TURN_SIGN * steer_norm;
+logical_left_cmd = clamp(manual_forward_cmd + manual_turn_cmd);
+logical_right_cmd = clamp(manual_forward_cmd - manual_turn_cmd);
 ```
+
+Then MANUAL uses the same common output path as AUTO and motor pulse:
+
+```text
+logical_left_cmd / logical_right_cmd
+-> optional drive calibration
+-> physical A/B conversion: A=(L+R)/2, B=(R-L)/2
+-> Servo PWM writes
+```
+
+`MANUAL_FORWARD_SIGN` and `MANUAL_TURN_SIGN` are compile-time signs. Defaults
+are both `1`; if steering is reversed, test only `MANUAL_TURN_SIGN=-1` instead
+of changing the mixer structure.
 
 Target behavior:
 
-- Push straight up -> `manual_steer_cmd ~= 0`, `manual_throttle_cmd > 0` -> forward.
-- Pull straight down -> `manual_steer_cmd ~= 0`, `manual_throttle_cmd < 0` -> reverse.
-- Push straight right -> `manual_steer_cmd > 0`, `manual_throttle_cmd ~= 0`.
-- Push straight left -> `manual_steer_cmd < 0`, `manual_throttle_cmd ~= 0`.
+- Push straight up -> `manual_forward_cmd > 0`, `manual_turn_cmd ~= 0` -> forward.
+- Pull straight down -> `manual_forward_cmd < 0`, `manual_turn_cmd ~= 0` -> reverse.
+- Push straight right -> `manual_turn_cmd > 0`, `manual_forward_cmd ~= 0`.
+- Push straight left -> `manual_turn_cmd < 0`, `manual_forward_cmd ~= 0`.
 
 The firmware path is:
 
 1. `readRcChannels()` copies CH1, CH2, CH5 from the PPM ISR buffer.
 2. `normRcCentered()` converts pulse width to normalized `-1.0..1.0`.
-3. `mapRcManualAxes()` rotates raw CH1/CH2 into physical steering/throttle axes.
-4. `applyManualOverride()` mixes steering/throttle to left/right motor commands.
-5. `applyDriveCommand()` clamps each side and writes ESC pulses.
+3. `computeManualArcadeCommands()` applies `MANUAL_FORWARD_SIGN` /
+   `MANUAL_TURN_SIGN` and mixes forward/turn to logical wheel commands.
+4. `applyDriveCommand()` applies optional drive calibration once.
+5. The common output layer converts logical wheels to physical A/B pins:
+   `A=(L+R)/2`, `B=(R-L)/2`.
+6. Servo PWM writes go to the physical controller input pins.
 
-The current differential mix is:
+The current RC MANUAL arcade mix is:
 
 ```cpp
-left = throttle - steering;
-right = throttle + steering;
+left = forward + turn;
+right = forward - turn;
 ```
 
 ESC output uses:
@@ -236,21 +257,21 @@ PY
 Expected neutral debug shape:
 
 ```text
-USBDBG mode=MANUAL rc_ok=true auto_sw=false ... steer_norm=0.000 throttle_norm=0.000 manual_steer_cmd=0.000 manual_throttle_cmd=0.000 ... left_cmd=0.000 right_cmd=0.000
+USBDBG mode=MANUAL rc_ok=true auto_sw=false ... steer_norm=0.000 throttle_norm=0.000 manual_forward_cmd=0.000 manual_turn_cmd=0.000 manual_logical_left_cmd=0.000 manual_logical_right_cmd=0.000 old_angle_remap_active=false ... left_cmd=0.000 right_cmd=0.000
 ```
 
 For direction validation, keep wheels off ground and check:
 
-- Straight up: `manual_steer_cmd` stays near `0.000`,
-  `manual_throttle_cmd` becomes positive, and both motor commands should move in
+- Straight up: `manual_turn_cmd` stays near `0.000`,
+  `manual_forward_cmd` becomes positive, and both motor commands should move in
   the forward direction.
-- Straight down: `manual_steer_cmd` stays near `0.000`,
-  `manual_throttle_cmd` becomes negative, and both motor commands should move in
+- Straight down: `manual_turn_cmd` stays near `0.000`,
+  `manual_forward_cmd` becomes negative, and both motor commands should move in
   the reverse direction.
-- Straight right: `manual_steer_cmd` becomes positive and
-  `manual_throttle_cmd` stays near `0.000`.
-- Straight left: `manual_steer_cmd` becomes negative and
-  `manual_throttle_cmd` stays near `0.000`.
+- Straight right: `manual_turn_cmd` becomes positive and
+  `manual_forward_cmd` stays near `0.000`.
+- Straight left: `manual_turn_cmd` becomes negative and
+  `manual_forward_cmd` stays near `0.000`.
 - Diagonal stick positions should produce mixed steering plus throttle, not be
   required for straight forward or straight reverse.
 
@@ -263,17 +284,20 @@ direction can also invert the final physical wheel direction.
 1. Keep wheels off ground.
 2. Flash the firmware and confirm the firmware marker.
 3. Leave the stick centered and confirm:
-   - `manual_steer_cmd=0.000`
-   - `manual_throttle_cmd=0.000`
+   - `manual_forward_cmd=0.000`
+   - `manual_turn_cmd=0.000`
+   - `manual_logical_left_cmd=0.000`
+   - `manual_logical_right_cmd=0.000`
+   - `old_angle_remap_active=false`
    - `left_cmd=0.000`
    - `right_cmd=0.000`
 4. Move the stick straight up and confirm:
-   - `manual_steer_cmd` remains near zero
-   - `manual_throttle_cmd` is positive
+   - `manual_turn_cmd` remains near zero
+   - `manual_forward_cmd` is positive
    - `left_cmd` and `right_cmd` are both positive or both forward-equivalent
 5. Move the stick straight down and confirm:
-   - `manual_steer_cmd` remains near zero
-   - `manual_throttle_cmd` is negative
+   - `manual_turn_cmd` remains near zero
+   - `manual_forward_cmd` is negative
    - `left_cmd` and `right_cmd` are both negative or both reverse-equivalent
 6. Move the stick straight right and left and confirm steering changes without a
    large throttle bias.
@@ -289,7 +313,8 @@ The current correction was chosen from the observed failure sequence:
 | wrong 45-degree remap | left/right became forward/reverse | rejected |
 | direct CH1/CH2 map | straight up/down did not become forward/reverse | rejected |
 | direct CH2 inversion | upper-left became forward and lower-right became reverse | rejected |
-| current cardinal remap | rotates raw diagonal axes back to physical up/down/left/right | active |
+| old cardinal / angle remap | became harmful after physical A/B output mapping was fixed; upper-right became forward | rejected |
+| current arcade-to-logical-wheel mixer | throttle is forward, steering is turn, then `left=forward+turn`, `right=forward-turn` | active; needs wheel-off-ground validation |
 
 ## Station Keyboard Manual Tool
 
@@ -376,7 +401,7 @@ Important defaults:
 
 1. Keep rover wheels off ground.
 2. Flash `firmware/openrb_robot_controller/openrb_robot_controller.ino`.
-3. Confirm firmware marker is `rc-cardinal-remap`.
+3. Confirm firmware marker is `rc-arcade-manual`.
 4. Confirm the station/controller is powered on and linked.
 5. Confirm MANUAL shows `mode_us≈1000` and `control_source=RC_MANUAL`.
 6. Confirm AUTO shows `mode_us≈2000`, `mode=AUTO_READY`, and

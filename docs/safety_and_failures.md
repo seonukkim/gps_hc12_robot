@@ -226,7 +226,8 @@ direction code:
 
 1. Read `docs/manual_control.md`.
 2. Capture USBDBG while moving the stick straight up/down/left/right.
-3. Check `manual_steer_cmd` and `manual_throttle_cmd`.
+3. Check `manual_forward_cmd`, `manual_turn_cmd`,
+   `manual_logical_left_cmd`, and `manual_logical_right_cmd`.
 4. Only then judge physical wheel motion.
 5. If command values are correct but a wheel spins backward, fix motor/ESC
    direction separately from RC axis mapping.
