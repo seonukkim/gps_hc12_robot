@@ -9,6 +9,41 @@
 > Wiring Plan: GPS cannot be moved, HC-12 cannot be moved, and the current
 > wiring must be audited.
 
+## Breadboard Development Status (2026-05-30)
+
+A breadboard rig (no rover chassis, no motors) is used for safe indoor
+navigation-stack development with GPS, IMU, and HC-12 connected.
+
+- IMU is now readable. `firmware/imu_probe` reports `bus_state=RELEASED_HIGH`,
+  `i2c_scan_count=1`, `i2c_addr=0x69`, `whoami=0x6F`, `imu_present=true`. `0x6F`
+  is not a standard InvenSense/ST ID; it is treated as an MPU register-map
+  compatible clone/variant for **signal validation only**. IMU yaw/heading is
+  NOT trusted yet (needs calibration + drift checks). The rover-mounted IMU may
+  be different/faulty and must be validated separately.
+- GPS indoors/under a roof is weak or unavailable. `gps_uart_probe` keeps
+  printing raw status (`gps_chars`, `last_rmc_status`, `last_gga_fix_quality`,
+  `gps_block_reason`, etc.) even with no fix; expect `gps_block_reason=NO_BYTES`
+  or `NO_NMEA_FIX`/`LOW_SATS` indoors. Path-planning and path-following dry-run
+  fall back to mock/compile-time coordinates indoors.
+- HC-12 link validation uses `firmware/hc12_link_probe` (firmware) plus
+  `tools/hc12_link_probe.py` (station). Both are motor-free PING/PONG tools.
+- UART coexistence: OpenRB-150 has three hardware UARTs — `Serial1` (D26/D27),
+  `Serial2` (D28/D29, GPS), `Serial3` (D14/D13). GPS and HC-12 both default to
+  `Serial2` in firmware, so they cannot run together on the current rover
+  wiring; the firmware disables HC-12 in every GPS-on-`Serial2` build. For
+  GPS + HC-12 together on the breadboard, wire HC-12 to `Serial1` or `Serial3`
+  and select it (`HC12_PROBE_SERIAL_PORT`, `PATH_FOLLOWING_HC12_SERIAL_PORT`).
+- Station path-planning preview (`tools/path_planning_preview.py`) is allowed
+  indoors with manual coordinates. Firmware path-following dry-run
+  (`PATH_FOLLOWING_DRYRUN=1`) computes distance/bearing/heading/steering and runs
+  the HC-12 waypoint protocol with motors disabled.
+- Physical path following remains blocked. The four motion gates
+  (`PHYSICAL_PATH_FOLLOWING_ENABLE`, `PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT`,
+  `GROUND_CRAWL_TEST_MODE`, `AUTO_MOTION_ARMED`) and the
+  `PATH_FOLLOWING_MODE_CHANNEL_STABLE` acknowledgement all default to `0`, so no
+  build moves motors. The RC/PPM Manual/Auto channel blocker (CH5 did not hold
+  HIGH) and the untrusted heading source must be resolved first.
+
 ## Confirmed working
 
 - OpenRB-150 USB debug: working
@@ -418,7 +453,19 @@ Current status:
 - The scanner is not hanging; it is correctly refusing to scan while the bus is
   stuck low before address probing.
 - IMU presence and exact device identity remain unverified.
-- Continue the GPS+RC workflow without IMU support for now.
+- A dedicated IMU signal probe is available at `firmware/imu_probe`. It is the
+  richer successor to the plain scanners: it scans, labels candidate families
+  (`0x68`/`0x69` MPU/MPU9250/ICM, `0x0C`/`0x1C`/`0x1E` magnetometer,
+  `0x28`/`0x29` BNO055, else `UNKNOWN_I2C_DEVICE`), and for a `0x68`/`0x69`
+  device reads `WHO_AM_I` plus raw accel/gyro/temp. It initializes only USB
+  Serial and `Wire` — no motors, GPS, HC-12, RC, or autonomy — and keeps the
+  same bus-stuck-low guard, so on the current wiring it is expected to report
+  `bus_state=BUS_STUCK_LOW_BEFORE_SCAN` until the I2C electrical issue (power,
+  GND, pull-ups, wiring) is resolved. This probe validates IMU *signal* only;
+  IMU heading/yaw is not trusted until calibration and drift checks are done.
+- Continue the GPS+RC workflow without IMU support for now. Physical path
+  following stays blocked until both the RC/PPM mode channel holds reliably and
+  a heading source is validated; the IMU probe does not lift that blocker.
 
 ## Firmware mapping
 

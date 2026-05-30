@@ -2471,3 +2471,17 @@ Pending at that time:
 - station-side HC-12 USB confirmation
 - end-to-end station HC-12 link test
 - GPS telemetry schema reconciliation
+
+## 2026-05-30 Breadboard Navigation Bring-Up
+
+- Setup: breadboard (no chassis, no motors); GPS, IMU, HC-12 connected; indoors.
+- IMU: `firmware/imu_probe` detected `i2c_addr=0x69`, `whoami=0x6F`,
+  `imu_present=true`. Signal-only; yaw/heading not trusted.
+- GPS: indoor fix weak/unavailable as expected; `gps_uart_probe` keeps printing
+  `gps_block_reason` and raw status. Use mock/compile-time coordinates indoors.
+- HC-12: validate with `firmware/hc12_link_probe` + `tools/hc12_link_probe.py`
+  (PING/PONG). Put HC-12 on `Serial3`/`Serial1` to coexist with GPS on `Serial2`.
+- Added firmware path-following dry-run (`PATH_FOLLOWING_DRYRUN=1`) and station
+  path preview. Default builds do not move motors.
+- Blockers unchanged: RC/PPM Manual/Auto channel must hold HIGH, and a heading
+  source must be validated, before any physical path following.

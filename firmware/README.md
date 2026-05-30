@@ -30,6 +30,7 @@ Firmware: openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05
 | Guarded ground crawl | `...SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1` | only path to armed motion; clamps to ±`GROUND_CRAWL_MAX_CMD` and latches stop after `GROUND_CRAWL_MAX_AUTO_MS` | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO crawls clamped/latched, else neutral |
 | Motor pulse calibration | `MOTOR_PULSE_TEST_MODE=1` | GPS-independent motor deadband calibration | not used | disabled/ignored | MANUAL can drive; AUTO emits one neutral-stick pulse for `MOTOR_PULSE_MS`, then latches stop until MANUAL |
 | Physical output pin probe | `firmware/physical_output_pin_probe` | final PWM output pin truth-table probe | not used | not used | writes directly to physical output pin A/B after a startup delay, then neutral forever |
+| Path-following dry-run | `PATH_FOLLOWING_DRYRUN=1` | breadboard waypoint distance/bearing/heading/steering diagnostics with HC-12 waypoint protocol | `Serial2` at `9600` (or mock position indoors) | motor-free waypoint protocol on `Serial3`/`Serial1` | MANUAL can drive; AUTO is neutral unless ALL four physical gates are set (default off) |
 
 Exact macOS Arduino CLI path used in this repo:
 
@@ -847,6 +848,264 @@ can produce persistent `NO_FIX`. Move the rover/GPS farther outdoors and wait
 for `gps_probe_state=STABLE_FIX` or
 `valid_fix_seconds_consecutive >= 30` before returning to main-controller
 `AUTO_MOTION_ARMED=0` dry-run validation.
+
+## Breadboard Navigation Development Stack
+
+This is the safe indoor/breadboard workflow for building and validating the GPS
++ IMU + HC-12 navigation stack without driving motors and without the rover
+chassis. Motors must not be connected on the breadboard. Default builds never
+move motors.
+
+### OpenRB-150 UART map and the GPS/HC-12 coexistence rule
+
+The OpenRB-150 (SAMD21) exposes three independent hardware UARTs plus USB:
+
+| Port | Pins | SERCOM | Current use |
+|---|---|---|---|
+| `Serial` (USB) | USB | — | USB debug at `115200` |
+| `Serial1` | D26 TX / D27 RX | SERCOM2 | free |
+| `Serial2` | D28 TX / D29 RX | SERCOM4 | **GPS** (central 4-pin connector, confirmed) |
+| `Serial3` | D14 TX / D13 RX | SERCOM5 | free (expansion UART) |
+| `Wire` I2C | D11 SDA / D12 SCL | SERCOM0 | **IMU** |
+
+Coexistence rule: GPS is confirmed on `Serial2`. The default `openrb_robot_controller`
+build also assigns HC-12 to `Serial2`, so **GPS and HC-12 cannot run together on
+the current rover wiring** — every GPS-on-`Serial2` diagnostic build disables the
+HC-12 link to avoid the `Serial2` conflict. To validate GPS + IMU + HC-12 *at the
+same time*, wire the HC-12 to a different UART than GPS (`Serial1` or `Serial3`)
+and select that port in the probe / path-following build. At the hardware level
+there are enough UARTs for all three; the limitation is wiring, not silicon.
+
+### HC-12 Link Probe (`firmware/hc12_link_probe`)
+
+Standalone, motor-free HC-12 link validator. It sends `PING` frames (auto and/or
+on USB command), prints received frames, answers `PONG`, and reports TX/RX
+counters and a link summary. It initializes only USB Serial and one HC-12 UART —
+no motors, GPS, IMU, RC, or autonomy — and never emits motor-driving frames.
+
+Compile-time options:
+
+- `HC12_PROBE_SERIAL_PORT` (default `2`): `1`=Serial1, `2`=Serial2, `3`=Serial3.
+  On the breadboard with GPS on `Serial2`, use `3` (or `1`) and wire HC-12 there
+  so GPS NMEA bytes do not interfere.
+- `HC12_PROBE_BAUD` (default `9600`), `HC12_PROBE_AUTO_PING` (default `1`),
+  `HC12_PROBE_PING_INTERVAL_MS` (default `1000`).
+
+USB fields: `hc12_link_probe_alive`, `port`, `hc12_tx_count`, `hc12_rx_count`,
+`ping_tx_count`, `pong_rx_count`, `hc12_parse_ok`, `hc12_parse_error`,
+`hc12_last_rx_age_ms`, `hc12_last_cmd`, `last_rx_payload`, `link_status`
+(`NO_RX_YET` / `LINK_OK` / `LINK_STALE`). USB input sends a `PING` only.
+
+Compile / upload / monitor (macOS + OpenRB-150), HC-12 on Serial3 for GPS coexistence:
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-hc12-link-probe --build-property 'compiler.cpp.extra_flags=-DHC12_PROBE_SERIAL_PORT=3' firmware/hc12_link_probe
+arduino-cli upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-hc12-link-probe firmware/hc12_link_probe
+arduino-cli monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Station side (separate HC-12-USB bridge), `tools/hc12_link_probe.py` sends PING
+frames and logs responses (never motor commands):
+
+```bash
+uv run python tools/hc12_link_probe.py --port /dev/cu.usbserial-XXXX --baud 9600 --ping-interval-ms 1000 --log-dir outputs/logs
+```
+
+### Station path-planning preview (`tools/path_planning_preview.py`)
+
+Indoor-friendly, preview-only. It builds a start→goal waypoint path from
+manually supplied coordinates and writes `waypoints.csv`, `summary.md`, and an
+optional `preview.png`. No HC-12, no rover commands, no firmware upload.
+
+```bash
+uv run python tools/path_planning_preview.py --start-lat 35.570932 --start-lon 129.187338 --goal-lat 35.571120 --goal-lon 129.186050 --spacing-m 2.0 --out-dir outputs/path_preview
+```
+
+### Path-Following Dry-Run (`PATH_FOLLOWING_DRYRUN=1`)
+
+A self-contained controller mode that computes — but does not execute — waypoint
+following. It is the firmware-side companion to the station path preview. GPS
+uses `Serial2`; if no fix is available indoors it falls back to a compile-time
+mock position (`PATH_FOLLOWING_ALLOW_MOCK_POSITION=1`). A motor-free HC-12
+waypoint protocol runs on `Serial3` (or `Serial1`).
+
+It computes and prints: `position_source` (gps/mock), `current_lat/lon`,
+`active_target_source` (compile_time/hc12), `wp_index`/`wp_count`,
+`target_distance_m`, `target_bearing_deg`, `arrived`, `heading_ready`,
+`heading_source`, `course_displacement_m`, `estimated_course_deg`,
+`bearing_error_deg`, `desired_forward_cmd`, `desired_turn_cmd`,
+`desired_logical_left_cmd`, `desired_logical_right_cmd`, `desired_physical_a_cmd`,
+`desired_physical_b_cmd`, and `path_following_block_reason`. Heading needs real
+GPS displacement: a static or mock position prints `heading_ready=false` and
+`path_following_block_reason=NO_HEADING`.
+
+HC-12 waypoint protocol (dry-run only; frames are `@TYPE,SEQ,PAYLOAD*CS`):
+`PING`→`PONG`, `SET_TARGET lat,lon` (updates the dry-run target,
+`active_target_source=hc12`), `STATUS`→`STAT`, `ESTOP` (blocks the gated output),
+`CLEAR` (clears target/estop). Reports `hc12_rx_count`, `hc12_tx_count`,
+`hc12_last_rx_age_ms`, `hc12_last_cmd`, `hc12_parse_ok`, `hc12_parse_error`.
+
+Physical motor output is impossible unless EVERY gate passes. The four compile
+gates all default to `0`:
+
+- `PHYSICAL_PATH_FOLLOWING_ENABLE=1`
+- `PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=1`
+- `GROUND_CRAWL_TEST_MODE=1`
+- `AUTO_MOTION_ARMED=1`
+
+plus the operator acknowledgement `PATH_FOLLOWING_MODE_CHANNEL_STABLE=1` (default
+`0` — see the PPM mode-channel blocker) and the runtime gates `gps_motion_ready`,
+`heading_ready`, RC valid + AUTO switch, RC neutral, target distance within
+`[PATH_FOLLOWING_MIN_TARGET_DISTANCE_M, PATH_FOLLOWING_MAX_TARGET_DISTANCE_M]`
+(`3.0`..`20.0` m), not arrived, no HC-12 ESTOP, and a fresh HC-12 target if one
+is used. The reason any gate is blocking is printed as `physical_block_reason`
+(default `COMPILE_GATE_OFF`). Hard caps: `PATH_FOLLOWING_MAX_FORWARD_CMD` (0.18),
+`PATH_FOLLOWING_MAX_TURN_CMD` (0.04), `PATH_FOLLOWING_MAX_AUTO_MS` (500 ms) with a
+latch-stop that clears only on MANUAL.
+
+Compile / upload / monitor the **dry-run** build (no motor output; HC-12 on Serial3):
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-path-dryrun --build-property 'compiler.cpp.extra_flags=-DPATH_FOLLOWING_DRYRUN=1 -DPHYSICAL_PATH_FOLLOWING_ENABLE=0 -DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0' firmware/openrb_robot_controller
+arduino-cli upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-path-dryrun firmware/openrb_robot_controller
+arduino-cli monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Override the compile-time path or mock position, e.g.
+`-DPATH_FOLLOWING_WP1_LAT=... -DPATH_FOLLOWING_WP1_LON=...` (WP1..WP3,
+`PATH_FOLLOWING_WP_COUNT`) and `-DPATH_FOLLOWING_MOCK_CURRENT_LAT=... -DPATH_FOLLOWING_MOCK_CURRENT_LON=...`.
+
+Physical path following is **not approved**. Do not set the four motion gates or
+`PATH_FOLLOWING_MODE_CHANNEL_STABLE=1` until the RC/PPM Manual/Auto channel holds
+HIGH reliably (current blocker) and an IMU/GPS heading source is validated. Even
+then, motion is wheel-off-ground / open-area-with-kill-switch only.
+
+## IMU Probe (I2C signal validation only)
+
+Use this standalone sketch to check whether an IMU is electrically present and
+*readable* on the OpenRB default `Wire` I2C bus. It is the richer successor to
+the plain `i2c_scanner_test`: it scans, labels candidate device families, and —
+for `0x68`/`0x69` MPU/ICM-class parts — reads `WHO_AM_I` and raw accel/gyro/temp.
+
+```text
+firmware/imu_probe/imu_probe.ino
+```
+
+This is **signal validation only**. It does not produce trusted heading/yaw.
+IMU heading/yaw is not trusted until calibration and drift checks are done, so
+this probe must not be wired into autonomy yet.
+
+Safety: this sketch initializes ONLY USB Serial and `Wire`. It does **not**
+initialize or drive motors/ESC/Servo outputs, GPS, HC-12, RC/PPM input, or any
+rover autonomy logic. It uses the same fixed IMU wiring as the scanners:
+
+- SDA = OpenRB `D11` = PA08 (`PIN_WIRE_SDA = 11`)
+- SCL = OpenRB `D12` = PA09 (`PIN_WIRE_SCL = 12`)
+
+It keeps the proven bus-released-high guard from `i2c_scanner_test`: if D11/D12
+do not read HIGH with pull-ups, it prints `bus_state=BUS_STUCK_LOW_BEFORE_SCAN`
+and refuses to scan, because the bus has historically read stuck LOW (treat that
+as an electrical issue: IMU power, GND, pull-ups, or wiring — not pin mapping).
+
+Each pass (every 1 s) prints USB fields at `115200`:
+
+- `imu_probe_alive=true`, `scan_pass`, `sample_ms`
+- `pre_scan_sda` / `pre_scan_scl`, `bus_state`
+- `i2c_scan_count`
+- per found address: `i2c_addr=0x..` and `imu_candidate=...`
+- `imu_present` / `imu_mpu_class_present`
+
+Candidate labels by address (address alone does not identify a device):
+
+- `0x68` / `0x69`: `MPU6050_MPU9250_ICM_CANDIDATE`
+- `0x0C` / `0x1C` / `0x1E`: `MAGNETOMETER_CANDIDATE`
+- `0x28` / `0x29`: `BNO055_CANDIDATE`
+- otherwise: `UNKNOWN_I2C_DEVICE`
+
+For a `0x68`/`0x69` device the line also includes `whoami=0x..` with a
+`whoami_label` (e.g. `MPU6050_or_MPU9150`, `MPU6500`, `MPU9250`, `ICM20689`;
+unknown values print `MPU_ICM_FAMILY_UNKNOWN_WHOAMI`). With raw reads enabled
+(default) it wakes the device (writes `PWR_MGMT_1=0x00`, gated to `0x68`/`0x69`
+only) and burst-reads registers `0x3B..0x48`:
+
+```text
+i2c_addr=0x68 imu_candidate=MPU6050_MPU9250_ICM_CANDIDATE whoami=0x68 whoami_label=MPU6050_or_MPU9150 wake_attempted=true wake_ok=true accel_raw_x=... accel_raw_y=... accel_raw_z=... gyro_raw_x=... gyro_raw_y=... gyro_raw_z=... temp_raw=... temp_c_mpu6050_approx=...
+```
+
+`temp_raw` is the trustworthy raw temperature; `temp_c_mpu6050_approx` uses the
+MPU6050 constant and is only approximate on MPU9250/ICM parts. Non-`0x68`
+candidates (magnetometer/BNO055) report address + candidate hint only; they need
+their own driver and are not register-read here.
+
+Latest breadboard result: the known-good breadboard module is detected at
+`i2c_addr=0x69`, `imu_present=true`, with `whoami=0x6F`
+(`whoami_label=MPU_CLASS_CLONE_OR_VARIANT_0x6F_signal_only`). `0x6F` is not a
+standard InvenSense/ST device ID, but the part ACKs at `0x69` and answers the
+`0x75` WHO_AM_I register, so it is MPU register-map compatible and the probe wakes
+it and reads raw accel/gyro/temp. Treat this as **signal validation only**: do
+not assume a specific datasheet, scale factor, or trusted yaw/heading from it. The
+rover-mounted IMU may be different or faulty and must be validated separately.
+
+Compile-time options:
+
+- `IMU_PROBE_SCAN_ONLY` (default `0`): generic I2C scanner + labels only, no
+  register access — the simplest, fully read-only mode (requirement 5).
+- `IMU_PROBE_RAW_ENABLE` (default `1`): when not scan-only, set `0` to stay
+  read-only and report `WHO_AM_I` only (no wake / no raw reads).
+
+Compile (macOS + OpenRB-150):
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe firmware/imu_probe
+```
+
+Upload:
+
+```bash
+arduino-cli upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe firmware/imu_probe
+```
+
+Monitor:
+
+```bash
+arduino-cli monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+One-shot compile + upload + monitor with auto-detected port and logging:
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && mkdir -p outputs/logs && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe firmware/imu_probe && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe firmware/imu_probe && sleep 2 && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli monitor -p "$PORT" --config baudrate=115200 | tee outputs/logs/imu_probe_$(date +%Y%m%d_%H%M%S).log
+```
+
+Generic-scanner-only build (no register access):
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe-scanonly --build-property 'compiler.cpp.extra_flags=-DIMU_PROBE_SCAN_ONLY=1' firmware/imu_probe
+```
+
+Scan + `WHO_AM_I` only, no wake / no raw reads:
+
+```bash
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe-rawoff --build-property 'compiler.cpp.extra_flags=-DIMU_PROBE_RAW_ENABLE=0' firmware/imu_probe
+```
+
+Physical movements to try while monitoring (validate raw signal, not heading):
+
+1. Hold stationary ~5 s — raw accel/gyro should be roughly steady; one accel
+   axis near gravity (~16384 at ±2 g) and gyro near zero.
+2. Tilt forward / back — accel X/Z (or pitch axis) should change smoothly.
+3. Tilt left / right — accel Y/Z (or roll axis) should change smoothly.
+4. Rotate yaw slowly — the corresponding gyro axis should spike while turning,
+   then return toward zero when you stop.
+5. Hold stationary again — values should settle back near the step-1 baseline.
+
+Interpretation: changing raw values that track motion and settle when still mean
+the IMU signal is alive. Do **not** treat any of this as a usable yaw/heading
+source. Physical path following stays blocked until both the RC/PPM mode channel
+holds reliably (see the PPM probe blocker) and a heading source is validated
+(calibration + drift). If `bus_state=BUS_STUCK_LOW_BEFORE_SCAN` persists or no
+`0x68`/`0x69` address appears, the IMU is not yet electrically usable; continue
+the GPS+RC workflow without IMU.
 
 ## I2C Scanner Test
 

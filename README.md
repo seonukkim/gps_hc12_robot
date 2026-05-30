@@ -513,6 +513,32 @@ Monitor:
 '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
 ```
 
+### Breadboard Navigation Development Stack
+
+Safe indoor workflow for building the GPS + IMU + HC-12 navigation stack with no
+motors and no rover chassis. Full details and exact commands are in
+[`firmware/README.md`](firmware/README.md) ("Breadboard Navigation Development
+Stack"). Summary:
+
+- IMU signal check: `firmware/imu_probe` (detected at I2C `0x69`, `whoami=0x6F`,
+  signal-only; yaw/heading not trusted yet).
+- HC-12 link check: `firmware/hc12_link_probe` (firmware) + `tools/hc12_link_probe.py`
+  (station). Motor-free PING/PONG; never sends motor commands.
+- GPS check: `firmware/gps_uart_probe` (keeps printing `gps_block_reason` and raw
+  status even with no indoor fix).
+- Path-planning preview: `tools/path_planning_preview.py` (preview-only CSV +
+  markdown + optional PNG from manual coordinates).
+- Firmware path-following dry-run: `-DPATH_FOLLOWING_DRYRUN=1` computes
+  distance/bearing/heading/steering and runs the HC-12 waypoint protocol with
+  motors disabled.
+
+UART rule: OpenRB-150 has three hardware UARTs (`Serial1` D26/D27, `Serial2`
+D28/D29 = GPS, `Serial3` D14/D13). GPS and HC-12 both default to `Serial2`, so
+they cannot run together on the current rover wiring; for GPS + HC-12 together,
+wire HC-12 to `Serial1`/`Serial3` and select it. Physical path following stays
+blocked (all four motion gates and `PATH_FOLLOWING_MODE_CHANNEL_STABLE` default
+to 0) until the RC/PPM mode channel holds and a heading source is validated.
+
 ### Serial3 Loopback Test
 
 Historical UART pin test. Under the Fixed Wiring Plan, do not move GPS or

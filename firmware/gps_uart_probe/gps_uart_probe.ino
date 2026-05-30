@@ -216,6 +216,31 @@ const char *gpsProbeState(bool validCurrentFix) {
   return "INTERMITTENT_FIX";
 }
 
+// Single-word reason the current fix is not usable, using the same vocabulary as
+// the main controller's gps_block_reason. Indoor/no-fix states are normal here;
+// the probe keeps printing raw status regardless.
+const char *gpsBlockReason(bool validCurrentFix) {
+  if (totalChars == 0) {
+    return "NO_BYTES";
+  }
+  if (!rmcOrGgaFixStatusOk()) {
+    return "NO_NMEA_FIX";
+  }
+  if (!gps.location.isValid()) {
+    return "NO_LOCATION";
+  }
+  if (gps.location.age() > FIX_MAX_AGE_MS) {
+    return "STALE_LOCATION";
+  }
+  if (!gps.satellites.isValid() || gps.satellites.value() < FIX_MIN_SATS) {
+    return "LOW_SATS";
+  }
+  if (!gps.hdop.isValid() || gps.hdop.hdop() > FIX_MAX_HDOP) {
+    return "HIGH_HDOP";
+  }
+  return validCurrentFix ? "OK" : "NO_FIX";
+}
+
 void printProbeHeader() {
   Serial.println();
   Serial.println("GPS UART probe starting.");
@@ -263,6 +288,8 @@ void printReport() {
   Serial.print(validCurrentFix ? "true" : "false");
   Serial.print(" gps_probe_state=");
   Serial.print(gpsProbeState(validCurrentFix));
+  Serial.print(" gps_block_reason=");
+  Serial.print(gpsBlockReason(validCurrentFix));
   Serial.print(" lat=");
   if (validCurrentFix) {
     Serial.print(gps.location.lat(), 7);

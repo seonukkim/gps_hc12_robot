@@ -350,3 +350,29 @@ Every field or bench test should record:
 - files/logs produced
 
 Use `docs/field_test_log.md` as the project-level index.
+
+## Path-Following Dry-Run And Guarded Execution
+
+`PATH_FOLLOWING_DRYRUN=1` adds waypoint distance/bearing/heading/steering
+diagnostics and a motor-free HC-12 waypoint protocol. By itself it does not drive
+motors.
+
+Physical path-following output is impossible unless ALL of these hold. The four
+compile gates and the mode-channel acknowledgement all default to `0`:
+
+- compile: `PHYSICAL_PATH_FOLLOWING_ENABLE=1`,
+  `PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=1`, `GROUND_CRAWL_TEST_MODE=1`,
+  `AUTO_MOTION_ARMED=1`, and `PATH_FOLLOWING_MODE_CHANNEL_STABLE=1`.
+- runtime: `gps_motion_ready`, `heading_ready`, RC valid + AUTO switch on, RC
+  sticks neutral, target distance within `[3.0, 20.0]` m, not arrived, no HC-12
+  ESTOP, a fresh HC-12 target if one is used, and no active latch-stop.
+
+Hard caps: forward `<= PATH_FOLLOWING_MAX_FORWARD_CMD` (0.18), turn
+`<= PATH_FOLLOWING_MAX_TURN_CMD` (0.04), and a latch-stop after
+`PATH_FOLLOWING_MAX_AUTO_MS` (500 ms) that clears only on MANUAL. The current
+block reason is printed as `physical_block_reason` (default `COMPILE_GATE_OFF`).
+
+This does not weaken STOP, failsafe, manual override, heartbeat, or the
+wheel-off-ground rule. HC-12 path-following commands are never connected to motor
+execution unless every gate above is satisfied. Physical path following is not
+approved while the RC/PPM mode channel and heading source remain unvalidated.

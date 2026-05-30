@@ -921,3 +921,26 @@ Before implementing waypoint following:
 
 Real waypoint following must be introduced as a separate milestone, not by
 expanding the dry-run mode directly into motion.
+
+## Path-Following Dry-Run (Breadboard Stage)
+
+A firmware-side path-following dry-run is now available behind
+`PATH_FOLLOWING_DRYRUN=1` for safe breadboard/indoor development. It is the
+companion to the station path-planning preview (`tools/path_planning_preview.py`).
+
+- Computes per-waypoint distance, bearing, heading (from GPS course-over-ground),
+  bearing error, and desired forward/turn/logical/physical commands, and advances
+  through a compile-time path on arrival. Indoors it can use a compile-time mock
+  position; a mock/static position yields no heading
+  (`path_following_block_reason=NO_HEADING`).
+- Runs a motor-free HC-12 waypoint protocol (`PING`/`PONG`, `SET_TARGET`,
+  `STATUS`, `ESTOP`, `CLEAR`) on `Serial3`/`Serial1`. `SET_TARGET` updates a
+  dry-run target only.
+- Guarded physical execution exists but is disabled by default: motors stay
+  neutral unless all four motion gates plus `PATH_FOLLOWING_MODE_CHANNEL_STABLE`
+  are set and every runtime gate passes, under hard forward/turn caps and a
+  500 ms latch-stop.
+
+This is still not real autonomous waypoint following. Do not enable physical
+output until the RC/PPM Manual/Auto channel holds reliably and an IMU/GPS heading
+source is validated (calibration + drift). IMU `0x69`/`0x6F` is signal-only for now.

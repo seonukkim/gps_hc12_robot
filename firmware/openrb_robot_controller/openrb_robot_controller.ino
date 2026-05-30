@@ -109,13 +109,102 @@
 #define MODE_CHANNEL_INDEX 4
 #endif
 
+// ---- Path-following dry-run / guarded execution (Tasks E/F/G) ----
+// PATH_FOLLOWING_DRYRUN is a self-contained top-level mode. It computes waypoint
+// distance/bearing/heading/steering diagnostics and NEVER drives motors unless
+// every gate below is satisfied. All four motion gates default to 0, so the
+// default build (and the dry-run build) can never move motors.
+#ifndef PATH_FOLLOWING_DRYRUN
+#define PATH_FOLLOWING_DRYRUN 0
+#endif
+#ifndef PHYSICAL_PATH_FOLLOWING_ENABLE
+#define PHYSICAL_PATH_FOLLOWING_ENABLE 0
+#endif
+#ifndef PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT
+#define PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT 0
+#endif
+// Operator acknowledgement that the RC/PPM Manual/Auto channel is stable. The
+// current hardware blocker (CH5 did not hold HIGH) means this must stay 0 until
+// firmware/ppm_channel_map_probe proves a stable 2-position switch.
+#ifndef PATH_FOLLOWING_MODE_CHANNEL_STABLE
+#define PATH_FOLLOWING_MODE_CHANNEL_STABLE 0
+#endif
+// Allow a compile-time mock current position so the dry-run works indoors with
+// no GPS fix. Mock position cannot produce a heading, so it can never satisfy
+// the physical-output gate.
+#ifndef PATH_FOLLOWING_ALLOW_MOCK_POSITION
+#define PATH_FOLLOWING_ALLOW_MOCK_POSITION 1
+#endif
+#ifndef PATH_FOLLOWING_MOCK_CURRENT_LAT
+#define PATH_FOLLOWING_MOCK_CURRENT_LAT 35.5705500
+#endif
+#ifndef PATH_FOLLOWING_MOCK_CURRENT_LON
+#define PATH_FOLLOWING_MOCK_CURRENT_LON 129.1871000
+#endif
+// Hard caps for any guarded physical output.
+#ifndef PATH_FOLLOWING_MAX_FORWARD_CMD
+#define PATH_FOLLOWING_MAX_FORWARD_CMD 0.18
+#endif
+#ifndef PATH_FOLLOWING_MAX_TURN_CMD
+#define PATH_FOLLOWING_MAX_TURN_CMD 0.04
+#endif
+#ifndef PATH_FOLLOWING_MAX_AUTO_MS
+#define PATH_FOLLOWING_MAX_AUTO_MS 500
+#endif
+#ifndef PATH_FOLLOWING_ARRIVAL_RADIUS_M
+#define PATH_FOLLOWING_ARRIVAL_RADIUS_M 2.0
+#endif
+#ifndef PATH_FOLLOWING_MIN_TARGET_DISTANCE_M
+#define PATH_FOLLOWING_MIN_TARGET_DISTANCE_M 3.0
+#endif
+#ifndef PATH_FOLLOWING_MAX_TARGET_DISTANCE_M
+#define PATH_FOLLOWING_MAX_TARGET_DISTANCE_M 20.0
+#endif
+// HC-12 waypoint protocol for the dry-run. It must be on a UART different from
+// GPS (Serial2); 1=Serial1, 3=Serial3. Serial2 is rejected at compile time.
+#ifndef PATH_FOLLOWING_HC12_ENABLED
+#define PATH_FOLLOWING_HC12_ENABLED 1
+#endif
+#ifndef PATH_FOLLOWING_HC12_SERIAL_PORT
+#define PATH_FOLLOWING_HC12_SERIAL_PORT 3
+#endif
+#ifndef PATH_FOLLOWING_HC12_CMD_STALE_MS
+#define PATH_FOLLOWING_HC12_CMD_STALE_MS 2000
+#endif
+// Compile-time path (override per-waypoint with -D...). Defaults are real nearby
+// coordinates from the documented test site, forming a short multi-leg path.
+#ifndef PATH_FOLLOWING_WP_COUNT
+#define PATH_FOLLOWING_WP_COUNT 3
+#endif
+#ifndef PATH_FOLLOWING_WP1_LAT
+#define PATH_FOLLOWING_WP1_LAT 35.5706361
+#endif
+#ifndef PATH_FOLLOWING_WP1_LON
+#define PATH_FOLLOWING_WP1_LON 129.1870540
+#endif
+#ifndef PATH_FOLLOWING_WP2_LAT
+#define PATH_FOLLOWING_WP2_LAT 35.5707680
+#endif
+#ifndef PATH_FOLLOWING_WP2_LON
+#define PATH_FOLLOWING_WP2_LON 129.1867906
+#endif
+#ifndef PATH_FOLLOWING_WP3_LAT
+#define PATH_FOLLOWING_WP3_LAT 35.5705010
+#endif
+#ifndef PATH_FOLLOWING_WP3_LON
+#define PATH_FOLLOWING_WP3_LON 129.1872696
+#endif
+
 #define STRINGIFY_VALUE_IMPL(value) #value
 #define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
 
 #define ENABLE_GPS_TELEMETRY 1
 #if MOTOR_PULSE_TEST_MODE || FIXED_WIRING_GPS_SERIAL2_DIAG || \
     FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
-    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT || PATH_FOLLOWING_DRYRUN
+// GPS owns Serial2 here. The legacy station HC-12 command stack (which can drive
+// motors via CMD,MANUAL/CMD,AUTO) stays disabled. Path-following mode runs its
+// own motor-free HC-12 waypoint protocol on a separate UART (Serial1/Serial3).
 #define HC12_LINK_ENABLED 0
 #define GPS_SERIAL Serial2
 #else
@@ -433,7 +522,7 @@ float absFloat(float value) {
 }
 
 #if FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
-    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
+    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT || PATH_FOLLOWING_DRYRUN
 double degreesToRadians(double degrees) {
   return degrees * 0.017453292519943295;
 }
@@ -1872,6 +1961,570 @@ void processHC12Line(const String &line) {
   }
 }
 
+// ============== Path-following dry-run + guarded execution (Tasks E/F/G) ==============
+// Compiled only when PATH_FOLLOWING_DRYRUN=1. Self-contained and motor-safe by
+// default: physical output is impossible unless PATH_FOLLOWING_PHYSICAL_COMPILE_GATE
+// (all four motion flags = 1) AND every runtime gate passes. See firmware/README.md.
+#if PATH_FOLLOWING_DRYRUN
+
+#if PATH_FOLLOWING_HC12_ENABLED
+#if PATH_FOLLOWING_HC12_SERIAL_PORT == 1
+#define PF_HC12_SERIAL Serial1
+constexpr const char *PF_HC12_PORT_NAME = "Serial1";
+#elif PATH_FOLLOWING_HC12_SERIAL_PORT == 3
+#define PF_HC12_SERIAL Serial3
+constexpr const char *PF_HC12_PORT_NAME = "Serial3";
+#else
+#error "PATH_FOLLOWING_HC12_SERIAL_PORT must be 1 (Serial1) or 3 (Serial3); Serial2 is reserved for GPS."
+#endif
+#else
+constexpr const char *PF_HC12_PORT_NAME = "disabled";
+#endif
+
+constexpr float    PATH_FOLLOWING_MAX_FORWARD_CMD_VALUE = PATH_FOLLOWING_MAX_FORWARD_CMD;
+constexpr float    PATH_FOLLOWING_MAX_TURN_CMD_VALUE = PATH_FOLLOWING_MAX_TURN_CMD;
+constexpr uint32_t PATH_FOLLOWING_MAX_AUTO_MS_VALUE = PATH_FOLLOWING_MAX_AUTO_MS;
+constexpr double   PATH_FOLLOWING_ARRIVAL_RADIUS_M_VALUE = PATH_FOLLOWING_ARRIVAL_RADIUS_M;
+constexpr double   PATH_FOLLOWING_MIN_TARGET_DISTANCE_M_VALUE = PATH_FOLLOWING_MIN_TARGET_DISTANCE_M;
+constexpr double   PATH_FOLLOWING_MAX_TARGET_DISTANCE_M_VALUE = PATH_FOLLOWING_MAX_TARGET_DISTANCE_M;
+constexpr bool     PATH_FOLLOWING_ALLOW_MOCK_POSITION_ENABLED = PATH_FOLLOWING_ALLOW_MOCK_POSITION != 0;
+constexpr double   PATH_FOLLOWING_MOCK_CURRENT_LAT_VALUE = PATH_FOLLOWING_MOCK_CURRENT_LAT;
+constexpr double   PATH_FOLLOWING_MOCK_CURRENT_LON_VALUE = PATH_FOLLOWING_MOCK_CURRENT_LON;
+constexpr bool     PATH_FOLLOWING_MODE_CHANNEL_STABLE_ACK = PATH_FOLLOWING_MODE_CHANNEL_STABLE != 0;
+constexpr uint32_t PATH_FOLLOWING_HC12_CMD_STALE_MS_VALUE = PATH_FOLLOWING_HC12_CMD_STALE_MS;
+
+// The single hard compile gate. False unless ALL FOUR motion flags are 1.
+constexpr bool PATH_FOLLOWING_PHYSICAL_COMPILE_GATE =
+    (PHYSICAL_PATH_FOLLOWING_ENABLE != 0) && (PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0) &&
+    (GROUND_CRAWL_TEST_MODE != 0) && (AUTO_MOTION_ARMED != 0);
+
+struct PfWaypoint {
+  double lat;
+  double lon;
+};
+PfWaypoint pfWaypoints[] = {
+    {PATH_FOLLOWING_WP1_LAT, PATH_FOLLOWING_WP1_LON},
+    {PATH_FOLLOWING_WP2_LAT, PATH_FOLLOWING_WP2_LON},
+    {PATH_FOLLOWING_WP3_LAT, PATH_FOLLOWING_WP3_LON},
+};
+constexpr size_t PF_WAYPOINT_CAPACITY = sizeof(pfWaypoints) / sizeof(pfWaypoints[0]);
+size_t pfWaypointCount =
+    (PATH_FOLLOWING_WP_COUNT < 1)
+        ? 1
+        : ((static_cast<size_t>(PATH_FOLLOWING_WP_COUNT) > PF_WAYPOINT_CAPACITY)
+               ? PF_WAYPOINT_CAPACITY
+               : static_cast<size_t>(PATH_FOLLOWING_WP_COUNT));
+size_t pfActiveIndex = 0;
+
+bool pfPositionValidFlag = false;
+double pfCurrentLat = 0.0;
+double pfCurrentLon = 0.0;
+const char *pfPositionSource = "none";
+const char *pfActiveTargetSource = "compile_time";
+double pfTargetDistanceM = 0.0;
+double pfTargetBearingDeg = 0.0;
+bool pfArrivedFlag = false;
+bool pfCourseRefValid = false;
+double pfCourseRefLat = 0.0;
+double pfCourseRefLon = 0.0;
+double pfCourseDisplacementM = 0.0;
+bool pfHeadingReadyFlag = false;
+const char *pfHeadingSource = "NONE";
+double pfEstimatedCourseDeg = 0.0;
+double pfBearingErrorDeg = 0.0;
+float pfDesiredForwardCmd = 0.0f;
+float pfDesiredTurnCmd = 0.0f;
+float pfDesiredLogicalLeftCmd = 0.0f;
+float pfDesiredLogicalRightCmd = 0.0f;
+float pfDesiredPhysicalACmd = 0.0f;
+float pfDesiredPhysicalBCmd = 0.0f;
+const char *pfBlockReason = "MODE_OFF";
+
+bool pfNeutralOkFlag = false;
+bool pfAutoTimingActive = false;
+uint32_t pfAutoEntryMs = 0;
+uint32_t pfAutoElapsedMs = 0;
+bool pfLatchedStopFlag = false;
+bool pfPhysicalOutputActiveFlag = false;
+
+bool pfHc12TargetValid = false;
+double pfHc12TargetLat = 0.0;
+double pfHc12TargetLon = 0.0;
+bool pfHc12Estop = false;
+uint32_t pfHc12RxCount = 0;
+uint32_t pfHc12TxCount = 0;
+uint32_t pfHc12LastRxMs = 0;
+bool pfHc12AnyRx = false;
+bool pfHc12ParseOk = false;
+const char *pfHc12ParseError = "NONE";
+const char *pfHc12LastCmd = "NONE";
+long pfHc12LastSeq = -1;
+String pfHc12RxLine;
+
+bool pfParseDoubleToken(const String &token, double &out) {
+  if (token.length() == 0) {
+    return false;
+  }
+  char *endPtr = nullptr;
+  double value = strtod(token.c_str(), &endPtr);
+  if (endPtr == token.c_str() || *endPtr != '\0') {
+    return false;
+  }
+  out = value;
+  return true;
+}
+
+#if PATH_FOLLOWING_HC12_ENABLED
+void pfHc12SendFrame(const char *type, long seq, const char *payload) {
+  String body = String(type) + "," + String(seq) + "," + String(payload);
+  uint8_t checksum = checksumXor(body);
+  PF_HC12_SERIAL.print('@');
+  PF_HC12_SERIAL.print(body);
+  PF_HC12_SERIAL.print('*');
+  if (checksum < 0x10) {
+    PF_HC12_SERIAL.print('0');
+  }
+  PF_HC12_SERIAL.println(checksum, HEX);
+  pfHc12TxCount++;
+}
+#else
+void pfHc12SendFrame(const char *, long, const char *) {}
+#endif
+
+// HC-12 waypoint protocol (dry-run only). Updates a dry-run target / estop flag /
+// counters and replies, but never drives motors and never touches stationManual.
+void pfHandleHc12Frame(const String &type, long seq, const String &payload) {
+  pfHc12LastSeq = seq;
+  if (type == "PING") {
+    pfHc12LastCmd = "PING";
+    pfHc12SendFrame("PONG", seq, "PF");
+  } else if (type == "SET_TARGET") {
+    pfHc12LastCmd = "SET_TARGET";
+    String fields[2];
+    size_t count = 0;
+    double lat = 0.0;
+    double lon = 0.0;
+    if (splitCsvFields(payload, fields, 2, count) && count == 2 &&
+        pfParseDoubleToken(fields[0], lat) && pfParseDoubleToken(fields[1], lon) &&
+        lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
+      pfHc12TargetLat = lat;
+      pfHc12TargetLon = lon;
+      pfHc12TargetValid = true;
+      pfCourseRefValid = false;  // re-seed heading reference for the new target
+      pfHc12SendFrame("ACK", seq, "SET_TARGET");
+    } else {
+      pfHc12SendFrame("ERR", seq, "SET_TARGET_PAYLOAD");
+    }
+  } else if (type == "STATUS") {
+    pfHc12LastCmd = "STATUS";
+    String status = String("dist=") + String(pfTargetDistanceM, 1) +
+                    " heading_ready=" + (pfHeadingReadyFlag ? "1" : "0") + " block=" + pfBlockReason;
+    pfHc12SendFrame("STAT", seq, status.c_str());
+  } else if (type == "ESTOP") {
+    pfHc12LastCmd = "ESTOP";
+    pfHc12Estop = true;  // blocks the (already-gated) physical-output path
+    pfHc12SendFrame("ACK", seq, "ESTOP");
+  } else if (type == "CLEAR") {
+    pfHc12LastCmd = "CLEAR";
+    pfHc12TargetValid = false;
+    pfHc12Estop = false;
+    pfCourseRefValid = false;
+    pfHc12SendFrame("ACK", seq, "CLEAR");
+  } else {
+    pfHc12LastCmd = "UNSUPPORTED";
+    pfHc12SendFrame("ERR", seq, "UNSUPPORTED");
+  }
+}
+
+void pfProcessHc12Line(const String &line) {
+  if (line.length() == 0) {
+    return;
+  }
+  pfHc12RxCount++;
+  pfHc12LastRxMs = millis();
+  pfHc12AnyRx = true;
+  String type;
+  String payload;
+  long seq = 0;
+  if (!decodeFrame(line, type, seq, payload)) {
+    pfHc12ParseOk = false;
+    pfHc12ParseError = "BAD_FRAME";
+    return;
+  }
+  pfHc12ParseOk = true;
+  pfHc12ParseError = "NONE";
+  pfHandleHc12Frame(type, seq, payload);
+}
+
+void pfReadHc12() {
+#if PATH_FOLLOWING_HC12_ENABLED
+  while (PF_HC12_SERIAL.available() > 0) {
+    char c = static_cast<char>(PF_HC12_SERIAL.read());
+    if (c == '\n') {
+      pfProcessHc12Line(pfHc12RxLine);
+      pfHc12RxLine = "";
+    } else if (c != '\r') {
+      pfHc12RxLine += c;
+      if (pfHc12RxLine.length() > 120) {
+        pfHc12RxLine = "";  // overflow guard
+      }
+    }
+  }
+#endif
+}
+
+bool pfResolveCurrentPosition() {
+  if (gpsDryrunReady() && gps.location.isValid()) {
+    pfCurrentLat = gps.location.lat();
+    pfCurrentLon = gps.location.lng();
+    pfPositionSource = "gps";
+    return true;
+  }
+  if (PATH_FOLLOWING_ALLOW_MOCK_POSITION_ENABLED) {
+    pfCurrentLat = PATH_FOLLOWING_MOCK_CURRENT_LAT_VALUE;
+    pfCurrentLon = PATH_FOLLOWING_MOCK_CURRENT_LON_VALUE;
+    pfPositionSource = "mock";
+    return true;
+  }
+  pfPositionSource = "none";
+  return false;
+}
+
+void pfResolveActiveTarget(double &lat, double &lon) {
+  if (pfHc12TargetValid) {
+    lat = pfHc12TargetLat;
+    lon = pfHc12TargetLon;
+    pfActiveTargetSource = "hc12";
+    return;
+  }
+  lat = pfWaypoints[pfActiveIndex].lat;
+  lon = pfWaypoints[pfActiveIndex].lon;
+  pfActiveTargetSource = "compile_time";
+}
+
+void pfResetSteeringOutputs(const char *reason) {
+  pfHeadingReadyFlag = false;
+  pfBearingErrorDeg = 0.0;
+  pfDesiredForwardCmd = 0.0f;
+  pfDesiredTurnCmd = 0.0f;
+  pfDesiredLogicalLeftCmd = 0.0f;
+  pfDesiredLogicalRightCmd = 0.0f;
+  pfDesiredPhysicalACmd = 0.0f;
+  pfDesiredPhysicalBCmd = 0.0f;
+  pfBlockReason = reason;
+}
+
+void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualActive,
+                               uint16_t steeringUs, uint16_t throttleUs, uint32_t now) {
+  pfNeutralOkFlag = (normRcCentered(steeringUs, STEERING_CENTER_US) == 0.0f) &&
+                    (normRcCentered(throttleUs, THROTTLE_CENTER_US) == 0.0f);
+
+  pfPositionValidFlag = pfResolveCurrentPosition();
+  double targetLat = 0.0;
+  double targetLon = 0.0;
+  pfResolveActiveTarget(targetLat, targetLon);
+
+  pfArrivedFlag = false;
+  pfTargetDistanceM = 0.0;
+  pfTargetBearingDeg = 0.0;
+
+  if (!pfPositionValidFlag) {
+    pfCourseRefValid = false;
+    pfHeadingSource = "NONE";
+    pfResetSteeringOutputs("NO_POSITION");
+  } else {
+    pfTargetDistanceM = dryrunDistanceMeters(pfCurrentLat, pfCurrentLon, targetLat, targetLon);
+    pfTargetBearingDeg = dryrunBearingDegrees(pfCurrentLat, pfCurrentLon, targetLat, targetLon);
+    pfArrivedFlag = pfTargetDistanceM <= PATH_FOLLOWING_ARRIVAL_RADIUS_M_VALUE;
+
+    if (strcmp(pfPositionSource, "gps") != 0) {
+      // Mock/static position cannot yield a course-over-ground heading.
+      pfCourseRefValid = false;
+      pfHeadingSource = "NONE_MOCK_NO_COURSE";
+      pfResetSteeringOutputs("NO_HEADING");
+    } else if (!pfCourseRefValid) {
+      pfCourseRefLat = pfCurrentLat;
+      pfCourseRefLon = pfCurrentLon;
+      pfCourseRefValid = true;
+      pfHeadingSource = "GPS_COURSE";
+      pfResetSteeringOutputs("NO_HEADING");
+    } else {
+      pfCourseDisplacementM =
+          dryrunDistanceMeters(pfCourseRefLat, pfCourseRefLon, pfCurrentLat, pfCurrentLon);
+      if (pfCourseDisplacementM < SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M) {
+        pfHeadingSource = "GPS_COURSE";
+        pfResetSteeringOutputs("NO_HEADING");
+      } else {
+        pfEstimatedCourseDeg =
+            dryrunBearingDegrees(pfCourseRefLat, pfCourseRefLon, pfCurrentLat, pfCurrentLon);
+        pfCourseRefLat = pfCurrentLat;
+        pfCourseRefLon = pfCurrentLon;
+        pfHeadingReadyFlag = true;
+        pfHeadingSource = "GPS_COURSE";
+        pfBearingErrorDeg = normalizeBearingErrorDegrees(pfTargetBearingDeg - pfEstimatedCourseDeg);
+
+        float forward = PATH_FOLLOWING_MAX_FORWARD_CMD_VALUE;
+        float turn =
+            clampUnit(static_cast<float>(pfBearingErrorDeg / 90.0)) * PATH_FOLLOWING_MAX_TURN_CMD_VALUE;
+        if (turn > PATH_FOLLOWING_MAX_TURN_CMD_VALUE) {
+          turn = PATH_FOLLOWING_MAX_TURN_CMD_VALUE;
+        } else if (turn < -PATH_FOLLOWING_MAX_TURN_CMD_VALUE) {
+          turn = -PATH_FOLLOWING_MAX_TURN_CMD_VALUE;
+        }
+        pfDesiredForwardCmd = forward;
+        pfDesiredTurnCmd = turn;
+        pfDesiredLogicalLeftCmd = clampUnit(forward + turn);
+        pfDesiredLogicalRightCmd = clampUnit(forward - turn);
+        pfDesiredPhysicalACmd = clampUnit((pfDesiredLogicalLeftCmd + pfDesiredLogicalRightCmd) * 0.5f);
+        pfDesiredPhysicalBCmd = clampUnit((pfDesiredLogicalRightCmd - pfDesiredLogicalLeftCmd) * 0.5f);
+        pfBlockReason = "OK";
+      }
+    }
+
+    // Advance along the compile-time path on arrival (an HC-12 override holds one target).
+    if (pfArrivedFlag && !pfHc12TargetValid && (pfActiveIndex + 1 < pfWaypointCount)) {
+      pfActiveIndex++;
+      pfCourseRefValid = false;
+    }
+  }
+
+  bool autoActive = rcValid && autoSwitchOn && !rcManualActive;
+  if (rcManualActive) {
+    pfLatchedStopFlag = false;  // latch clears only on MANUAL
+  }
+  if (autoActive) {
+    if (!pfAutoTimingActive) {
+      pfAutoTimingActive = true;
+      pfAutoEntryMs = now;
+    }
+    pfAutoElapsedMs = now - pfAutoEntryMs;
+    if (pfAutoElapsedMs > PATH_FOLLOWING_MAX_AUTO_MS_VALUE) {
+      pfLatchedStopFlag = true;
+    }
+  } else {
+    pfAutoTimingActive = false;
+    pfAutoEntryMs = 0;
+    pfAutoElapsedMs = 0;
+  }
+}
+
+bool pfDistanceInBounds() {
+  return pfPositionValidFlag &&
+         pfTargetDistanceM >= PATH_FOLLOWING_MIN_TARGET_DISTANCE_M_VALUE &&
+         pfTargetDistanceM <= PATH_FOLLOWING_MAX_TARGET_DISTANCE_M_VALUE;
+}
+
+bool pfHc12TargetFreshIfUsed() {
+  if (!pfHc12TargetValid) {
+    return true;
+  }
+  return pfHc12AnyRx && (millis() - pfHc12LastRxMs) <= PATH_FOLLOWING_HC12_CMD_STALE_MS_VALUE;
+}
+
+// The full physical-output gate (Task F). Returns "OK" only when every compile
+// AND runtime condition is satisfied; otherwise the string is the block reason.
+// Default build -> COMPILE_GATE_OFF, so motors can never move.
+const char *pathFollowingPhysicalBlockReason(bool rcValid, bool autoSwitchOn, bool rcManualActive) {
+  if (!PATH_FOLLOWING_PHYSICAL_COMPILE_GATE) {
+    return "COMPILE_GATE_OFF";
+  }
+  if (!PATH_FOLLOWING_MODE_CHANNEL_STABLE_ACK) {
+    return "MODE_CHANNEL_NOT_STABLE";
+  }
+  if (!rcValid) {
+    return "RC_INVALID";
+  }
+  if (!autoSwitchOn || rcManualActive) {
+    return "NOT_AUTO";
+  }
+  if (pfHc12Estop) {
+    return "HC12_ESTOP";
+  }
+  if (pfLatchedStopFlag) {
+    return "LATCHED_STOP";
+  }
+  if (!pfNeutralOkFlag) {
+    return "RC_NOT_NEUTRAL";
+  }
+  if (!gpsMotionReady()) {
+    return "GPS_NOT_MOTION_READY";
+  }
+  if (!pfHeadingReadyFlag) {
+    return "NO_HEADING";
+  }
+  if (pfArrivedFlag) {
+    return "ARRIVED";
+  }
+  if (!pfDistanceInBounds()) {
+    return "DISTANCE_OUT_OF_RANGE";
+  }
+  if (!pfHc12TargetFreshIfUsed()) {
+    return "HC12_TARGET_STALE";
+  }
+  return "OK";
+}
+
+void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringUs,
+                             uint16_t throttleUs, uint16_t modeUs, const char *physBlockReason) {
+  if (!ENABLE_USB_DEBUG) {
+    return;
+  }
+  uint32_t now = millis();
+  if (now - lastUsbDebugMs < USB_DEBUG_PERIOD_MS) {
+    return;
+  }
+  lastUsbDebugMs = now;
+
+  Serial.print(F("USBDBG "));
+  Serial.print(FIRMWARE_ID);
+  Serial.print(F(" path_following_dryrun=true mode="));
+  Serial.print(modeName(currentMode));
+  Serial.print(F(" control_source="));
+  Serial.print(controlSourceName(currentControlSource));
+  Serial.print(F(" rc_ok="));
+  Serial.print(rcValid ? F("true") : F("false"));
+  Serial.print(F(" auto_sw="));
+  Serial.print(autoSwitchOn ? F("true") : F("false"));
+  Serial.print(F(" steer_us="));
+  Serial.print(steeringUs);
+  Serial.print(F(" throttle_us="));
+  Serial.print(throttleUs);
+  Serial.print(F(" mode_us="));
+  Serial.print(modeUs);
+
+  Serial.print(F(" gps_dryrun_ready="));
+  Serial.print(gpsDryrunReady() ? F("true") : F("false"));
+  Serial.print(F(" gps_motion_ready="));
+  Serial.print(gpsMotionReady() ? F("true") : F("false"));
+  Serial.print(F(" gps_block_reason="));
+  Serial.print(gpsBlockReason());
+  Serial.print(F(" gps_sats="));
+  if (gps.satellites.isValid()) {
+    Serial.print(gps.satellites.value());
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_hdop="));
+  if (gps.hdop.isValid()) {
+    Serial.print(gps.hdop.hdop(), 2);
+  } else {
+    Serial.print(F("NA"));
+  }
+
+  Serial.print(F(" position_source="));
+  Serial.print(pfPositionSource);
+  Serial.print(F(" current_lat="));
+  if (pfPositionValidFlag) {
+    Serial.print(pfCurrentLat, 7);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" current_lon="));
+  if (pfPositionValidFlag) {
+    Serial.print(pfCurrentLon, 7);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" active_target_source="));
+  Serial.print(pfActiveTargetSource);
+  Serial.print(F(" wp_index="));
+  Serial.print(static_cast<unsigned long>(pfActiveIndex));
+  Serial.print(F(" wp_count="));
+  Serial.print(static_cast<unsigned long>(pfWaypointCount));
+  Serial.print(F(" target_distance_m="));
+  Serial.print(pfTargetDistanceM, 2);
+  Serial.print(F(" target_bearing_deg="));
+  Serial.print(pfTargetBearingDeg, 1);
+  Serial.print(F(" arrived="));
+  Serial.print(pfArrivedFlag ? F("true") : F("false"));
+  Serial.print(F(" heading_ready="));
+  Serial.print(pfHeadingReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" heading_source="));
+  Serial.print(pfHeadingSource);
+  Serial.print(F(" course_displacement_m="));
+  Serial.print(pfCourseDisplacementM, 2);
+  Serial.print(F(" estimated_course_deg="));
+  Serial.print(pfEstimatedCourseDeg, 1);
+  Serial.print(F(" bearing_error_deg="));
+  Serial.print(pfBearingErrorDeg, 1);
+  Serial.print(F(" desired_forward_cmd="));
+  Serial.print(pfDesiredForwardCmd, 3);
+  Serial.print(F(" desired_turn_cmd="));
+  Serial.print(pfDesiredTurnCmd, 3);
+  Serial.print(F(" desired_logical_left_cmd="));
+  Serial.print(pfDesiredLogicalLeftCmd, 3);
+  Serial.print(F(" desired_logical_right_cmd="));
+  Serial.print(pfDesiredLogicalRightCmd, 3);
+  Serial.print(F(" desired_physical_a_cmd="));
+  Serial.print(pfDesiredPhysicalACmd, 3);
+  Serial.print(F(" desired_physical_b_cmd="));
+  Serial.print(pfDesiredPhysicalBCmd, 3);
+  Serial.print(F(" path_following_block_reason="));
+  Serial.print(pfBlockReason);
+
+  Serial.print(F(" physical_compile_gate="));
+  Serial.print(PATH_FOLLOWING_PHYSICAL_COMPILE_GATE ? F("true") : F("false"));
+  Serial.print(F(" physical_path_following_enable="));
+  Serial.print((PHYSICAL_PATH_FOLLOWING_ENABLE != 0) ? F("true") : F("false"));
+  Serial.print(F(" allow_motor_output="));
+  Serial.print((PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0) ? F("true") : F("false"));
+  Serial.print(F(" ground_crawl_test_mode="));
+  Serial.print((GROUND_CRAWL_TEST_MODE != 0) ? F("true") : F("false"));
+  Serial.print(F(" auto_motion_armed="));
+  Serial.print((AUTO_MOTION_ARMED != 0) ? F("true") : F("false"));
+  Serial.print(F(" mode_channel_stable_ack="));
+  Serial.print(PATH_FOLLOWING_MODE_CHANNEL_STABLE_ACK ? F("true") : F("false"));
+  Serial.print(F(" neutral_ok="));
+  Serial.print(pfNeutralOkFlag ? F("true") : F("false"));
+  Serial.print(F(" latched_stop="));
+  Serial.print(pfLatchedStopFlag ? F("true") : F("false"));
+  Serial.print(F(" auto_elapsed_ms="));
+  Serial.print(pfAutoElapsedMs);
+  Serial.print(F(" max_auto_ms="));
+  Serial.print(PATH_FOLLOWING_MAX_AUTO_MS_VALUE);
+  Serial.print(F(" max_forward_cmd="));
+  Serial.print(PATH_FOLLOWING_MAX_FORWARD_CMD_VALUE, 3);
+  Serial.print(F(" max_turn_cmd="));
+  Serial.print(PATH_FOLLOWING_MAX_TURN_CMD_VALUE, 3);
+  Serial.print(F(" physical_output_active="));
+  Serial.print(pfPhysicalOutputActiveFlag ? F("true") : F("false"));
+  Serial.print(F(" physical_block_reason="));
+  Serial.print(physBlockReason);
+  Serial.print(F(" final_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" final_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" physical_a_cmd="));
+  Serial.print(lastOutputLeftPinCmd, 3);
+  Serial.print(F(" physical_b_cmd="));
+  Serial.print(lastOutputRightPinCmd, 3);
+
+  Serial.print(F(" hc12_pf_port="));
+  Serial.print(PF_HC12_PORT_NAME);
+  Serial.print(F(" hc12_rx_count="));
+  Serial.print(pfHc12RxCount);
+  Serial.print(F(" hc12_tx_count="));
+  Serial.print(pfHc12TxCount);
+  Serial.print(F(" hc12_last_rx_age_ms="));
+  if (pfHc12AnyRx) {
+    Serial.print(millis() - pfHc12LastRxMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" hc12_last_cmd="));
+  Serial.print(pfHc12LastCmd);
+  Serial.print(F(" hc12_parse_ok="));
+  Serial.print(pfHc12ParseOk ? F("true") : F("false"));
+  Serial.print(F(" hc12_parse_error="));
+  Serial.print(pfHc12ParseError);
+  Serial.print(F(" active_target_source_hc12="));
+  Serial.print(pfHc12TargetValid ? F("true") : F("false"));
+  Serial.print(F(" hc12_estop="));
+  Serial.print(pfHc12Estop ? F("true") : F("false"));
+  Serial.println();
+}
+#endif  // PATH_FOLLOWING_DRYRUN
+
 void setup() {
   Serial.begin(USB_BAUD);
 #if HC12_LINK_ENABLED
@@ -2090,6 +2743,47 @@ void loop() {
     motorStop();
   }
   debugPrintStatus();
+  return;
+#endif
+
+#if PATH_FOLLOWING_DRYRUN
+  clearAutoCommand();
+  clearStationManualCommand();
+  pfReadHc12();
+  updatePathFollowingDryrun(rcValid, autoSwitchOn, rcManualActive, steeringUs, throttleUs, now);
+  const char *pfPhysReason =
+      pathFollowingPhysicalBlockReason(rcValid, autoSwitchOn, rcManualActive);
+  bool pfPhysAllowed = (strcmp(pfPhysReason, "OK") == 0);
+  pfPhysicalOutputActiveFlag = false;
+  if (!rcValid) {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = FAILSAFE;
+    motorStop();
+  } else if (rcManualActive) {
+    currentMode = MANUAL;
+    currentControlSource = CONTROL_SOURCE_RC_MANUAL;
+    applyManualOverride(steeringUs, throttleUs);
+  } else if (autoSwitchOn) {
+    // Guarded physical path-following. pfPhysAllowed is true only when every
+    // compile gate AND runtime gate passed; the default build keeps it false.
+    if (pfPhysAllowed) {
+      float left = clampUnit(pfDesiredForwardCmd + pfDesiredTurnCmd);
+      float right = clampUnit(pfDesiredForwardCmd - pfDesiredTurnCmd);
+      currentMode = AUTO_RUNNING;
+      currentControlSource = CONTROL_SOURCE_AUTO;
+      pfPhysicalOutputActiveFlag = true;
+      applyAutoCommand(left, right);
+    } else {
+      currentMode = AUTO_READY;
+      currentControlSource = CONTROL_SOURCE_STOP;
+      motorStop();
+    }
+  } else {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = DISARMED;
+    motorStop();
+  }
+  pathFollowingDebugPrint(rcValid, autoSwitchOn, steeringUs, throttleUs, modeUs, pfPhysReason);
   return;
 #endif
 
