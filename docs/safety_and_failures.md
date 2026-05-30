@@ -59,6 +59,8 @@ Rules:
 
 - Any armed build (`AUTO_MOTION_ARMED=1`) without `GROUND_CRAWL_TEST_MODE=1`
   holds final commands at zero. The crawl harness is the only path to motion.
+- `SINGLE_WP_CRAWL_BASE_CMD` controls the candidate crawl command before final
+  clamping. Its default is `0.100` to preserve current behavior.
 - Final autonomous command is clamped to ±`GROUND_CRAWL_MAX_CMD` (default
   `0.08`).
 - After `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms) of continuous AUTO, the
@@ -70,8 +72,10 @@ Rules:
   (`GROUND_CRAWL_MIN_TARGET_DISTANCE_M=5.0` to
   `GROUND_CRAWL_MAX_TARGET_DISTANCE_M=20.0`). Any failed gate forces zero output;
   the reason is printed as `ground_crawl_block_reason`.
-- Raise the cap past the deadband only via `-DGROUND_CRAWL_MAX_CMD` in small
-  steps, wheels-off-ground or open-area-with-kill-switch only.
+- Raise candidate speed only via `-DSINGLE_WP_CRAWL_BASE_CMD` and keep
+  `-DGROUND_CRAWL_MAX_CMD` as the final safety clamp. Increasing only
+  `GROUND_CRAWL_MAX_CMD` raises the cap but does not raise
+  `candidate_left_cmd` / `candidate_right_cmd`.
 - Ground crawl is NOT full autonomous driving. Floor driving remains not
   approved.
 
@@ -89,7 +93,31 @@ Latest validation:
 - GPS degradation also blocked output as `GPS_NOT_MOTION_READY` or
   `LATCHED_STOP`.
 - Before any 0.12 retry, reacquire current GPS and compute a fresh target
-  `10..12` m away. Do not reuse the too-close target.
+  `10..12` m away. Compile the retry with both
+  `SINGLE_WP_CRAWL_BASE_CMD=0.12` and `GROUND_CRAWL_MAX_CMD=0.12`. Do not reuse
+  the too-close target.
+
+## GPS-Independent Motor Pulse Calibration
+
+`MOTOR_PULSE_TEST_MODE=1` is a separate deadband-calibration mode for cases
+where GPS-gated crawl tests are too slow or noisy.
+
+Rules:
+
+- HC-12 is disabled/ignored.
+- GPS readiness and waypoint target distance are not used.
+- RC MANUAL behavior is preserved.
+- AUTO emits a pulse only when `rc_ok=true` and steering/throttle are neutral.
+- The pulse command is `MOTOR_PULSE_CMD` (default `0.15`) for
+  `MOTOR_PULSE_MS` (default `300` ms).
+- After the pulse duration, the firmware latches stop:
+  `final_left_cmd=0.000`, `final_right_cmd=0.000`,
+  `motor_pulse_latched_stop=true`.
+- The latch clears only after returning to MANUAL.
+- USBDBG must be checked for `motor_pulse_ready=true` and
+  `motor_pulse_block_reason=OK` before interpreting physical movement.
+- This mode is for motor deadband calibration only. It is not path following,
+  not GPS autonomy, and not coverage driving.
 
 ## Station Defaults
 

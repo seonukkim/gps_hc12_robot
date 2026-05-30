@@ -1760,8 +1760,81 @@ Next action:
 - Compute a fresh target roughly `10..12` m away from the current rover/GPS
   position.
 - If no visible physical movement was observed at `0.08`, the next guarded
-  crawl test may use `GROUND_CRAWL_MAX_CMD=0.12` with the same latch protection.
+  crawl test may use `SINGLE_WP_CRAWL_BASE_CMD=0.12` with
+  `GROUND_CRAWL_MAX_CMD=0.12` and the same latch protection. The base command
+  raises the candidate speed; the ground-crawl max remains the final clamp.
 - Floor driving and coverage driving remain blocked.
+
+## 2026-05-30: Guarded Ground Crawl 0.12 Cap-Only Result
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Log marker: `ground_crawl_012_east9m_current`
+- Mode:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=1`
+  - `GROUND_CRAWL_TEST_MODE=1`
+  - `GROUND_CRAWL_MAX_CMD=0.120`
+
+Observed result:
+
+- Guarded crawl system worked:
+  - `AUTO_RUNNING` reached
+  - `ground_crawl_ready=true`
+  - `ground_crawl_block_reason=OK`
+  - latch stop worked after the duration limit
+- Candidate command stayed at the firmware default:
+  - `candidate_left_cmd=0.100`
+  - `candidate_right_cmd=0.100`
+- Final command was therefore also `0.100`, because the `0.120` cap was above
+  the candidate command:
+  - `final_left_cmd=0.100`
+  - `final_right_cmd=0.100`
+
+Interpretation:
+
+- `GROUND_CRAWL_MAX_CMD` is only the final safety clamp.
+- Raising only `GROUND_CRAWL_MAX_CMD` cannot produce more than the candidate
+  command.
+- Firmware now has a separate compile-time candidate speed define:
+  `SINGLE_WP_CRAWL_BASE_CMD`, default `0.100`.
+
+Next action:
+
+- If physical motion was still not observed, retry only after reacquiring fresh
+  GPS and computing a fresh nearby target.
+- Compile the next 0.12 attempt with both:
+  - `SINGLE_WP_CRAWL_BASE_CMD=0.12`
+  - `GROUND_CRAWL_MAX_CMD=0.12`
+- Keep `GROUND_CRAWL_MAX_AUTO_MS` latch protection and all GPS/RC/target gates.
+
+## 2026-05-30: GPS-Independent Motor Pulse Calibration Mode Added
+
+Reason:
+
+- Guarded crawl output has been observed at `0.120`, but the rover still did
+  not physically move.
+- GPS is intermittent, so GPS-gated tests are too slow and noisy for isolating
+  motor deadband / drivetrain / output scaling.
+
+Repository action:
+
+- Added `MOTOR_PULSE_TEST_MODE=1` to
+  `firmware/openrb_robot_controller/openrb_robot_controller.ino`.
+- Added compile-time parameters:
+  - `MOTOR_PULSE_CMD`, default `0.15`
+  - `MOTOR_PULSE_MS`, default `300`
+- In this mode, HC-12 is disabled and GPS readiness / waypoint target distance
+  are not used.
+- RC MANUAL mode remains available.
+- AUTO emits one neutral-stick pulse, then latches stop until returning to
+  MANUAL.
+
+Validation status:
+
+- Firmware compile is required before field use.
+- Physical motor pulse calibration has not yet been run.
 
 ## Known Manual Direction Attempts
 

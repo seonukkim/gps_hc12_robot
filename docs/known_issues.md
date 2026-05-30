@@ -652,16 +652,16 @@ Diagnosis:
 
 Rule — do not raise the AUTO command without the latch stop:
 
-- Do NOT simply increase `SINGLE_WAYPOINT_MAX_AUTO_THROTTLE` or otherwise raise
-  the armed AUTO command magnitude in an ungated, time-unbounded build. That is a
-  runaway risk.
+- Do NOT raise the armed AUTO command magnitude in an ungated, time-unbounded
+  build. That is a runaway risk.
 - The next motion test must use the guarded ground crawl build
   (`GROUND_CRAWL_TEST_MODE=1`). Armed motion is now gated to zero in any build
   without it.
 - The crawl harness clamps to ±`GROUND_CRAWL_MAX_CMD` (default `0.08`, which is
   intentionally below the observed deadband) and latches a hard stop after
   `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms; clears only on MANUAL). Step the
-  cap up via `-DGROUND_CRAWL_MAX_CMD` only in small increments, under latch
+  command up only by setting `-DSINGLE_WP_CRAWL_BASE_CMD` for the candidate
+  command and `-DGROUND_CRAWL_MAX_CMD` for the final clamp, under latch
   protection, wheels-off-ground or open-area-with-kill-switch.
 - Confirm the deadband interpretation with `unclamped_final_left_cmd` /
   `unclamped_final_right_cmd` and `ground_crawl_block_reason` in USBDBG before
@@ -688,7 +688,25 @@ Remaining cautions:
 - This validates the guarded crawl safety behavior, not full autonomous
   driving.
 - Before a 0.12 retry, reacquire current GPS and compute a fresh target
-  `10..12` m away. Do not reuse stale or too-close target coordinates.
+  `10..12` m away. Compile with both `SINGLE_WP_CRAWL_BASE_CMD=0.12` and
+  `GROUND_CRAWL_MAX_CMD=0.12`; raising only the clamp does not raise the
+  `0.100` candidate command. Do not reuse stale or too-close target coordinates.
+
+## GPS-Gated Crawl Is Noisy For Motor Deadband Calibration
+
+GPS remains intermittent enough that GPS-gated guarded crawl tests can be slow
+and noisy when the immediate question is only motor deadband or drivetrain
+response.
+
+Use `MOTOR_PULSE_TEST_MODE=1` for GPS-independent deadband calibration:
+
+- It does not use GPS readiness or waypoint target distance.
+- It disables HC-12.
+- It preserves RC MANUAL behavior.
+- AUTO emits one neutral-stick pulse and then latches stop until MANUAL.
+
+Do not use this mode as autonomy proof. It only answers whether a given
+`MOTOR_PULSE_CMD` produces physical drivetrain response.
 
 ## Heading / BMI160 Is Not Integrated
 

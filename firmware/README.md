@@ -28,6 +28,7 @@ Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
 | MANUAL RC + AUTO GPS dry-run | `FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN=1` | RC manual driving plus AUTO GPS distance/bearing computation | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO forced neutral |
 | Single-waypoint experiment | `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | guarded one-target candidate-command experiment | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO is neutral unless `AUTO_MOTION_ARMED=1` AND `GROUND_CRAWL_TEST_MODE=1` |
 | Guarded ground crawl | `...SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1` | only path to armed motion; clamps to ±`GROUND_CRAWL_MAX_CMD` and latches stop after `GROUND_CRAWL_MAX_AUTO_MS` | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO crawls clamped/latched, else neutral |
+| Motor pulse calibration | `MOTOR_PULSE_TEST_MODE=1` | GPS-independent motor deadband calibration | not used | disabled/ignored | MANUAL can drive; AUTO emits one neutral-stick pulse for `MOTOR_PULSE_MS`, then latches stop until MANUAL |
 
 Exact macOS Arduino CLI path used in this repo:
 
@@ -139,7 +140,7 @@ Expected single-waypoint USB debug additions:
 
 ```text
 gps_location_valid=... gps_location_fresh=... gps_solution_valid=... gps_dryrun_ready=... gps_motion_ready=... gps_age_ok=... gps_sats_ok=... gps_hdop_ok=... gps_ready=... gps_block_reason=... gps_dryrun_block_reason=... gps_motion_block_reason=... gps_dryrun_stale_ms=2000 gps_dryrun_min_sats=4 gps_dryrun_max_hdop=6.0 gps_motion_stale_ms=2000 gps_motion_min_sats=5 gps_motion_max_hdop=2.5 gps_lat=... gps_lon=... gps_cached_lat=... gps_cached_lon=... gps_cached_age_ms=... last_rmc_status=... last_gga_fix_quality=...
-single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false auto_motor_inhibit=true active_gps_ready=... dryrun_ready=... motion_ready=... safety_ready_source=... gps_coord_sane=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 max_coord_sanity_distance_m=1000.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000 ground_crawl_test_mode=false ground_crawl_max_cmd=0.080 ground_crawl_max_auto_ms=1200 ground_crawl_elapsed_ms=... ground_crawl_latched_stop=false ground_crawl_neutral_ok=... ground_crawl_ready=false ground_crawl_block_reason=MODE_OFF ground_crawl_min_target_distance_m=5.0 ground_crawl_max_target_distance_m=20.0 unclamped_final_left_cmd=... unclamped_final_right_cmd=...
+single_waypoint_experiment=true target_override_enabled=... target_source=... target_lat_macro=... target_lon_macro=... auto_motion_armed=false single_wp_crawl_base_cmd=... auto_motor_inhibit=true active_gps_ready=... dryrun_ready=... motion_ready=... safety_ready_source=... gps_coord_sane=... target_ready=... timeout_source=auto_entry auto_entry_ms=... auto_elapsed_ms=... timeout_limit_ms=15000 timeout_ok=... max_target_distance_m=30.0 max_coord_sanity_distance_m=1000.0 arrival_radius_m=2.5 distance_allowed=... safety_ready=... arrived=... target_lat=... target_lon=... target_distance_m=... target_bearing_deg=... candidate_left_cmd=... candidate_right_cmd=... final_left_cmd=0.000 final_right_cmd=0.000 ground_crawl_test_mode=false ground_crawl_max_cmd=0.080 ground_crawl_max_auto_ms=1200 ground_crawl_elapsed_ms=... ground_crawl_latched_stop=false ground_crawl_neutral_ok=... ground_crawl_ready=false ground_crawl_block_reason=MODE_OFF ground_crawl_min_target_distance_m=5.0 ground_crawl_max_target_distance_m=20.0 unclamped_final_left_cmd=... unclamped_final_right_cmd=...
 ```
 
 ### Guarded ground crawl build (armed-motion harness)
@@ -165,6 +166,9 @@ ground_crawl_test_mode=true ground_crawl_max_cmd=0.080 ground_crawl_max_auto_ms=
 
 Ground crawl safety gates and stop conditions:
 
+- `SINGLE_WP_CRAWL_BASE_CMD` controls the straight-line candidate command before
+  final ground-crawl clamping. Default is `0.100`, preserving the previous
+  candidate behavior.
 - Final command is clamped to ±`GROUND_CRAWL_MAX_CMD` (default `0.08`).
 - Latch hard-stop after `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms) of
   continuous AUTO: forces `final_left_cmd=0.000`, `final_right_cmd=0.000`,
@@ -200,8 +204,45 @@ Latest 0.08 guarded crawl result:
 
 Before the next guarded crawl run, reacquire current GPS and compute a fresh
 target `10..12` m away. If `0.08` produced no visible movement, retry only by
-changing `-DGROUND_CRAWL_MAX_CMD=0.12` while keeping the latch and all safety
-gates enabled.
+setting both `-DSINGLE_WP_CRAWL_BASE_CMD=0.12` and
+`-DGROUND_CRAWL_MAX_CMD=0.12` while keeping the latch and all safety gates
+enabled. Raising only `GROUND_CRAWL_MAX_CMD` changes the cap, not the candidate
+command.
+
+Latest `GROUND_CRAWL_MAX_CMD=0.120` cap-only result:
+
+- Guarded crawl reached `AUTO_RUNNING` with `ground_crawl_ready=true` and
+  `ground_crawl_block_reason=OK`.
+- `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100` remained at the
+  default candidate speed.
+- `final_left_cmd=0.100` / `final_right_cmd=0.100` confirmed that a higher cap
+  alone does not raise the candidate command.
+- The next 0.12 attempt should compile with both
+  `-DSINGLE_WP_CRAWL_BASE_CMD=0.12` and `-DGROUND_CRAWL_MAX_CMD=0.12`.
+
+### Motor pulse calibration build
+
+Use this mode only for GPS-independent motor deadband calibration. It does not
+use GPS readiness, waypoint target distance, or HC-12. RC MANUAL mode still
+drives normally. AUTO emits one pulse only when `rc_ok=true` and
+steering/throttle are neutral, then latches stop until the operator returns to
+MANUAL. USBDBG runs at `100` ms in this mode so the short pulse window is
+observable.
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-motor-pulse-018 --build-property 'compiler.cpp.extra_flags=-DMOTOR_PULSE_TEST_MODE=1 -DMOTOR_PULSE_CMD=0.18 -DMOTOR_PULSE_MS=300' firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-motor-pulse-018 firmware/openrb_robot_controller
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200
+```
+
+Expected USB debug fields:
+
+```text
+motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_ms=... motor_pulse_elapsed_ms=... motor_pulse_latched_stop=... motor_pulse_ready=... motor_pulse_block_reason=...
+```
+
+Expected block reasons include `MODE_OFF`, `RC_INVALID`, `RC_NOT_NEUTRAL`,
+`LATCHED_STOP`, and `OK`.
 
 Target override rule:
 

@@ -14,8 +14,20 @@
 #define FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT 0
 #endif
 
+#ifndef MOTOR_PULSE_TEST_MODE
+#define MOTOR_PULSE_TEST_MODE 0
+#endif
+
 #ifndef AUTO_MOTION_ARMED
 #define AUTO_MOTION_ARMED 0
+#endif
+
+#ifndef MOTOR_PULSE_CMD
+#define MOTOR_PULSE_CMD 0.15
+#endif
+
+#ifndef MOTOR_PULSE_MS
+#define MOTOR_PULSE_MS 300
 #endif
 
 #ifndef GROUND_CRAWL_TEST_MODE
@@ -30,11 +42,16 @@
 #define GROUND_CRAWL_MAX_AUTO_MS 1200
 #endif
 
+#ifndef SINGLE_WP_CRAWL_BASE_CMD
+#define SINGLE_WP_CRAWL_BASE_CMD 0.100
+#endif
+
 #define STRINGIFY_VALUE_IMPL(value) #value
 #define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
 
 #define ENABLE_GPS_TELEMETRY 1
-#if FIXED_WIRING_GPS_SERIAL2_DIAG || FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
+#if MOTOR_PULSE_TEST_MODE || FIXED_WIRING_GPS_SERIAL2_DIAG || \
+    FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
     FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 #define HC12_LINK_ENABLED 0
 #define GPS_SERIAL Serial2
@@ -61,6 +78,9 @@ constexpr double GPS_MOTION_MAX_HDOP = 2.5;
 constexpr uint32_t GPS_STALE_MS = GPS_MOTION_STALE_MS;
 constexpr uint8_t GPS_MIN_SATS = GPS_MOTION_MIN_SATS;
 constexpr double GPS_MAX_HDOP = GPS_MOTION_MAX_HDOP;
+constexpr bool MOTOR_PULSE_ENABLED = MOTOR_PULSE_TEST_MODE != 0;
+constexpr float MOTOR_PULSE_CMD_VALUE = MOTOR_PULSE_CMD;
+constexpr uint32_t MOTOR_PULSE_MS_VALUE = MOTOR_PULSE_MS;
 constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
@@ -90,7 +110,7 @@ constexpr const char *SINGLE_WAYPOINT_TARGET_LON_MACRO = STRINGIFY_VALUE(SINGLE_
 constexpr const char *SINGLE_WAYPOINT_TARGET_LON_MACRO = "NA";
 #endif
 constexpr bool SINGLE_WAYPOINT_AUTO_MOTION_ARMED = AUTO_MOTION_ARMED != 0;
-constexpr float SINGLE_WAYPOINT_MAX_AUTO_THROTTLE = 0.10f;
+constexpr float SINGLE_WAYPOINT_CRAWL_BASE_CMD = SINGLE_WP_CRAWL_BASE_CMD;
 constexpr double SINGLE_WAYPOINT_ARRIVAL_RADIUS_M = 2.5;
 constexpr double SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M = 30.0;
 constexpr double SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M = 1000.0;
@@ -126,7 +146,7 @@ constexpr float STATION_MANUAL_MAX_OUTPUT = 0.25f;
 constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
 constexpr uint32_t STATUS_PERIOD_MS = 500;
 constexpr bool ENABLE_USB_DEBUG = true;
-constexpr uint32_t USB_DEBUG_PERIOD_MS = 500;
+constexpr uint32_t USB_DEBUG_PERIOD_MS = MOTOR_PULSE_TEST_MODE ? 100 : 500;
 
 enum RobotMode {
   DISARMED,
@@ -207,6 +227,15 @@ uint32_t groundCrawlElapsedMs = 0;
 float groundCrawlUnclampedLeftCmd = 0.0f;
 float groundCrawlUnclampedRightCmd = 0.0f;
 const char *groundCrawlBlockReason = "MODE_OFF";
+#endif
+
+#if MOTOR_PULSE_TEST_MODE
+bool motorPulseTimingActiveFlag = false;
+uint32_t motorPulseStartMs = 0;
+uint32_t motorPulseElapsedMs = 0;
+bool motorPulseLatchedStopFlag = false;
+bool motorPulseReadyFlag = false;
+const char *motorPulseBlockReason = "MODE_OFF";
 #endif
 
 void ppmISR() {
@@ -544,8 +573,8 @@ void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32
 
   if (singleWaypointSafetyReadyFlag) {
     // Heading control is not implemented yet; this candidate is straight low-speed only.
-    singleWaypointCandidateLeftCmd = SINGLE_WAYPOINT_MAX_AUTO_THROTTLE;
-    singleWaypointCandidateRightCmd = SINGLE_WAYPOINT_MAX_AUTO_THROTTLE;
+    singleWaypointCandidateLeftCmd = SINGLE_WAYPOINT_CRAWL_BASE_CMD;
+    singleWaypointCandidateRightCmd = SINGLE_WAYPOINT_CRAWL_BASE_CMD;
   } else {
     singleWaypointCandidateLeftCmd = 0.0f;
     singleWaypointCandidateRightCmd = 0.0f;
@@ -553,6 +582,72 @@ void updateSingleWaypointExperimentState(bool rcValid, bool autoSwitchOn, uint32
 
   singleWaypointAutoMotorInhibitFlag =
       !SINGLE_WAYPOINT_AUTO_MOTION_ARMED || !singleWaypointSafetyReadyFlag;
+}
+#endif
+
+#if MOTOR_PULSE_TEST_MODE
+void updateMotorPulseState(bool rcValid, bool autoSwitchOn, bool rcManualActive,
+                           uint16_t steeringUs, uint16_t throttleUs, uint32_t now) {
+  bool neutralOk =
+      normRcCentered(steeringUs, STEERING_CENTER_US) == 0.0f &&
+      normRcCentered(throttleUs, THROTTLE_CENTER_US) == 0.0f;
+
+  motorPulseReadyFlag = false;
+
+  if (rcManualActive) {
+    motorPulseLatchedStopFlag = false;
+    motorPulseTimingActiveFlag = false;
+    motorPulseStartMs = 0;
+    motorPulseElapsedMs = 0;
+    motorPulseBlockReason = "MODE_OFF";
+    return;
+  }
+
+  if (!rcValid) {
+    motorPulseTimingActiveFlag = false;
+    motorPulseStartMs = 0;
+    motorPulseElapsedMs = 0;
+    motorPulseBlockReason = "RC_INVALID";
+    return;
+  }
+
+  if (!autoSwitchOn) {
+    motorPulseTimingActiveFlag = false;
+    motorPulseStartMs = 0;
+    motorPulseElapsedMs = 0;
+    motorPulseBlockReason = "MODE_OFF";
+    return;
+  }
+
+  if (motorPulseLatchedStopFlag) {
+    motorPulseTimingActiveFlag = false;
+    motorPulseBlockReason = "LATCHED_STOP";
+    return;
+  }
+
+  if (!neutralOk) {
+    motorPulseTimingActiveFlag = false;
+    motorPulseStartMs = 0;
+    motorPulseElapsedMs = 0;
+    motorPulseBlockReason = "RC_NOT_NEUTRAL";
+    return;
+  }
+
+  if (!motorPulseTimingActiveFlag) {
+    motorPulseTimingActiveFlag = true;
+    motorPulseStartMs = now;
+  }
+
+  motorPulseElapsedMs = now - motorPulseStartMs;
+  if (motorPulseElapsedMs >= MOTOR_PULSE_MS_VALUE) {
+    motorPulseLatchedStopFlag = true;
+    motorPulseReadyFlag = false;
+    motorPulseBlockReason = "LATCHED_STOP";
+    return;
+  }
+
+  motorPulseReadyFlag = true;
+  motorPulseBlockReason = "OK";
 }
 #endif
 
@@ -888,6 +983,22 @@ void debugPrintStatus() {
   Serial.print(FIXED_WIRING_GPS_SERIAL2_DIAG ? F("true") : F("false"));
   Serial.print(F(" hc12_enabled="));
   Serial.print(HC12_LINK_ENABLED ? F("true") : F("false"));
+#if MOTOR_PULSE_TEST_MODE
+  Serial.print(F(" motor_pulse_test_mode="));
+  Serial.print(MOTOR_PULSE_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" motor_pulse_cmd="));
+  Serial.print(MOTOR_PULSE_CMD_VALUE, 3);
+  Serial.print(F(" motor_pulse_ms="));
+  Serial.print(MOTOR_PULSE_MS_VALUE);
+  Serial.print(F(" motor_pulse_elapsed_ms="));
+  Serial.print(motorPulseElapsedMs);
+  Serial.print(F(" motor_pulse_latched_stop="));
+  Serial.print(motorPulseLatchedStopFlag ? F("true") : F("false"));
+  Serial.print(F(" motor_pulse_ready="));
+  Serial.print(motorPulseReadyFlag ? F("true") : F("false"));
+  Serial.print(F(" motor_pulse_block_reason="));
+  Serial.print(motorPulseBlockReason);
+#endif
   Serial.print(F(" gps_chars="));
   Serial.print(gps.charsProcessed());
   Serial.print(F(" gps_location_valid="));
@@ -1040,6 +1151,8 @@ void debugPrintStatus() {
   Serial.print(SINGLE_WAYPOINT_TARGET_LON_MACRO);
   Serial.print(F(" auto_motion_armed="));
   Serial.print(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? F("true") : F("false"));
+  Serial.print(F(" single_wp_crawl_base_cmd="));
+  Serial.print(SINGLE_WAYPOINT_CRAWL_BASE_CMD, 3);
   Serial.print(F(" auto_motor_inhibit="));
   Serial.print(singleWaypointAutoMotorInhibitFlag ? F("true") : F("false"));
   Serial.print(F(" active_gps_ready="));
@@ -1354,7 +1467,7 @@ void setup() {
 #if HC12_LINK_ENABLED
   HC12_SERIAL.begin(HC12_BAUD);
 #endif
-#if ENABLE_GPS_TELEMETRY
+#if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE
   GPS_SERIAL.begin(GPS_BAUD);
 #endif
 
@@ -1368,7 +1481,16 @@ void setup() {
   Serial.print("Firmware: ");
   Serial.println(FIRMWARE_ID);
   Serial.println("OpenRB robot controller starting.");
-#if FIXED_WIRING_GPS_SERIAL2_DIAG
+#if MOTOR_PULSE_TEST_MODE
+  Serial.println("MOTOR_PULSE_TEST_MODE enabled.");
+  Serial.println("HC-12 link is disabled/ignored.");
+  Serial.println("GPS is not used for this motor pulse calibration mode.");
+  Serial.println("RC MANUAL mode can drive normally; AUTO emits one guarded motor pulse if sticks are neutral.");
+  Serial.print("MOTOR_PULSE_CMD=");
+  Serial.println(MOTOR_PULSE_CMD_VALUE, 3);
+  Serial.print("MOTOR_PULSE_MS=");
+  Serial.println(MOTOR_PULSE_MS_VALUE);
+#elif FIXED_WIRING_GPS_SERIAL2_DIAG
   Serial.println("FIXED_WIRING_GPS_SERIAL2_DIAG enabled.");
   Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
   Serial.println("Motor outputs are forced neutral; station and RC drive commands are ignored.");
@@ -1386,6 +1508,8 @@ void setup() {
   Serial.println("RC MANUAL mode can drive normally; AUTO mode uses one placeholder waypoint only.");
   Serial.print("AUTO_MOTION_ARMED=");
   Serial.println(SINGLE_WAYPOINT_AUTO_MOTION_ARMED ? "1" : "0");
+  Serial.print("SINGLE_WP_CRAWL_BASE_CMD=");
+  Serial.println(SINGLE_WAYPOINT_CRAWL_BASE_CMD, 3);
   Serial.print("target_override_enabled=");
   Serial.println(SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED ? "true" : "false");
   Serial.print("target_source=");
@@ -1410,7 +1534,7 @@ void setup() {
 }
 
 void loop() {
-#if ENABLE_GPS_TELEMETRY
+#if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE
   while (GPS_SERIAL.available() > 0) {
     processGpsChar(static_cast<char>(GPS_SERIAL.read()));
   }
@@ -1439,6 +1563,37 @@ void loop() {
   bool stationManualFresh = stationManualValid();
   bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;
   bool rcManualActive = rcValid && !autoSwitchOn;
+
+#if MOTOR_PULSE_TEST_MODE
+  clearAutoCommand();
+  clearStationManualCommand();
+  updateMotorPulseState(rcValid, autoSwitchOn, rcManualActive, steeringUs, throttleUs, now);
+  if (!rcValid) {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = FAILSAFE;
+    motorStop();
+  } else if (rcManualActive) {
+    currentMode = MANUAL;
+    currentControlSource = CONTROL_SOURCE_RC_MANUAL;
+    applyManualOverride(steeringUs, throttleUs);
+  } else if (autoSwitchOn) {
+    if (motorPulseReadyFlag) {
+      currentMode = AUTO_RUNNING;
+      currentControlSource = CONTROL_SOURCE_AUTO;
+      applyAutoCommand(MOTOR_PULSE_CMD_VALUE, MOTOR_PULSE_CMD_VALUE);
+    } else {
+      currentMode = AUTO_READY;
+      currentControlSource = CONTROL_SOURCE_STOP;
+      motorStop();
+    }
+  } else {
+    currentControlSource = CONTROL_SOURCE_STOP;
+    currentMode = DISARMED;
+    motorStop();
+  }
+  debugPrintStatus();
+  return;
+#endif
 
 #if FIXED_WIRING_GPS_SERIAL2_DIAG
   clearAutoCommand();

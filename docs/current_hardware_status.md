@@ -101,6 +101,18 @@
   as `DISTANCE_OUT_OF_RANGE`. Intermittent GPS degradation also blocked motion
   as `GPS_NOT_MOTION_READY` or `LATCHED_STOP`. This validates the guarded crawl
   safety harness, but it is still **not** full autonomous driving.
+- Latest guarded crawl 0.12 cap-only observation: `GROUND_CRAWL_MAX_CMD=0.120`
+  allowed the harness to cap up to 0.120, but the candidate command was still
+  `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100`, so final commands
+  remained `final_left_cmd=0.100` / `final_right_cmd=0.100`. The latch still
+  worked. Firmware now separates candidate speed from final clamp with
+  `SINGLE_WP_CRAWL_BASE_CMD` (default `0.100`). A future 0.12 retry must set
+  both `SINGLE_WP_CRAWL_BASE_CMD=0.12` and `GROUND_CRAWL_MAX_CMD=0.12`.
+- Motor pulse calibration mode is now available for GPS-independent motor
+  deadband checks. Compile with `MOTOR_PULSE_TEST_MODE=1`; HC-12 is disabled,
+  GPS readiness/target distance are not used, RC MANUAL is preserved, and AUTO
+  emits one neutral-stick pulse for `MOTOR_PULSE_MS` before latching stop until
+  MANUAL.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed
@@ -499,8 +511,10 @@ Current status:
     changes
   - do not enable floor driving until wheel-off-ground logs prove the expected
     behavior
-  - do not raise the AUTO command past the deadband except via
-    `-DGROUND_CRAWL_MAX_CMD` in small steps, under the crawl latch stop
+  - do not raise the AUTO command past the deadband except through the guarded
+    crawl harness; use `-DSINGLE_WP_CRAWL_BASE_CMD` for candidate speed and
+    `-DGROUND_CRAWL_MAX_CMD` for the final clamp, in small steps, under the
+    crawl latch stop
   - IMU is optional for the current GPS+RC single-waypoint preparation stage;
     do not block candidate dry-run work on IMU availability
 - Use the integrated GPS `Serial2` diagnostic firmware mode only for GPS USB

@@ -28,13 +28,22 @@ now complete: `AUTO_RUNNING` was reached during a good GPS window,
 target distance was blocked as `DISTANCE_OUT_OF_RANGE`, and degraded GPS was
 blocked as `GPS_NOT_MOTION_READY`. This validates the safety harness, not full
 autonomous driving. The current target is now too close and must be replaced
-with a fresh `10..12` m target before any 0.12 retry. Floor waypoint driving is
-not approved yet.
+with a fresh `10..12` m target before any 0.12 retry. A later cap-only 0.12 run
+confirmed that `GROUND_CRAWL_MAX_CMD` only raises the final cap: the candidate
+command stayed at `0.100`, so final commands stayed at `0.100`. The firmware now
+uses `SINGLE_WP_CRAWL_BASE_CMD` for candidate speed and keeps
+`GROUND_CRAWL_MAX_CMD` as the final safety clamp. Floor waypoint driving is not
+approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
 with explicit safety gates, GPS validity policy, heading plan, manual override,
 and wheel-off-ground checks.
+
+Motor deadband calibration is now temporarily split out from GPS/path planning:
+`MOTOR_PULSE_TEST_MODE=1` ignores GPS readiness and waypoint distance, disables
+HC-12, preserves RC MANUAL, and emits one AUTO-only neutral-stick pulse before
+latching stop. Use it only to identify motor/drivetrain response thresholds.
 
 Staged plan:
 
@@ -86,9 +95,11 @@ Staged plan:
    `DISTANCE_OUT_OF_RANGE`, and blocked degraded GPS as `GPS_NOT_MOTION_READY`.
 13. Guarded ground crawl 0.12 deadband retry: only if 0.08 produced no visible
    physical movement, first reacquire current GPS and compute a fresh target
-   `10..12` m away. Then retry with `GROUND_CRAWL_MAX_CMD=0.12`, the same
-   `GROUND_CRAWL_MAX_AUTO_MS` latch, neutral RC, motion-grade GPS, near-field
-   target window, and manual override. Do not reuse stale targets.
+   `10..12` m away. Then retry with `SINGLE_WP_CRAWL_BASE_CMD=0.12` and
+   `GROUND_CRAWL_MAX_CMD=0.12`, the same `GROUND_CRAWL_MAX_AUTO_MS` latch,
+   neutral RC, motion-grade GPS, near-field target window, and manual override.
+   `SINGLE_WP_CRAWL_BASE_CMD` controls the candidate command; `GROUND_CRAWL_MAX_CMD`
+   remains the final safety clamp. Do not reuse stale targets.
 14. Low-speed floor test: only after guarded crawl behavior and sensor-frame
    assumptions are validated.
 15. Multi-waypoint motion: only after single-waypoint behavior is proven.
@@ -163,8 +174,8 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
   small `auto_elapsed_ms`, and `timeout_ok=true` until the AUTO timeout limit is
   exceeded.
 - If 0.08 produced no visible physical movement, retry only through the guarded
-  crawl harness with `GROUND_CRAWL_MAX_CMD=0.12`, the same duration latch, and a
-  fresh target.
+  crawl harness with `SINGLE_WP_CRAWL_BASE_CMD=0.12`,
+  `GROUND_CRAWL_MAX_CMD=0.12`, the same duration latch, and a fresh target.
 - Do not run floor driving yet. Keep any indoor or non-bench validation in
   no-motion mode with `AUTO_MOTION_ARMED=0`; guarded crawl is a bounded
   deadband-calibration step, not full autonomous driving.
@@ -381,7 +392,8 @@ Target override rule:
 
 Safety constants:
 
-- `SINGLE_WAYPOINT_MAX_AUTO_THROTTLE=0.10`
+- `SINGLE_WP_CRAWL_BASE_CMD=0.100` (candidate straight-line crawl command before
+  final guarded-crawl clamping)
 - `SINGLE_WAYPOINT_ARRIVAL_RADIUS_M=2.5`
 - `SINGLE_WAYPOINT_MAX_TARGET_DISTANCE_M=30.0`
 - Dry-run GPS tier: `GPS_DRYRUN_STALE_MS=2000`,
