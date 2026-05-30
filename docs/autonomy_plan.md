@@ -191,6 +191,15 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 
 ## Next Required Validation Before Further Motion
 
+- BLOCKER (2026-05-30): the AUTO/MANUAL switch channel must be stable before any
+  physical path following. A PPM hold test showed receiver CH5 did not hold
+  HIGH: `ch5_high_auto_like=4` of `total_ch5_samples=68`
+  (`RESULT=CH5_AUTO_DID_NOT_HOLD`). Raising AUTO briefly enters `AUTO_READY` then
+  `FAILSAFE` as `ppm_age_ms` grows. Use `firmware/ppm_channel_map_probe` with
+  `tools/analyze_ppm_log.py` to find a receiver channel that is a stable
+  2-position switch (reaches both LOW and HIGH and holds HIGH), then set
+  `-DMODE_CHANNEL_INDEX=<0-based index>` in the main controller (default `4` =
+  CH5). Path planning preview is allowed; physical path execution is not.
 - Station-side path planning preview only; do not send rover motor commands from
   the station mission output yet.
 - Use `SINGLE_WP_STEERING_DRYRUN=1` for no-motion single-waypoint steering

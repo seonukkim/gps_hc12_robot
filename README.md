@@ -83,6 +83,16 @@ body frame must be fixed, measured, and modeled.
 
 ## Next Required Validation
 
+- BLOCKER (2026-05-30): physical path following is blocked until the AUTO/MANUAL
+  switch channel is stable. A PPM hold test showed receiver CH5 did not hold
+  HIGH: only `4` AUTO-like samples out of `68`
+  (`ch5_high_auto_like=4`, `ch5_low_manual_like=64`,
+  `RESULT=CH5_AUTO_DID_NOT_HOLD`). When AUTO is raised, the main firmware briefly
+  enters `AUTO_READY` then `FAILSAFE` as `ppm_age_ms` grows. Use
+  `firmware/ppm_channel_map_probe` (analyzed with `tools/analyze_ppm_log.py`) to
+  determine which receiver channel actually corresponds to a stable 2-position
+  switch, then set `-DMODE_CHANNEL_INDEX=<0-based index>` in the main controller.
+  Station-side path planning preview is allowed; physical path execution is not.
 - Confirm the station/controller is powered on and linked; controller-off can
   make RC appear stuck or failsafe-like.
 - Verify Manual/Auto before autonomy dry-run: MANUAL should show
@@ -147,6 +157,13 @@ body frame must be fixed, measured, and modeled.
   actual GPS motion safety thresholds (`gps_motion_min_sats`,
   `gps_motion_max_hdop`, `gps_motion_stale_ms` are unchanged) and does not enable
   motor execution.
+- The Manual/Auto switch channel is now compile-time selectable in the main
+  controller via `-DMODE_CHANNEL_INDEX=<0-based index>` (default `4` = receiver
+  CH5, unchanged). USBDBG and the startup banner print `mode_channel_index` /
+  `mode_channel_label`, plus `raw_mode_channel_us` and `raw_ch1_us`..`raw_ch8_us`
+  so the switch channel and any channel-slip are visible. Only change this after
+  `ppm_channel_map_probe` proves another channel is a stable 2-position switch.
+  Selecting the channel does not weaken failsafe, GPS thresholds, or motion gates.
 
 ## Legacy HC-12 References
 
@@ -180,6 +197,7 @@ HC-12, or motor behavior from the wrong mode.
 | Motor pulse calibration | `firmware/openrb_robot_controller` with `MOTOR_PULSE_TEST_MODE=1` | OpenRB-150 | GPS-independent motor deadband calibration | not used | disabled/ignored | RC MANUAL drives normally; AUTO emits one neutral-stick pulse for `MOTOR_PULSE_MS`, then latches stop until MANUAL |
 | Physical output pin probe | `firmware/physical_output_pin_probe` | OpenRB-150 | Truth-table probe for the two final PWM output pins | not used | not used | writes one timed pulse directly to physical output pin A/B after a startup delay, then neutral forever |
 | RC channel probe | `firmware/rc_channel_probe` | OpenRB-150 | Identify which raw PPM channel changes for each RC stick/switch | not used | not used | no motor outputs |
+| PPM channel map probe | `firmware/ppm_channel_map_probe` | OpenRB-150 | Find a stable 2-position AUTO/MANUAL channel; detect channel-slip and momentary switches | not used | not used | no motor outputs; event + 1 s summary lines |
 | Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
 | Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
 | Pin finder test | `firmware/pin_finder_test` | OpenRB-150 | Historical physical pin finder | not a GPS test | not used | no motor outputs |
@@ -199,6 +217,30 @@ Servo or motor outputs.
 Move each stick and switch one at a time, then record `changed_channels` and
 the `chN_min` / `chN_max` range. The AUTO candidate is the channel that reaches
 around `2000 us`; do not rely on physical panel labels alone.
+
+### PPM Channel Map Probe
+
+Use this when a channel reaches AUTO but will not hold, which is the current
+blocker: a PPM hold test showed receiver CH5 did not hold HIGH (`4` AUTO-like
+samples out of `68`). It prints `PPMEVT` lines on each LOW/MID/HIGH transition
+and `PPMSUM` lines every second, so switch behavior and channel-slip are visible
+without scrolling raw frames. See `firmware/README.md` for the full field list.
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-ppm-channel-map-probe firmware/ppm_channel_map_probe
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-ppm-channel-map-probe firmware/ppm_channel_map_probe
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200 | tee outputs/logs/ppm_channel_map_$(date +%Y%m%d_%H%M%S).log
+```
+
+Analyze the captured log and read the candidate verdict:
+
+```bash
+uv run python tools/analyze_ppm_log.py outputs/logs/ppm_channel_map_*.log
+```
+
+A usable mode channel must reach both LOW and HIGH and hold HIGH. Only then set
+`-DMODE_CHANNEL_INDEX=<0-based index>` in `openrb_robot_controller` (default `4`
+= CH5). Physical path execution stays blocked until this holds.
 
 ### Default Rover Controller
 

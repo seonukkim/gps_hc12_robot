@@ -440,6 +440,20 @@ Current status:
 
 ## Pending
 
+- BLOCKER (2026-05-30): physical path following is blocked until the AUTO/MANUAL
+  switch channel is stable. A standalone PPM hold test showed receiver CH5 did
+  not hold HIGH: `total_ch5_samples=68`, `ch5_high_auto_like=4`,
+  `ch5_low_manual_like=64`, `RESULT=CH5_AUTO_DID_NOT_HOLD`. Raw frames were
+  mostly manual-like (`CH5≈1000`) with brief AUTO blips (`CH5≈2001`), plus some
+  misaligned frames (`CH1=2617`, `CH3=841`) that point to occasional PPM
+  channel-slip. When AUTO is raised, the firmware briefly enters `AUTO_READY`
+  then `FAILSAFE` as `ppm_age_ms` grows (correct failsafe behavior).
+  Use `firmware/ppm_channel_map_probe` plus `tools/analyze_ppm_log.py` to find a
+  stable 2-position switch channel, then rebuild with
+  `-DMODE_CHANNEL_INDEX=<0-based index>` (default `4` = CH5). The mode channel is
+  now compile-time selectable and USBDBG prints `mode_channel_index`,
+  `mode_channel_label`, `raw_mode_channel_us`, and `raw_ch1_us`..`raw_ch8_us`.
+  Path planning preview is allowed; physical path execution is not.
 - Unified RC + GPS dry-run validation is complete. This is the first mode where
   MANUAL and GPS dry-run coexist in one firmware. AUTO is still
   computation-only and real motion is not enabled yet.

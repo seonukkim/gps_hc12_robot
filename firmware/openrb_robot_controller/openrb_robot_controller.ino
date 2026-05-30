@@ -102,6 +102,13 @@
 #define COURSE_MIN_DISPLACEMENT_M 2.0
 #endif
 
+// 0-based PPM index of the Manual/Auto switch channel. Default 4 = receiver CH5.
+// Override only after firmware/ppm_channel_map_probe proves a stable 2-position
+// switch channel. This does not weaken failsafe or change motion gates.
+#ifndef MODE_CHANNEL_INDEX
+#define MODE_CHANNEL_INDEX 4
+#endif
+
 #define STRINGIFY_VALUE_IMPL(value) #value
 #define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
 
@@ -202,7 +209,7 @@ constexpr uint8_t CHANNEL_COUNT = 8;
 // and CH5 Manual/Auto. CH7 is reserved/unused for now.
 constexpr uint8_t STEERING_CHANNEL_INDEX = 0;  // Station joystick horizontal: PPM CH1
 constexpr uint8_t THROTTLE_CHANNEL_INDEX = 1;  // Station joystick vertical: PPM CH2
-constexpr uint8_t MODE_CHANNEL_INDEX = 4;      // Station Manual/Auto switch: PPM CH5
+constexpr uint8_t MODE_CHANNEL_INDEX_VALUE = MODE_CHANNEL_INDEX;  // Manual/Auto switch (default PPM CH5)
 constexpr uint16_t STEERING_CENTER_US = 1504;
 constexpr uint16_t THROTTLE_CENTER_US = 1500;
 constexpr uint16_t RC_DEADBAND_US = 80;
@@ -947,7 +954,7 @@ void readRcChannels(uint16_t &steering, uint16_t &throttle, uint16_t &mode) {
   noInterrupts();
   steering = ppmChannels[STEERING_CHANNEL_INDEX];
   throttle = ppmChannels[THROTTLE_CHANNEL_INDEX];
-  mode = ppmChannels[MODE_CHANNEL_INDEX];
+  mode = ppmChannels[MODE_CHANNEL_INDEX_VALUE];
   interrupts();
 }
 
@@ -1165,12 +1172,16 @@ void debugPrintStatus() {
   uint16_t throttleUs = 0;
   uint16_t modeUs = 0;
   uint32_t ppmFrameMs = 0;
+  uint16_t rawChannelUs[CHANNEL_COUNT] = {0};
   noInterrupts();
-  steeringUs = ppmChannels[STEERING_CHANNEL_INDEX];
-  throttleUs = ppmChannels[THROTTLE_CHANNEL_INDEX];
-  modeUs = ppmChannels[MODE_CHANNEL_INDEX];
+  for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
+    rawChannelUs[i] = ppmChannels[i];
+  }
   ppmFrameMs = lastPpmFrameMs;
   interrupts();
+  steeringUs = rawChannelUs[STEERING_CHANNEL_INDEX];
+  throttleUs = rawChannelUs[THROTTLE_CHANNEL_INDEX];
+  modeUs = rawChannelUs[MODE_CHANNEL_INDEX_VALUE];
 
   bool rcValid = rcChannelsValid(steeringUs, throttleUs, modeUs);
   bool autoSwitchOn = rcAutoSwitchOn(modeUs);
@@ -1210,6 +1221,18 @@ void debugPrintStatus() {
   Serial.print(throttleUs);
   Serial.print(F(" mode_us="));
   Serial.print(modeUs);
+  Serial.print(F(" mode_channel_index="));
+  Serial.print(MODE_CHANNEL_INDEX_VALUE);
+  Serial.print(F(" mode_channel_label=CH"));
+  Serial.print(MODE_CHANNEL_INDEX_VALUE + 1);
+  Serial.print(F(" raw_mode_channel_us="));
+  Serial.print(modeUs);
+  for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
+    Serial.print(F(" raw_ch"));
+    Serial.print(i + 1);
+    Serial.print(F("_us="));
+    Serial.print(rawChannelUs[i]);
+  }
   Serial.print(F(" steer_norm="));
   Serial.print(steeringNorm, 3);
   Serial.print(F(" throttle_norm="));
@@ -1927,8 +1950,13 @@ void setup() {
   Serial.println("GPS telemetry uses OpenRB-150 Serial3 (D13/RX) at 9600 baud.");
 #endif
   Serial.println("Motor tests are wheel-off-ground only.");
-  Serial.println("RC mode input uses receiver PPM CH5; PPM CH7 is reserved/unused.");
-  Serial.println("CH5 high enters AUTO_READY only; drive stays STOP until explicit AUTO.");
+  Serial.print("mode_channel_index=");
+  Serial.print(MODE_CHANNEL_INDEX_VALUE);
+  Serial.print(" (receiver CH");
+  Serial.print(MODE_CHANNEL_INDEX_VALUE + 1);
+  Serial.println("); override with -DMODE_CHANNEL_INDEX=<0-based> after probe.");
+  Serial.println("RC mode input uses the mode channel above; PPM CH7 is reserved/unused.");
+  Serial.println("Mode HIGH enters AUTO_READY only; drive stays STOP until explicit AUTO.");
   Serial.println("Station manual accepts CMD,MANUAL only when fresh frames and deadman=1.");
 }
 

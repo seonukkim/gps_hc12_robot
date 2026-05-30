@@ -2396,6 +2396,60 @@ Safety:
   behavior, motor output mapping, or guarded crawl behavior.
 - Default builds remain at `2.0` m because the `#ifndef` default is `2.0`.
 
+## 2026-05-30: PPM AUTO/MANUAL Switch Did Not Hold; Channel-Map Probe Added
+
+Reason:
+
+- After the guarded straight crawl worked, physical path following is now
+  blocked by RC/PPM mode-switch behavior.
+- A standalone PPM hold test reported `total_ch5_samples=68`,
+  `ch5_high_auto_like=4`, `ch5_low_manual_like=64`,
+  `RESULT=CH5_AUTO_DID_NOT_HOLD`.
+
+Observed raw PPM:
+
+- Manual-looking frames: CH1≈1494, CH2≈1501-1503, CH3≈1841, CH4≈1549,
+  CH5≈1000, CH6≈2001, CH7≈2001, CH8≈2000.
+- Occasional AUTO-like blips: CH5≈2001 for only a few frames.
+- Occasional misaligned frames: CH1=2617, CH3=841, CH7=1001, CH8=1001.
+
+Interpretation:
+
+- Not ready for physical path following.
+- CH5 may not be the correct stable mode channel, the transmitter switch may be
+  momentary/misconfigured, or the PPM decoder is occasionally channel-slipping.
+- In main firmware, raising AUTO briefly enters `AUTO_READY` then `FAILSAFE`
+  because `ppm_age_ms` grows. This failsafe is correct.
+
+Firmware/tooling added:
+
+- New read-only sketch `firmware/ppm_channel_map_probe` (no GPS/HC-12/motors).
+  Prints `PPMEVT` lines on each LOW/MID/HIGH transition and `PPMSUM` lines every
+  second (per-channel min/max and LOW/MID/HIGH counts), plus
+  `possible_mode_channel_candidates`. State thresholds LOW<1300us,
+  MID 1300-1700us, HIGH>1700us; pulses outside 800-2200us flagged invalid.
+- New analyzer `tools/analyze_ppm_log.py`: per-channel min/max, LOW/MID/HIGH
+  frequency, changed channels, longest HIGH hold (per-sample run and fully-HIGH
+  1 s windows), and candidate AUTO/MANUAL channels. On the example CH5 data it
+  reports "HIGH does NOT hold" and no candidate.
+- Main controller: mode channel is now compile-time selectable via
+  `-DMODE_CHANNEL_INDEX=<0-based index>`, default `4` = CH5 (unchanged). USBDBG
+  and the startup banner print `mode_channel_index` / `mode_channel_label`, and
+  USBDBG adds `raw_mode_channel_us` and `raw_ch1_us`..`raw_ch8_us`.
+
+Compile results:
+
+- `firmware/ppm_channel_map_probe` compiled clean (program ~16388 bytes, 6%).
+- `firmware/openrb_robot_controller` default build compiled clean
+  (program ~54732 bytes, 20%).
+
+Safety:
+
+- Physical path execution remains blocked until a stable 2-position mode channel
+  is identified and verified. Path planning preview is allowed.
+- No failsafe, GPS motion threshold, manual drive, motor mapping, or guarded
+  crawl behavior was changed.
+
 ## 2026-05-03: Historical Verified Status From Existing Docs
 
 Source:

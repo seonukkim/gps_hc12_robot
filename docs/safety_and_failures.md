@@ -42,11 +42,34 @@ The integrated firmware evaluates control source in this order:
 
 1. Station E-stop -> STOP.
 2. Fresh station manual frame with `deadman=1` -> station manual.
-3. Valid RC with CH5 manual mode -> RC manual.
-4. Valid RC with CH5 auto-ready mode plus explicit station AUTO -> AUTO.
+3. Valid RC with mode-channel manual -> RC manual.
+4. Valid RC with mode-channel auto-ready plus explicit station AUTO -> AUTO.
 5. Otherwise -> STOP, `AUTO_READY`, `DISARMED`, or `FAILSAFE`.
 
-This means CH5 high alone must not drive the rover.
+This means a HIGH mode channel alone must not drive the rover. The mode channel
+is the compile-time 0-based PPM index `MODE_CHANNEL_INDEX` (default `4` = CH5).
+
+## Mode Channel Must Be Stable Before Path Following
+
+Physical path following is blocked until the AUTO/MANUAL switch channel is
+stable. A PPM hold test showed receiver CH5 did not hold HIGH:
+`total_ch5_samples=68`, `ch5_high_auto_like=4`, `ch5_low_manual_like=64`,
+`RESULT=CH5_AUTO_DID_NOT_HOLD`. When AUTO is raised, the firmware briefly enters
+`AUTO_READY` then `FAILSAFE` because `ppm_age_ms` grows; this failsafe is correct
+and must not be weakened to compensate for an unstable switch.
+
+Rules:
+
+- Use `firmware/ppm_channel_map_probe` (read-only; no GPS/HC-12/motors) with
+  `tools/analyze_ppm_log.py` to identify a stable 2-position switch channel that
+  reaches both LOW and HIGH and holds HIGH.
+- Only then rebuild with `-DMODE_CHANNEL_INDEX=<0-based index>`; the default
+  (CH5) is unchanged until proven.
+- Path planning preview is allowed; physical path execution is not allowed until
+  the mode channel holds and is verified in USBDBG (`mode_channel_index`,
+  `raw_mode_channel_us`, `raw_ch1_us`..`raw_ch8_us`).
+- Do not raise AUTO output, weaken failsafe, or relax `ppm_age` limits to work
+  around the unstable switch.
 
 ## Guarded Ground Crawl (Armed-Motion Harness)
 

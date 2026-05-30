@@ -713,6 +713,96 @@ Probe procedure:
 5. Do not change `MODE_CHANNEL_INDEX` in `openrb_robot_controller` until this
    raw channel probe identifies the intended physical switch.
 
+## PPM Channel Map Probe
+
+Use this newer standalone sketch to decide which receiver channel is a *stable
+2-position* Manual/Auto switch, and to catch channel-slip / misaligned frames.
+It exists because a recent PPM hold test showed receiver CH5 did not hold HIGH:
+only `4` AUTO-like samples out of `68` (`ch5_high_auto_like=4`,
+`ch5_low_manual_like=64`, `RESULT=CH5_AUTO_DID_NOT_HOLD`). Until a channel holds
+HIGH reliably, physical path execution stays blocked.
+
+```text
+firmware/ppm_channel_map_probe/ppm_channel_map_probe.ino
+```
+
+Safety: this sketch does not initialize GPS, HC-12, motors, or autonomous
+control. It only reads PPM on OpenRB `D6` and prints diagnostics at `115200`.
+
+Unlike `rc_channel_probe`, it does not print every raw frame (that hides switch
+transitions). Instead it prints:
+
+- `PPMEVT` lines immediately when any channel changes `LOW`/`MID`/`HIGH` state.
+  Each line carries `timestamp_ms`, `frame_counter`, `frame_age_ms`,
+  `frame_valid`, `invalid_reason`, `channel_count`, `CH1_us`..`CH8_us`,
+  per-channel `CHn_state`, `changed_channels`, and
+  `possible_mode_channel_candidates`.
+- `PPMSUM` lines every `1` second with `frames`, `invalid_frames`, and per
+  channel `min`/`max` plus `low`/`mid`/`high` counts.
+
+State thresholds: `LOW < 1300us`, `MID 1300..1700us`, `HIGH > 1700us`; pulses
+outside `800..2200us` are flagged invalid (a common channel-slip symptom, e.g.
+the observed `CH1=2617`, `CH3=841`).
+
+Compile:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-ppm-channel-map-probe firmware/ppm_channel_map_probe
+```
+
+Upload:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' upload -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-ppm-channel-map-probe firmware/ppm_channel_map_probe
+```
+
+Monitor and log to a file:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' monitor -p /dev/cu.usbmodem12101 --fqbn OpenRB-150:samd:OpenRB-150 --config baudrate=115200 | tee outputs/logs/ppm_channel_map_$(date +%Y%m%d_%H%M%S).log
+```
+
+Analyze the captured log:
+
+```bash
+uv run python tools/analyze_ppm_log.py outputs/logs/ppm_channel_map_*.log
+```
+
+The analyzer reports per-channel min/max, how often each channel was
+LOW/MID/HIGH, which channels changed, the longest HIGH hold (per-sample run and
+fully-HIGH 1 s windows), and candidate AUTO/MANUAL channels. A candidate must
+reach both LOW and HIGH *and* hold HIGH; the previous CH5 behavior fails this.
+
+Procedure:
+
+1. Keep motors disconnected or wheels off ground.
+2. Flip only the suspected Manual/Auto switch, slowly, several times.
+3. Watch `PPMEVT` for a channel that toggles cleanly LOW<->HIGH and a `PPMSUM`
+   window where that channel is fully HIGH while held.
+4. If no channel holds HIGH, the transmitter switch may be momentary or
+   misassigned, or the PPM decoder is channel-slipping. Do not enable path
+   following.
+5. Only once a stable channel is identified, rebuild `openrb_robot_controller`
+   with `-DMODE_CHANNEL_INDEX=<0-based index>` (see below).
+
+## Selecting the mode channel in the main controller
+
+`openrb_robot_controller` reads the Manual/Auto switch from a compile-time
+0-based PPM index, `MODE_CHANNEL_INDEX`, default `4` (receiver CH5). The default
+is unchanged; override it only after the probe proves a different channel is a
+stable 2-position switch:
+
+```bash
+'/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli' compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-mode-channel --build-property 'compiler.cpp.extra_flags=-DMODE_CHANNEL_INDEX=5 -DAUTO_MOTION_ARMED=0' firmware/openrb_robot_controller
+```
+
+`MODE_CHANNEL_INDEX` is a 0-based PPM index, so `5` selects receiver CH6. The
+active value is printed at startup (`mode_channel_index=`) and in every USBDBG
+line as `mode_channel_index=` / `mode_channel_label=CHn`. USBDBG now also prints
+`raw_mode_channel_us` and `raw_ch1_us`..`raw_ch8_us` so the mode channel and any
+slip are visible without a separate probe. This selection does not weaken
+failsafe, GPS motion thresholds, or any motion gate.
+
 ## GPS UART Probe
 
 Use this standalone sketch when validating GPS UART wiring and baudrate:

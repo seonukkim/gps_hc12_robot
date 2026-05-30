@@ -73,6 +73,47 @@ Do not repeat:
 - Do not approve AUTO, bench, or floor testing unless USBDBG shows the expected
   Manual/Auto mode values and the relevant safety gates.
 
+## AUTO/MANUAL Channel (CH5) Does Not Hold HIGH
+
+Status (2026-05-30):
+
+- A standalone PPM hold test showed receiver CH5 does not hold the AUTO/HIGH
+  state: `total_ch5_samples=68`, `ch5_high_auto_like=4`,
+  `ch5_low_manual_like=64`, `RESULT=CH5_AUTO_DID_NOT_HOLD`.
+- Raw frames look mostly manual-like (`CH5≈1000`) with only brief AUTO blips
+  (`CH5≈2001` for a few frames).
+- Some frames are misaligned/out of range (`CH1=2617`, `CH3=841`,
+  `CH7=1001`, `CH8=1001`), which suggests occasional PPM channel-slip rather
+  than a clean switch.
+- In the main firmware, raising AUTO briefly enters `AUTO_READY` and then
+  `FAILSAFE` because `ppm_age_ms` grows; this is correct failsafe behavior given
+  an unstable mode signal.
+
+Impact:
+
+- Physical path following is blocked until a stable 2-position AUTO/MANUAL
+  channel is identified and confirmed.
+- Path planning preview is allowed; physical path execution is not.
+
+Diagnostic:
+
+- Use `firmware/ppm_channel_map_probe` (read-only; no GPS/HC-12/motors).
+- It prints `PPMEVT` lines on each LOW/MID/HIGH transition and `PPMSUM` lines
+  every second; capture to a log and run `tools/analyze_ppm_log.py`.
+- A usable mode channel must reach both LOW and HIGH and hold HIGH (the analyzer
+  reports candidate channels and flags channels whose HIGH does not hold).
+- The mode channel is now selectable in the main controller with
+  `-DMODE_CHANNEL_INDEX=<0-based index>` (default `4` = CH5, unchanged). USBDBG
+  prints `mode_channel_index`, `mode_channel_label`, `raw_mode_channel_us`, and
+  `raw_ch1_us`..`raw_ch8_us`.
+
+Do not repeat:
+
+- Do not raise the AUTO command or weaken failsafe to "get past" the unstable
+  switch. The failsafe is working as intended.
+- Do not change `MODE_CHANNEL_INDEX` until the probe proves another channel is a
+  stable 2-position switch.
+
 ## Rover Drifts Left/Right During Long Manual Movement
 
 Status:
