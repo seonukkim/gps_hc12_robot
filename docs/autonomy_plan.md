@@ -153,7 +153,14 @@ Staged plan:
    does not enable motion by itself.
 22. Heading/course estimation before physical waypoint following. GPS position
    alone is insufficient for steering; course-over-ground is only accepted after
-   at least `2.0` m of GPS displacement.
+   at least `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M` of GPS displacement
+   (default `2.0` m, compile-time configurable via
+   `-DCOURSE_MIN_DISPLACEMENT_M=<meters>`). A diagnostic tethered steering
+   dry-run may set `-DCOURSE_MIN_DISPLACEMENT_M=1.0` to estimate heading over
+   shorter movement. This only changes when course-over-ground is estimated; it
+   does not weaken actual GPS motion safety thresholds (`gps_motion_min_sats`,
+   `gps_motion_max_hdop`, `gps_motion_stale_ms` are unchanged) and does not
+   enable motor execution.
 23. Low-speed floor test: only after guarded crawl behavior, drivetrain
    calibration, steering behavior, and sensor-frame assumptions are validated.
 24. Multi-waypoint motion: only after single-waypoint behavior is proven.
@@ -190,7 +197,12 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
   diagnostics before longer ground motion.
 - Add heading/course estimation before physical waypoint following. If movement
   is too small, expect `heading_ready=false` and
-  `steering_block_reason=NO_HEADING`.
+  `steering_block_reason=NO_HEADING`. The minimum displacement is
+  `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M` (default `2.0` m); a tethered
+  diagnostic build can lower it with `-DCOURSE_MIN_DISPLACEMENT_M=1.0` without
+  changing GPS motion safety thresholds or enabling motion. USBDBG reports the
+  active value as `course_min_displacement_m` and the configured macro as
+  `course_min_displacement_source`.
 - After each guarded crawl, compare GPS delta and target-distance change against
   the expected forward movement. Do not infer path-following quality from wheel
   motion alone.

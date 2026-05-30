@@ -133,11 +133,20 @@ body frame must be fixed, measured, and modeled.
   any physical waypoint following. Do not approve full floor waypoint driving or
   coverage driving yet.
 - `SINGLE_WP_STEERING_DRYRUN=1` adds steering diagnostics only. It estimates
-  course-over-ground from GPS displacement after at least `2.0` m of movement,
+  course-over-ground from GPS displacement after at least
+  `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M` of movement (default `2.0` m),
   then prints desired forward/turn, logical wheel, and physical A/B commands.
   If the rover has not moved enough, USBDBG reports `heading_ready=false` and
   `steering_block_reason=NO_HEADING`. Do not use target bearing alone as a
   motor steering command.
+- The course displacement threshold is compile-time configurable with
+  `-DCOURSE_MIN_DISPLACEMENT_M=<meters>`. A USB-tethered diagnostic build can use
+  `-DCOURSE_MIN_DISPLACEMENT_M=1.0` to estimate heading over shorter movement.
+  USBDBG prints the active value as `course_min_displacement_m` and the
+  configured macro as `course_min_displacement_source`. This does not weaken the
+  actual GPS motion safety thresholds (`gps_motion_min_sats`,
+  `gps_motion_max_hdop`, `gps_motion_stale_ms` are unchanged) and does not enable
+  motor execution.
 
 ## Legacy HC-12 References
 

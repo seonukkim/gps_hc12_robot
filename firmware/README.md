@@ -303,14 +303,33 @@ Purpose:
 
 - GPS position provides bearing to target, but not rover heading by itself.
 - The firmware estimates course-over-ground only after enough GPS displacement.
-- If displacement is below `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M=2.0`,
-  USBDBG reports `heading_ready=false` and `steering_block_reason=NO_HEADING`.
+- The minimum displacement is `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M`, which
+  defaults to `2.0` m and is now compile-time configurable via
+  `-DCOURSE_MIN_DISPLACEMENT_M=<meters>`.
+- If displacement is below that threshold, USBDBG reports `heading_ready=false`
+  and `steering_block_reason=NO_HEADING`.
+- USBDBG prints both the active value (`course_min_displacement_m`) and the
+  configured macro source (`course_min_displacement_source`). The startup banner
+  prints `SINGLE_WP_COURSE_MIN_DISPLACEMENT_M` and
+  `SINGLE_WP_COURSE_MIN_DISPLACEMENT_SOURCE`.
 - Do not use `target_bearing_deg` alone as a motor steering command.
 
-Compile a no-motion steering diagnostic build:
+Lowering the displacement threshold only relaxes when the steering dry-run is
+willing to *estimate* course-over-ground. It does NOT weaken actual GPS motion
+safety thresholds: `gps_motion_min_sats`, `gps_motion_max_hdop`, and
+`gps_motion_stale_ms` are unchanged, and it does not enable motor execution.
+
+Compile a no-motion steering diagnostic build (default 2.0 m threshold):
 
 ```bash
 cd ~/Desktop/project-lab/gps_hc12_robot && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-steering-dryrun --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_STEERING_DRYRUN=1 -DSINGLE_WP_TARGET_LAT=35.570932 -DSINGLE_WP_TARGET_LON=129.187338' firmware/openrb_robot_controller
+```
+
+To exercise heading estimation over shorter, USB-tethered displacement, add
+`-DCOURSE_MIN_DISPLACEMENT_M=1.0`:
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-steering-dryrun-course-1m --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_STEERING_DRYRUN=1 -DCOURSE_MIN_DISPLACEMENT_M=1.0 -DSINGLE_WP_TARGET_LAT=35.570932 -DSINGLE_WP_TARGET_LON=129.187338' firmware/openrb_robot_controller
 ```
 
 Expected USBDBG fields:
@@ -320,6 +339,8 @@ Expected USBDBG fields:
 - `steering_target_lat`, `steering_target_lon`
 - `target_distance_m`, `target_bearing_deg`
 - `heading_ready`, `heading_source`
+- `course_min_displacement_m`, `course_min_displacement_source`
+- `course_displacement_m`
 - `estimated_course_deg`, `bearing_error_deg`
 - `desired_forward_cmd`, `desired_turn_cmd`
 - `desired_logical_left_cmd`, `desired_logical_right_cmd`

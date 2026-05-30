@@ -2357,6 +2357,45 @@ Safety:
 - Physical waypoint following remains blocked until heading/course and steering
   behavior are validated.
 
+## 2026-05-30: Course Displacement Threshold Made Compile-Time Configurable
+
+Reason:
+
+- While running the steering dry-run USB-tethered, GPS displacement reached only
+  ~1.7 m, below the hardcoded `2.0` m course threshold.
+- `heading_ready` stayed `false` with `steering_block_reason=NO_HEADING`, so the
+  tethered bench could never exercise course-over-ground estimation.
+- Investigation showed `COURSE_MIN_DISPLACEMENT_M` was never wired to the
+  constexpr; `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M` was hardcoded to `2.0`,
+  so `-DCOURSE_MIN_DISPLACEMENT_M=1.0` had no effect.
+
+Firmware change:
+
+- Added `#ifndef COURSE_MIN_DISPLACEMENT_M / #define COURSE_MIN_DISPLACEMENT_M 2.0`
+  next to the other compile-time defines.
+- Changed `constexpr double SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M = 2.0;` to
+  `= COURSE_MIN_DISPLACEMENT_M;` so the heading logic, the USBDBG print, and the
+  startup banner all use the active value.
+- Added `course_min_displacement_source` to USBDBG and
+  `SINGLE_WP_COURSE_MIN_DISPLACEMENT_SOURCE` to the startup banner (stringified
+  macro), so the configured value is visible at runtime.
+
+Diagnostic build (1.0 m threshold, no motion):
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-steering-dryrun-course-1m --build-property 'compiler.cpp.extra_flags=-DFIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=0 -DSINGLE_WP_STEERING_DRYRUN=1 -DCOURSE_MIN_DISPLACEMENT_M=1.0 -DSINGLE_WP_TARGET_LAT=35.5709976 -DSINGLE_WP_TARGET_LON=129.1870049' firmware/openrb_robot_controller
+```
+
+Safety:
+
+- This only changes when course-over-ground is estimated in the no-motion
+  steering dry-run. It does NOT weaken actual GPS motion safety thresholds:
+  `gps_motion_min_sats`, `gps_motion_max_hdop`, and `gps_motion_stale_ms` are
+  unchanged.
+- It does not enable autonomous steering execution, does not change manual drive
+  behavior, motor output mapping, or guarded crawl behavior.
+- Default builds remain at `2.0` m because the `#ifndef` default is `2.0`.
+
 ## 2026-05-03: Historical Verified Status From Existing Docs
 
 Source:

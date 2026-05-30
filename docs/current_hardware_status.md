@@ -144,10 +144,21 @@
   `physical_b_cmd=0.000` and has no steering correction yet.
 - Single-waypoint steering dry-run diagnostics are now available behind
   `SINGLE_WP_STEERING_DRYRUN=1`. The mode estimates course-over-ground only
-  after at least `2.0` m of GPS displacement and prints desired forward/turn,
-  logical wheel, and physical A/B commands. It does not drive motors by itself.
-  If movement is too small, USBDBG reports `heading_ready=false` and
-  `steering_block_reason=NO_HEADING`.
+  after at least `SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M` of GPS displacement
+  (default `2.0` m) and prints desired forward/turn, logical wheel, and physical
+  A/B commands. It does not drive motors by itself. If movement is too small,
+  USBDBG reports `heading_ready=false` and `steering_block_reason=NO_HEADING`.
+- The course displacement threshold is now compile-time configurable via
+  `-DCOURSE_MIN_DISPLACEMENT_M=<meters>`. A USB-tethered diagnostic build can use
+  `-DCOURSE_MIN_DISPLACEMENT_M=1.0` so heading can be estimated over the shorter
+  movement available while tethered (recent logs reach ~1.7 m). USBDBG now also
+  prints `course_min_displacement_source` (the configured macro) alongside the
+  active `course_min_displacement_m`, and the startup banner prints
+  `SINGLE_WP_COURSE_MIN_DISPLACEMENT_M` / `SINGLE_WP_COURSE_MIN_DISPLACEMENT_SOURCE`.
+  This only changes when course-over-ground is estimated; it does NOT weaken
+  actual GPS motion safety thresholds — `gps_motion_min_sats`,
+  `gps_motion_max_hdop`, and `gps_motion_stale_ms` are unchanged — and it does
+  not enable motor execution.
 - Motor pulse calibration mode is now available for GPS-independent motor
   deadband checks. Compile with `MOTOR_PULSE_TEST_MODE=1`; HC-12 is disabled,
   GPS readiness/target distance are not used, RC MANUAL is preserved, and AUTO

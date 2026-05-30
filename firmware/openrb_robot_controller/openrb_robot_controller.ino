@@ -98,6 +98,10 @@
 #define SINGLE_WP_STEERING_DRYRUN 0
 #endif
 
+#ifndef COURSE_MIN_DISPLACEMENT_M
+#define COURSE_MIN_DISPLACEMENT_M 2.0
+#endif
+
 #define STRINGIFY_VALUE_IMPL(value) #value
 #define STRINGIFY_VALUE(value) STRINGIFY_VALUE_IMPL(value)
 
@@ -182,7 +186,8 @@ constexpr double SINGLE_WAYPOINT_MAX_COORD_SANITY_DISTANCE_M = 1000.0;
 constexpr uint32_t SINGLE_WAYPOINT_GPS_STALE_MS = GPS_DRYRUN_STALE_MS;
 constexpr double SINGLE_WAYPOINT_MAX_HDOP = GPS_DRYRUN_MAX_HDOP;
 constexpr uint32_t SINGLE_WAYPOINT_AUTO_TIMEOUT_MS = 15000;
-constexpr double SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M = 2.0;
+constexpr double SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M = COURSE_MIN_DISPLACEMENT_M;
+constexpr const char *SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_SOURCE = STRINGIFY_VALUE(COURSE_MIN_DISPLACEMENT_M);
 
 constexpr bool     GROUND_CRAWL_ENABLED = GROUND_CRAWL_TEST_MODE != 0;
 constexpr float    GROUND_CRAWL_MAX_CMD_VALUE = GROUND_CRAWL_MAX_CMD;
@@ -1576,6 +1581,8 @@ void debugPrintStatus() {
   Serial.print(steeringHeadingReadyFlag ? F("course_over_ground") : F("NA"));
   Serial.print(F(" course_min_displacement_m="));
   Serial.print(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M, 1);
+  Serial.print(F(" course_min_displacement_source="));
+  Serial.print(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_SOURCE);
   Serial.print(F(" course_displacement_m="));
   Serial.print(steeringCourseDisplacementM, 2);
   Serial.print(F(" estimated_course_deg="));
@@ -1900,6 +1907,8 @@ void setup() {
   Serial.println(SINGLE_WAYPOINT_STEERING_DRYRUN_ENABLED ? "1" : "0");
   Serial.print("SINGLE_WP_COURSE_MIN_DISPLACEMENT_M=");
   Serial.println(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M, 1);
+  Serial.print("SINGLE_WP_COURSE_MIN_DISPLACEMENT_SOURCE=");
+  Serial.println(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_SOURCE);
   Serial.print("target_override_enabled=");
   Serial.println(SINGLE_WAYPOINT_TARGET_OVERRIDE_ENABLED ? "true" : "false");
   Serial.print("target_source=");
