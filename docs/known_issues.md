@@ -667,6 +667,29 @@ Rule — do not raise the AUTO command without the latch stop:
   `unclamped_final_right_cmd` and `ground_crawl_block_reason` in USBDBG before
   raising the cap.
 
+## Guarded Crawl 0.08 Validated; Current Target Too Close
+
+The guarded ground crawl 0.08 test validated the safety harness:
+
+- `GROUND_CRAWL_TEST_MODE=1` and `AUTO_MOTION_ARMED=1` were active.
+- A good GPS window reached `AUTO_RUNNING` with `gps_motion_ready=true`,
+  `gps_sats=5`, `gps_hdop≈1.34`, and `gps_block_reason=OK`.
+- `ground_crawl_ready=true` and `ground_crawl_block_reason=OK` were observed.
+- `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100` were clamped to
+  `final_left_cmd=0.080` / `final_right_cmd=0.080`.
+- `ground_crawl_latched_stop=true` stopped output after the duration limit.
+
+Remaining cautions:
+
+- The compile-time target later became too close (`target_distance_m≈3.9..4.4`),
+  below `GROUND_CRAWL_MIN_TARGET_DISTANCE_M=5.0`, so the harness correctly
+  blocked as `DISTANCE_OUT_OF_RANGE`.
+- Intermittent GPS degradation can still block as `GPS_NOT_MOTION_READY`.
+- This validates the guarded crawl safety behavior, not full autonomous
+  driving.
+- Before a 0.12 retry, reacquire current GPS and compute a fresh target
+  `10..12` m away. Do not reuse stale or too-close target coordinates.
+
 ## Heading / BMI160 Is Not Integrated
 
 The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is

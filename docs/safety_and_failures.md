@@ -75,6 +75,22 @@ Rules:
 - Ground crawl is NOT full autonomous driving. Floor driving remains not
   approved.
 
+Latest validation:
+
+- The 0.08 guarded crawl test reached `AUTO_RUNNING` during a good GPS window
+  with `ground_crawl_ready=true` and `ground_crawl_block_reason=OK`.
+- Raw candidate commands `0.100` / `0.100` were clamped to
+  `final_left_cmd=0.080` / `final_right_cmd=0.080`.
+- The duration latch asserted `ground_crawl_latched_stop=true` and forced final
+  commands to zero.
+- When target distance later fell to roughly `3.9..4.4` m, the harness blocked
+  further output as `DISTANCE_OUT_OF_RANGE` because the crawl minimum is `5.0`
+  m.
+- GPS degradation also blocked output as `GPS_NOT_MOTION_READY` or
+  `LATCHED_STOP`.
+- Before any 0.12 retry, reacquire current GPS and compute a fresh target
+  `10..12` m away. Do not reuse the too-close target.
+
 ## Station Defaults
 
 Allowed by default:

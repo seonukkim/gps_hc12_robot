@@ -181,6 +181,28 @@ Ground crawl safety gates and stop conditions:
   wheels-off-ground or open-area-with-kill-switch only. Ground crawl is NOT full
   autonomous driving; floor driving remains not approved.
 
+Latest 0.08 guarded crawl result:
+
+- `GROUND_CRAWL_TEST_MODE=1` and `AUTO_MOTION_ARMED=1` were active.
+- During a good GPS window, USBDBG reached `AUTO_RUNNING` with
+  `gps_motion_ready=true`, `gps_sats=5`, `gps_hdop≈1.34`, and
+  `gps_block_reason=OK`.
+- `ground_crawl_ready=true` and `ground_crawl_block_reason=OK` were observed.
+- `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100` were clamped to
+  `final_left_cmd=0.080` / `final_right_cmd=0.080`.
+- After the duration limit, `ground_crawl_latched_stop=true` forced final
+  commands to zero.
+- When the target later became too close (`target_distance_m≈3.9..4.4`), the
+  harness blocked as `DISTANCE_OUT_OF_RANGE` because the crawl minimum is
+  `5.0` m.
+- Intermittent GPS degradation also blocked as `GPS_NOT_MOTION_READY` or
+  `LATCHED_STOP`.
+
+Before the next guarded crawl run, reacquire current GPS and compute a fresh
+target `10..12` m away. If `0.08` produced no visible movement, retry only by
+changing `-DGROUND_CRAWL_MAX_CMD=0.12` while keeping the latch and all safety
+gates enabled.
+
 Target override rule:
 
 - Runtime USBDBG `target_lat` and `target_lon` are the source of truth.

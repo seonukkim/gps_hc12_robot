@@ -87,6 +87,20 @@
   The next motion test must use the guarded ground crawl build
   (`GROUND_CRAWL_TEST_MODE=1`); the AUTO command must not be raised without the
   crawl clamp + latch stop. Floor driving remains **not** approved.
+- Latest guarded ground crawl 0.08 safety validation: with
+  `GROUND_CRAWL_TEST_MODE=1`, `AUTO_MOTION_ARMED=1`, and
+  `GROUND_CRAWL_MAX_CMD=0.08`, a good GPS window reached `AUTO_RUNNING` with
+  `gps_motion_ready=true`, `gps_sats=5`, `gps_hdop≈1.34`, and
+  `gps_block_reason=OK`. USBDBG showed `ground_crawl_ready=true`,
+  `ground_crawl_block_reason=OK`, `candidate_left_cmd=0.100`,
+  `candidate_right_cmd=0.100`, and clamped final commands
+  `final_left_cmd=0.080` / `final_right_cmd=0.080`. The latch stop then
+  asserted `ground_crawl_latched_stop=true` and forced zero output. Later
+  target distance dropped to `≈3.9..4.4` m, below
+  `GROUND_CRAWL_MIN_TARGET_DISTANCE_M=5.0`, and the harness correctly blocked
+  as `DISTANCE_OUT_OF_RANGE`. Intermittent GPS degradation also blocked motion
+  as `GPS_NOT_MOTION_READY` or `LATCHED_STOP`. This validates the guarded crawl
+  safety harness, but it is still **not** full autonomous driving.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed

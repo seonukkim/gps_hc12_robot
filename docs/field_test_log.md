@@ -1695,6 +1695,74 @@ Safety decision:
 - Firmware change made the crawl harness the **only** path to armed motion: any
   armed build without `GROUND_CRAWL_TEST_MODE=1` now holds final commands at zero.
 
+## 2026-05-30: Guarded Ground Crawl 0.08 Safety Validation
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Mode:
+  - `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`
+  - `AUTO_MOTION_ARMED=1`
+  - `GROUND_CRAWL_TEST_MODE=1`
+  - `GROUND_CRAWL_MAX_CMD=0.08`
+
+Observed GPS and AUTO gates:
+
+- GPS motion readiness was intermittently good:
+  - `gps_motion_ready=true`
+  - `gps_sats=5`
+  - `gps_hdop≈1.34`
+  - `gps_block_reason=OK`
+- During a good GPS window, AUTO reached `AUTO_RUNNING`.
+- Guarded crawl gates passed:
+  - `ground_crawl_ready=true`
+  - `ground_crawl_block_reason=OK`
+
+Observed command clamp:
+
+```text
+candidate_left_cmd=0.100
+candidate_right_cmd=0.100
+final_left_cmd=0.080
+final_right_cmd=0.080
+```
+
+This confirms the guarded crawl harness clamps the final command under
+`GROUND_CRAWL_MAX_CMD=0.08`.
+
+Observed stop and block behavior:
+
+- After the duration limit, `ground_crawl_latched_stop=true` was observed and
+  final commands were forced to zero.
+- Later, the rover/GPS position drifted or moved close to the compile-time
+  target:
+  - `target_distance_m≈3.9..4.4`
+- Because `GROUND_CRAWL_MIN_TARGET_DISTANCE_M=5.0`, the harness correctly
+  blocked further motion with `ground_crawl_block_reason=DISTANCE_OUT_OF_RANGE`.
+- GPS also intermittently dropped to `gps_sats=4` or stale/no-fix states, and
+  the harness blocked motion as `GPS_NOT_MOTION_READY` or `LATCHED_STOP`.
+
+Interpretation:
+
+- The 0.08 guarded crawl safety behavior is validated:
+  - crawl mode can reach `AUTO_RUNNING`;
+  - final commands are clamped to 0.08;
+  - the duration latch stops output;
+  - too-close targets are blocked;
+  - degraded GPS blocks output.
+- This is still **not** full autonomous driving.
+- The current compile-time target is now too close for another crawl test and
+  must not be reused.
+
+Next action:
+
+- Reacquire current outdoor GPS.
+- Compute a fresh target roughly `10..12` m away from the current rover/GPS
+  position.
+- If no visible physical movement was observed at `0.08`, the next guarded
+  crawl test may use `GROUND_CRAWL_MAX_CMD=0.12` with the same latch protection.
+- Floor driving and coverage driving remain blocked.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

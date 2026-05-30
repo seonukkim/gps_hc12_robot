@@ -21,9 +21,15 @@ gates passing) but produced **no visible motion** — almost certainly the
 motor/ESC/friction deadband (`0.100` ≈ 1530 µs, only 30 µs above neutral). The
 AUTO command must not be raised ungated. Armed motion is now permitted ONLY
 through the guarded ground crawl harness (`GROUND_CRAWL_TEST_MODE=1`) with a
-command clamp and a hard latch stop. The next step is the guarded ground crawl
-bench test with a strict safety procedure. Floor waypoint driving is not
-approved yet.
+command clamp and a hard latch stop. The first guarded crawl 0.08 validation is
+now complete: `AUTO_RUNNING` was reached during a good GPS window,
+`ground_crawl_ready=true`, the raw `0.100` candidate commands were clamped to
+`0.080`, latch stop forced zero output after the duration limit, too-close
+target distance was blocked as `DISTANCE_OUT_OF_RANGE`, and degraded GPS was
+blocked as `GPS_NOT_MOTION_READY`. This validates the safety harness, not full
+autonomous driving. The current target is now too close and must be replaced
+with a fresh `10..12` m target before any 0.12 retry. Floor waypoint driving is
+not approved yet.
 
 Full coverage driving from `mission.json` / `mission.csv` is intentionally not
 the next step. The rover must first prove one carefully bounded waypoint motion
@@ -71,21 +77,22 @@ Staged plan:
    sky. IMU diagnostics remain useful, but IMU is optional for the current
    GPS+RC single-waypoint preparation stage and must not block candidate dry-run
    work.
-12. Guarded ground crawl bench test (wheels lifted / open area with kill switch):
-   armed AUTO motion is permitted ONLY through the guarded ground crawl harness.
-   Compile with `AUTO_MOTION_ARMED=1 GROUND_CRAWL_TEST_MODE=1` (any armed build
-   without the crawl flag now holds final commands at zero). Verify the clamp to
-   ±`GROUND_CRAWL_MAX_CMD` (default `0.08`), the hard latch stop after
-   `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms), latch-clears-only-on-MANUAL,
-   the neutral-RC and motion-GPS and near-field-target (5–20 m) gates, and
-   manual override. Note the 2026-05-29 result: armed AUTO reached
-   `final_left_cmd=0.100` / `final_right_cmd=0.100` with no visible motion
-   (motor deadband). Raise past the deadband only via `-DGROUND_CRAWL_MAX_CMD` in
-   small steps, never by ungated AUTO command.
-13. Low-speed floor test: only after wheel-off-ground behavior and sensor-frame
+12. Guarded ground crawl 0.08 safety validation complete. Armed AUTO motion is
+   permitted ONLY through the guarded ground crawl harness. The 0.08 run reached
+   `AUTO_RUNNING` with `ground_crawl_ready=true`, clamped
+   `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100` down to
+   `final_left_cmd=0.080` / `final_right_cmd=0.080`, latched stop after the
+   duration limit, blocked a too-close `3.9..4.4` m target as
+   `DISTANCE_OUT_OF_RANGE`, and blocked degraded GPS as `GPS_NOT_MOTION_READY`.
+13. Guarded ground crawl 0.12 deadband retry: only if 0.08 produced no visible
+   physical movement, first reacquire current GPS and compute a fresh target
+   `10..12` m away. Then retry with `GROUND_CRAWL_MAX_CMD=0.12`, the same
+   `GROUND_CRAWL_MAX_AUTO_MS` latch, neutral RC, motion-grade GPS, near-field
+   target window, and manual override. Do not reuse stale targets.
+14. Low-speed floor test: only after guarded crawl behavior and sensor-frame
    assumptions are validated.
-14. Multi-waypoint motion: only after single-waypoint behavior is proven.
-15. Coverage path / lawnmower driving: last step, after mission sequencing,
+15. Multi-waypoint motion: only after single-waypoint behavior is proven.
+16. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
@@ -110,22 +117,27 @@ Real outdoor navigation requires one of these conditions:
 Until that is true, do not proceed to floor waypoint driving and do not approve
 `AUTO_MOTION_ARMED=1` floor tests.
 
-## Next Required Validation Before Motion
+## Next Required Validation Before Further Motion
 
 - Go fully outdoors with the rover and GPS fixed together, acquire a fresh GPS
-  fix in MANUAL, recompute a nearby target from that actual fix, then rerun the
-  single-waypoint experiment with `AUTO_MOTION_ARMED=0`.
+  fix in MANUAL, and compute a fresh target from that actual fix. The previous
+  target is now too close and must not be reused.
+- For the next guarded crawl run, choose a target roughly `10..12` m away so it
+  remains inside the crawl near-field window (`5..20` m) but does not
+  immediately trip the too-close block.
 - Confirm the station/controller is powered on and linked before interpreting
   RC mode values; controller-off can make the PPM stream appear stuck or
   failsafe-like.
-- Verify Manual/Auto switch positions before the dry-run: MANUAL should show
+- Verify Manual/Auto switch positions before the crawl run: MANUAL should show
   `mode_us≈1000` and `control_source=RC_MANUAL`; AUTO should show
-  `mode_us≈2000`, `mode=AUTO_READY`, and `control_source=STOP`.
+  `mode_us≈2000` and either `mode=AUTO_READY` before the crawl gates pass or
+  `mode=AUTO_RUNNING` only while all guarded crawl gates pass.
 - Confirm the target override fields still match the intended target, then
-  interpret `target_distance_m`, `distance_allowed`, and `safety_ready`.
+  interpret `target_distance_m`, `distance_allowed`, `safety_ready`, and
+  `ground_crawl_block_reason`.
 - `distance_allowed=true` in MANUAL is not enough; verify the same nearby-target
-  condition in `AUTO_READY` with `active_gps_ready=true`, `timeout_ok=true`,
-  and `safety_ready=true`.
+  condition in AUTO with `gps_motion_ready=true`, `timeout_ok=true`,
+  `safety_ready=true`, and `ground_crawl_ready=true`.
 - Confirm GPS readiness using `gps_age_ms`, `gps_hdop`, and `gps_sats`; do not
   rely on `gps_fix=true` alone.
 - `gps_chars` increasing only proves serial/NMEA input is alive. Do not proceed
@@ -137,7 +149,8 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
 - `AUTO_MOTION_ARMED=0` no-motion candidate calculations may use
   `gps_dryrun_ready=true`; this is reported as `active_gps_ready=true` in the
   single-waypoint debug fields.
-- Any future `AUTO_MOTION_ARMED=1` build must require `gps_motion_ready=true`.
+- Any `AUTO_MOTION_ARMED=1` guarded crawl build must require
+  `gps_motion_ready=true`.
 - HDOP around `5` is acceptable only for no-motion dry-run candidate
   calculation. It is not approved for floor driving.
 - If the relevant readiness tier is false, target-distance and bearing should
@@ -149,10 +162,12 @@ Until that is true, do not proceed to floor waypoint driving and do not approve
   to AUTO, expect `timeout_source=auto_entry`, a numeric `auto_entry_ms`, a
   small `auto_elapsed_ms`, and `timeout_ok=true` until the AUTO timeout limit is
   exceeded.
-- Run wheel-off-ground bench testing only after safety gates and sensor-frame
-  assumptions are clear.
+- If 0.08 produced no visible physical movement, retry only through the guarded
+  crawl harness with `GROUND_CRAWL_MAX_CMD=0.12`, the same duration latch, and a
+  fresh target.
 - Do not run floor driving yet. Keep any indoor or non-bench validation in
-  no-motion mode with `AUTO_MOTION_ARMED=0`.
+  no-motion mode with `AUTO_MOTION_ARMED=0`; guarded crawl is a bounded
+  deadband-calibration step, not full autonomous driving.
 - IMU status: optional for the current GPS+RC single-waypoint stage. The
   default `Wire` scanner currently shows D11/D12 stuck low before scanning, so
   no IMU address is verified and no IMU data may be used for autonomy yet.

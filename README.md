@@ -88,25 +88,26 @@ body frame must be fixed, measured, and modeled.
 - Verify Manual/Auto before autonomy dry-run: MANUAL should show
   `mode_us≈1000` and `control_source=RC_MANUAL`; AUTO should show
   `mode_us≈2000`, `mode=AUTO_READY`, and `control_source=STOP`.
-- Recompute the single-waypoint target from the current GPS position and rerun
-  with `AUTO_MOTION_ARMED=0`.
-- Verify the nearby-target condition in `AUTO_READY`, not only in MANUAL.
-  `distance_allowed=true` in MANUAL is progress but not enough.
+- Recompute the single-waypoint target from the current GPS position before
+  every guarded crawl attempt. The latest 0.08 run ended with the target too
+  close (`target_distance_m≈3.9..4.4`), so those coordinates must not be reused.
+- For the next guarded crawl attempt, use a fresh target roughly `10..12` m away
+  so it remains inside the crawl window (`5..20` m).
 - The single-waypoint timeout now starts on AUTO entry, so MANUAL GPS waiting
   should not consume the AUTO candidate timeout.
 - Confirm `gps_age_ms`, `gps_hdop`, and `gps_sats`, not only `gps_fix=true`,
   before interpreting GPS readiness.
 - Re-test GPS candidate fields with the antenna mounted on the rover and placed
   in open sky.
-- Run only wheel-off-ground bench testing after safety gates and sensor-frame
-  assumptions are clear.
-- Do not approve `AUTO_MOTION_ARMED=1` floor testing yet.
-- 2026-05-29 result: armed AUTO reached `final_left_cmd=0.100` /
-  `final_right_cmd=0.100` with all gates passing but produced no visible motion
-  (motor/ESC/friction deadband). The next motion test must use the guarded ground
-  crawl build (`GROUND_CRAWL_TEST_MODE=1`); armed motion is now gated to zero in
-  any build without it. Do not raise the AUTO command past the deadband except
-  via `-DGROUND_CRAWL_MAX_CMD` in small steps, under the crawl latch stop.
+- 2026-05-30 result: guarded crawl 0.08 reached `AUTO_RUNNING`, clamped
+  `candidate_left_cmd=0.100` / `candidate_right_cmd=0.100` to
+  `final_left_cmd=0.080` / `final_right_cmd=0.080`, latched stop after the
+  duration limit, and blocked too-close target distance and degraded GPS. This
+  validates the safety harness, not full autonomous driving.
+- If 0.08 showed no visible physical movement, retry only through the same
+  guarded crawl harness with `GROUND_CRAWL_MAX_CMD=0.12`, latch protection, and
+  a fresh target. Do not raise ungated AUTO output.
+- Do not approve full floor waypoint driving yet.
 
 ## Legacy HC-12 References
 
@@ -585,6 +586,17 @@ guarded ground crawl build (`GROUND_CRAWL_TEST_MODE=1`), which clamps to
 ±`GROUND_CRAWL_MAX_CMD` (default `0.08`) and hard-latches a stop after
 `GROUND_CRAWL_MAX_AUTO_MS` (default `1200` ms, clears only on MANUAL). Step the
 cap up only via `-DGROUND_CRAWL_MAX_CMD`, under latch protection.
+
+Latest guarded crawl 0.08 validation succeeded as a safety-harness test:
+`GROUND_CRAWL_TEST_MODE=1` and `AUTO_MOTION_ARMED=1` were active, a good GPS
+window reached `AUTO_RUNNING`, `ground_crawl_ready=true`,
+`ground_crawl_block_reason=OK`, candidate commands `0.100` / `0.100` were
+clamped to final commands `0.080` / `0.080`, and the duration latch later forced
+zero output. The harness also blocked a too-close `3.9..4.4` m target as
+`DISTANCE_OUT_OF_RANGE` and blocked degraded GPS as `GPS_NOT_MOTION_READY`.
+Before another crawl, reacquire current GPS and compute a fresh `10..12` m
+target. If 0.08 did not visibly move, the next cap is `0.12` under the same
+latch protection. This is still not full autonomous driving.
 
 If `gps_chars=0`, debug wiring, selected UART, baudrate, power, or GPS output
 configuration first.
