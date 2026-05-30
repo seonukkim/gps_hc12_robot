@@ -752,6 +752,50 @@ the drivetrain, then apply corrections through the shared drive calibration
 layer (`DRIVE_CALIBRATION_ENABLE=1`) used by both MANUAL and AUTO command
 paths. Keep defaults identity/off until measured values justify a change.
 
+Latest differential pulse observations:
+
+- Left-only `+0.22`: left wheel rotates forward.
+- Right-only `+0.22`: right wheel rotates forward, and the rover curves left as
+  expected for right-only drive.
+- Both `+0.22/+0.22`: both wheels appear to rotate forward, but the rover
+  curves/rotates right instead of going straight.
+- Both `-0.22/-0.22`: both wheels appear to rotate backward, but the rover
+  curves left while reversing.
+
+Interpretation:
+
+- Basic motor polarity is likely not completely inverted.
+- The motor pulse path bypasses RC stick angle remapping, so this is an
+  actuator/drivetrain observation rather than a manual-stick remap artifact.
+- Symmetric motor pulse output now points toward left/right drivetrain
+  asymmetry, likely left side stronger or right side weaker under equal command.
+- Manual RC curvature may still involve the RC angle remap or stick mixing, but
+  do not use that as the primary explanation for motor pulse results.
+
+Next debugging step: code-path inspection plus right-side compensation tests
+through `DRIVE_CALIBRATION_ENABLE=1`.
+
+Latest critical retest:
+
+- `MOTOR_PULSE_LEFT_CMD=+0.25`, `MOTOR_PULSE_RIGHT_CMD=0.00` made the physical
+  left wheel rotate forward while the physical right wheel rotated backward.
+- `MOTOR_PULSE_LEFT_CMD=0.00`, `MOTOR_PULSE_RIGHT_CMD=+0.25` made the physical
+  left wheel rotate backward while the physical right wheel rotated forward.
+
+This result must be treated as a direct-output-path validation failure, not as a
+simple left/right scale problem. Do not run compensation tests until USBDBG shows
+the staged command path clearly:
+
+- `motor_pulse_left_cmd` / `motor_pulse_right_cmd`
+- `logical_left_cmd` / `logical_right_cmd`
+- `calibrated_left_cmd` / `calibrated_right_cmd`
+- `output_left_cmd` / `output_right_cmd`
+- `motor_output_swap_lr=false` unless explicitly testing a physical output swap
+
+The firmware now separates those stages. `MOTOR_PULSE_LEFT_CMD` and
+`MOTOR_PULSE_RIGHT_CMD` are intended to be direct logical wheel commands, not
+steering/throttle commands.
+
 ## Heading / BMI160 Is Not Integrated
 
 The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is

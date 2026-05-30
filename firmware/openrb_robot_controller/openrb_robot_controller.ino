@@ -66,6 +66,10 @@
 #define RIGHT_MOTOR_MIN_CMD 0.0
 #endif
 
+#ifndef MOTOR_OUTPUT_SWAP_LR
+#define MOTOR_OUTPUT_SWAP_LR 0
+#endif
+
 #ifndef GROUND_CRAWL_TEST_MODE
 #define GROUND_CRAWL_TEST_MODE 0
 #endif
@@ -126,6 +130,7 @@ constexpr float LEFT_MOTOR_SCALE_VALUE = LEFT_MOTOR_SCALE;
 constexpr float RIGHT_MOTOR_SCALE_VALUE = RIGHT_MOTOR_SCALE;
 constexpr float LEFT_MOTOR_MIN_CMD_VALUE = LEFT_MOTOR_MIN_CMD;
 constexpr float RIGHT_MOTOR_MIN_CMD_VALUE = RIGHT_MOTOR_MIN_CMD;
+constexpr bool MOTOR_OUTPUT_SWAP_LR_ENABLED = MOTOR_OUTPUT_SWAP_LR != 0;
 constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
@@ -245,6 +250,8 @@ float autoLeftCmd = 0.0f;
 float autoRightCmd = 0.0f;
 float lastLeftOutputCmd = 0.0f;
 float lastRightOutputCmd = 0.0f;
+float lastLogicalLeftCmd = 0.0f;
+float lastLogicalRightCmd = 0.0f;
 float lastRawLeftCmd = 0.0f;
 float lastRawRightCmd = 0.0f;
 float lastCalibratedLeftCmd = 0.0f;
@@ -337,6 +344,8 @@ void writeFrame(const char *type, uint32_t seq, const String &payload) {
 void motorStop() {
   escLeft.writeMicroseconds(ESC_NEUTRAL_US);
   escRight.writeMicroseconds(ESC_NEUTRAL_US);
+  lastLogicalLeftCmd = 0.0f;
+  lastLogicalRightCmd = 0.0f;
   lastRawLeftCmd = 0.0f;
   lastRawRightCmd = 0.0f;
   lastCalibratedLeftCmd = 0.0f;
@@ -725,22 +734,33 @@ float applyMotorCalibration(float raw, float sign, float scale, float minCmd) {
   return clampUnit(calibrated);
 }
 
-void applyDriveCommand(float left, float right) {
-  lastRawLeftCmd = left;
-  lastRawRightCmd = right;
+void applyDriveCommand(float logicalLeft, float logicalRight) {
+  // Inputs are direct logical wheel commands. Mixers, if any, must run before this function.
+  lastLogicalLeftCmd = logicalLeft;
+  lastLogicalRightCmd = logicalRight;
+  lastRawLeftCmd = logicalLeft;
+  lastRawRightCmd = logicalRight;
 
   float calibratedLeft =
-      applyMotorCalibration(left, LEFT_MOTOR_SIGN_VALUE, LEFT_MOTOR_SCALE_VALUE, LEFT_MOTOR_MIN_CMD_VALUE);
+      applyMotorCalibration(logicalLeft, LEFT_MOTOR_SIGN_VALUE, LEFT_MOTOR_SCALE_VALUE, LEFT_MOTOR_MIN_CMD_VALUE);
   float calibratedRight =
-      applyMotorCalibration(right, RIGHT_MOTOR_SIGN_VALUE, RIGHT_MOTOR_SCALE_VALUE, RIGHT_MOTOR_MIN_CMD_VALUE);
+      applyMotorCalibration(logicalRight, RIGHT_MOTOR_SIGN_VALUE, RIGHT_MOTOR_SCALE_VALUE, RIGHT_MOTOR_MIN_CMD_VALUE);
 
   lastCalibratedLeftCmd = calibratedLeft;
   lastCalibratedRightCmd = calibratedRight;
-  lastLeftOutputCmd = calibratedLeft;
-  lastRightOutputCmd = calibratedRight;
 
-  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(calibratedLeft * ESC_RANGE_US);
-  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(calibratedRight * ESC_RANGE_US);
+  float outputLeft = calibratedLeft;
+  float outputRight = calibratedRight;
+  if (MOTOR_OUTPUT_SWAP_LR_ENABLED) {
+    outputLeft = calibratedRight;
+    outputRight = calibratedLeft;
+  }
+
+  lastLeftOutputCmd = outputLeft;
+  lastRightOutputCmd = outputRight;
+
+  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(outputLeft * ESC_RANGE_US);
+  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(outputRight * ESC_RANGE_US);
   escLeft.writeMicroseconds(clampPulse(leftPulse));
   escRight.writeMicroseconds(clampPulse(rightPulse));
 }
@@ -1055,6 +1075,14 @@ void debugPrintStatus() {
   Serial.print(lastLeftOutputCmd, 3);
   Serial.print(F(" right_cmd="));
   Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" final_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" final_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" logical_left_cmd="));
+  Serial.print(lastLogicalLeftCmd, 3);
+  Serial.print(F(" logical_right_cmd="));
+  Serial.print(lastLogicalRightCmd, 3);
   Serial.print(F(" raw_left_cmd="));
   Serial.print(lastRawLeftCmd, 3);
   Serial.print(F(" raw_right_cmd="));
@@ -1063,6 +1091,12 @@ void debugPrintStatus() {
   Serial.print(lastCalibratedLeftCmd, 3);
   Serial.print(F(" calibrated_right_cmd="));
   Serial.print(lastCalibratedRightCmd, 3);
+  Serial.print(F(" output_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" output_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" motor_output_swap_lr="));
+  Serial.print(MOTOR_OUTPUT_SWAP_LR_ENABLED ? F("true") : F("false"));
   Serial.print(F(" drive_calibration_enable="));
   Serial.print(DRIVE_CALIBRATION_ENABLED ? F("true") : F("false"));
   Serial.print(F(" left_motor_sign="));
@@ -1326,10 +1360,6 @@ void debugPrintStatus() {
   Serial.print(singleWaypointCandidateLeftCmd, 3);
   Serial.print(F(" candidate_right_cmd="));
   Serial.print(singleWaypointCandidateRightCmd, 3);
-  Serial.print(F(" final_left_cmd="));
-  Serial.print(lastLeftOutputCmd, 3);
-  Serial.print(F(" final_right_cmd="));
-  Serial.print(lastRightOutputCmd, 3);
   Serial.print(F(" ground_crawl_test_mode="));
   Serial.print(GROUND_CRAWL_ENABLED ? F("true") : F("false"));
   Serial.print(F(" ground_crawl_max_cmd="));
@@ -1596,6 +1626,8 @@ void setup() {
   Serial.println(MOTOR_PULSE_RIGHT_CMD_VALUE, 3);
   Serial.print("MOTOR_PULSE_MS=");
   Serial.println(MOTOR_PULSE_MS_VALUE);
+  Serial.print("MOTOR_OUTPUT_SWAP_LR=");
+  Serial.println(MOTOR_OUTPUT_SWAP_LR_ENABLED ? "true" : "false");
 #elif FIXED_WIRING_GPS_SERIAL2_DIAG
   Serial.println("FIXED_WIRING_GPS_SERIAL2_DIAG enabled.");
   Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");

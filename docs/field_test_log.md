@@ -1917,6 +1917,106 @@ Next action:
 - Use the shared drive calibration layer for measured trim or deadband
   compensation, not path planning code.
 
+## 2026-05-30: Differential Motor Pulse Observations
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Mode: `MOTOR_PULSE_TEST_MODE=1`
+- Pulse duration: `MOTOR_PULSE_MS=300`
+- Differential command support:
+  - `MOTOR_PULSE_LEFT_CMD`
+  - `MOTOR_PULSE_RIGHT_CMD`
+
+Observed pulse threshold:
+
+- `MOTOR_PULSE_CMD=0.180` produced valid software output but no visible physical
+  motion.
+- `MOTOR_PULSE_CMD=0.220` produced visible physical motion.
+- In the 0.22 log, software output was symmetric:
+  - `left_cmd=0.220`
+  - `right_cmd=0.220`
+  - `motor_pulse_ready=true`
+  - `motor_pulse_block_reason=OK`
+
+Differential pulse observations:
+
+1. Left-only `+0.22`: left wheel rotates in the forward direction.
+2. Right-only `+0.22`: right wheel rotates in the forward direction, and the
+   rover curves left as expected for right-only drive.
+3. Both `+0.22/+0.22`: both wheels appear to rotate forward, but the rover
+   curves/rotates right instead of going straight.
+4. Both `-0.22/-0.22`: both wheels appear to rotate backward, but the rover
+   curves left while reversing.
+
+Manual RC comparison:
+
+- Forward manual driving tends to curve left.
+- Reverse manual driving tends to curve right or less severely.
+
+Code-path inspection:
+
+- Motor pulse output bypasses RC stick angle remapping.
+- In `MOTOR_PULSE_TEST_MODE`, RC steering/throttle are used only for the neutral
+  precondition.
+- When AUTO pulse is ready, firmware calls
+  `applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE, MOTOR_PULSE_RIGHT_CMD_VALUE)`,
+  not `applyManualOverride(...)` or `mapRcManualAxes(...)`.
+
+Interpretation:
+
+- Basic motor polarity is likely not completely inverted: both left-only and
+  right-only positive pulses rotate their respective wheels forward.
+- Symmetric motor pulse behavior suggests left/right drivetrain asymmetry under
+  equal commands, likely left side stronger or right side weaker.
+- Manual RC asymmetry may also include the earlier RC angle remap or stick
+  mixing path, but the motor pulse observations are independent of that remap.
+
+Next action:
+
+- Do not proceed to GPS path planning yet.
+- Inspect the shared drive output path and test right-side compensation.
+- Candidate compensation direction to test: increase right-side output or reduce
+  left-side output through `DRIVE_CALIBRATION_ENABLE=1`, not through path
+  planning.
+
+## 2026-05-30: Direct Wheel Pulse Path Fix
+
+Observed after the initial differential pulse notes:
+
+1. `MOTOR_PULSE_LEFT_CMD=+0.25`, `MOTOR_PULSE_RIGHT_CMD=0.00`
+   - physical left wheel rotated forward
+   - physical right wheel rotated backward
+2. `MOTOR_PULSE_LEFT_CMD=0.00`, `MOTOR_PULSE_RIGHT_CMD=+0.25`
+   - physical left wheel rotated backward
+   - physical right wheel rotated forward
+
+Interpretation:
+
+- This is not a simple left/right output swap and not a scale-only calibration
+  result.
+- Before drivetrain trim, the firmware must prove that motor pulse values are
+  direct wheel commands and are not being interpreted as steering/throttle or
+  remixed later.
+
+Firmware update:
+
+- `MOTOR_PULSE_LEFT_CMD` and `MOTOR_PULSE_RIGHT_CMD` are documented and routed
+  as direct logical wheel commands.
+- USBDBG now separates:
+  - `logical_left_cmd` / `logical_right_cmd`
+  - `calibrated_left_cmd` / `calibrated_right_cmd`
+  - `output_left_cmd` / `output_right_cmd`
+  - `motor_output_swap_lr`
+- `MOTOR_OUTPUT_SWAP_LR` exists for final output-stage swapping only and remains
+  off by default.
+
+Next action:
+
+- Re-run left-only, right-only, both-forward, and both-reverse pulse tests.
+- Only proceed to scale/deadband calibration after direct wheel commands behave
+  as expected.
+
 ## Known Manual Direction Attempts
 
 These are recorded to prevent repeating the same fixes:

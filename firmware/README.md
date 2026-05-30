@@ -240,12 +240,40 @@ Current calibration result:
 - Physical motion looked more like rotation than straight forward motion.
 - Manual RC forward tends to drift/curve left; backward tends to drift/curve
   right.
+- Differential pulse observations:
+  - left-only `+0.22`: left wheel rotates forward;
+  - right-only `+0.22`: right wheel rotates forward and the rover curves left as
+    expected;
+  - both `+0.22/+0.22`: both wheels rotate forward but the rover curves/rotates
+    right;
+  - both `-0.22/-0.22`: both wheels rotate backward but the rover curves left
+    while reversing.
+- A later `+0.25` direct-pulse retest showed a direct-output-path problem:
+  left-only `+0.25/0.00` also moved the right wheel backward, and right-only
+  `0.00/+0.25` also moved the left wheel backward. Treat that as a direct wheel
+  command validation failure until the staged USBDBG fields prove otherwise.
+- Motor pulse output bypasses RC stick angle remapping. In pulse mode, RC
+  steering/throttle are used only for the neutral precondition; pulse output
+  goes directly through `applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE,
+  MOTOR_PULSE_RIGHT_CMD_VALUE)`.
+- After the 2026-05-30 differential retest, `MOTOR_PULSE_LEFT_CMD` and
+  `MOTOR_PULSE_RIGHT_CMD` must be treated as direct logical wheel commands, not
+  steering/throttle inputs. Verify this with the staged USBDBG fields below
+  before using any calibration result.
 
 Differential pulse and shared drive calibration support is now available:
 
 - `MOTOR_PULSE_LEFT_CMD` and `MOTOR_PULSE_RIGHT_CMD` override the left/right
   pulse independently. If omitted, both default to `MOTOR_PULSE_CMD` for
   backward compatibility.
+- `logical_left_cmd` / `logical_right_cmd` are direct pre-swap wheel commands.
+- `calibrated_left_cmd` / `calibrated_right_cmd` are after the optional drive
+  calibration layer.
+- `output_left_cmd` / `output_right_cmd` are the final commands sent to the
+  physical left/right motor outputs.
+- `MOTOR_OUTPUT_SWAP_LR=1` swaps the final output stage only. The default is
+  `0`; do not enable it unless a direct left/right pulse proves the physical
+  outputs are wired opposite to the intended side.
 - `DRIVE_CALIBRATION_ENABLE=1` enables the shared calibration layer used by RC
   MANUAL, station manual, single-waypoint AUTO, and motor pulse output.
 - Identity defaults preserve current behavior:
@@ -289,9 +317,14 @@ Expected GPS fields in that build include increasing `gps_chars`,
 Expected USB debug fields:
 
 ```text
-raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
+logical_left_cmd=... logical_right_cmd=... raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... output_left_cmd=... output_right_cmd=... final_left_cmd=... final_right_cmd=... motor_output_swap_lr=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
 motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_left_cmd=... motor_pulse_right_cmd=... motor_pulse_ms=... motor_pulse_elapsed_ms=... motor_pulse_latched_stop=... motor_pulse_ready=... motor_pulse_block_reason=...
 ```
+
+`left_cmd` / `right_cmd` and `final_left_cmd` / `final_right_cmd` are the same
+final physical output values sent to the ESC pulse conversion. Use
+`logical_left_cmd` / `logical_right_cmd` or `raw_left_cmd` / `raw_right_cmd` to
+inspect the pre-calibration direct wheel command.
 
 Expected block reasons include `MODE_OFF`, `RC_INVALID`, `RC_NOT_NEUTRAL`,
 `LATCHED_STOP`, and `OK`.

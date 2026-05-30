@@ -47,7 +47,12 @@ latching stop. Use it only to identify motor/drivetrain response thresholds.
 The first calibration result shows `0.180` is below visible motion while `0.220`
 does move, but symmetric `0.220` software output produced rotation-like motion
 rather than straight motion. Manual RC forward/backward also curves in opposite
-directions. Treat drivetrain asymmetry as the current blocker.
+directions. Differential pulse tests now show both left-only and right-only
+positive pulses rotate the correct side forward, so gross polarity inversion is
+unlikely. Symmetric `+0.22/+0.22` curves/rotates right and symmetric
+`-0.22/-0.22` curves left while reversing, pointing to drivetrain asymmetry
+under equal commands. Treat right-side compensation / shared drive calibration
+as the current blocker.
 
 Staged plan:
 
@@ -106,7 +111,8 @@ Staged plan:
    remains the final safety clamp. Do not reuse stale targets.
 14. Differential left/right motor pulse calibration: characterize left-only,
    right-only, and matched left/right thresholds with `MOTOR_PULSE_LEFT_CMD` and
-   `MOTOR_PULSE_RIGHT_CMD` before any GPS path work.
+   `MOTOR_PULSE_RIGHT_CMD` before any GPS path work. Initial observations are
+   complete enough to start right-side compensation tests.
 15. Shared drive calibration layer: apply any deadband compensation, left/right
    trim, or output scaling in one common layer used by both MANUAL and AUTO.
    This layer is behind `DRIVE_CALIBRATION_ENABLE=1`; identity/off defaults

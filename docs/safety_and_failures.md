@@ -132,13 +132,20 @@ Latest calibration state:
 - The physical motion looked more like rotation than straight forward motion.
 - Manual RC forward motion tends to drift/curve left; backward motion tends to
   drift/curve right.
+- Differential pulse checks show basic polarity is likely correct:
+  left-only `+0.22` rotates the left wheel forward, and right-only `+0.22`
+  rotates the right wheel forward.
+- Symmetric pulse checks still curve: both `+0.22/+0.22` curve/rotate right,
+  and both `-0.22/-0.22` curve left while reversing.
+- Code inspection confirms motor pulse output bypasses RC stick angle remapping;
+  RC sticks are only checked for neutral before the direct pulse command.
 
 Safety decision:
 
 - Do not proceed to GPS path planning or waypoint-driving tests until low-level
   drivetrain asymmetry is characterized.
-- The next motor tests should be differential left/right pulse tests, still
-  latched and operator-controlled.
+- The next motor tests should be right-side compensation tests, still latched
+  and operator-controlled.
 - Any future correction must live in a shared drive calibration layer used by
   both MANUAL and AUTO, not in path planning.
 - The shared drive calibration layer is implemented behind

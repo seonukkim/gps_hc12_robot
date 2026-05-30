@@ -630,6 +630,15 @@ supports `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` plus a shared
 compensation applied consistently to MANUAL, station manual, AUTO, and motor
 pulse outputs. Defaults are identity/off, so normal builds are unchanged.
 
+Latest differential pulse observations: left-only `+0.22` rotates the left wheel
+forward; right-only `+0.22` rotates the right wheel forward and curves left as
+expected; both `+0.22/+0.22` rotate both wheels forward but curve/rotate right;
+both `-0.22/-0.22` rotate backward but curve left while reversing. Code
+inspection confirms motor pulse output bypasses RC stick angle remapping, so
+these observations should be treated as actuator/drivetrain calibration data.
+Next step is right-side compensation testing through the shared drive
+calibration layer, not GPS path planning.
+
 Do not use motor pulse logs to validate GPS. In `MOTOR_PULSE_TEST_MODE=1`, the
 main controller intentionally skips GPS initialization and GPS byte processing,
 so `gps_chars=0`, `last_rmc_status=NA`, `last_gga_fix_quality=NA`, and
