@@ -139,11 +139,17 @@ Latest calibration state:
   and both `-0.22/-0.22` curve left while reversing.
 - Code inspection confirms motor pulse output bypasses RC stick angle remapping;
   RC sticks are only checked for neutral before the direct pulse command.
+- Later `+0.25` direct-pulse checks showed the current PWM inputs behave like a
+  steer/throttle pair: left-only command also moved the right wheel backward,
+  and right-only command behaved like forward throttle. Firmware now converts
+  `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` from direct wheel commands to
+  those PWM inputs only at the final pin-write stage.
 
 Safety decision:
 
 - Do not proceed to GPS path planning or waypoint-driving tests until low-level
-  drivetrain asymmetry is characterized.
+  direct wheel pulse behavior is validated, then drivetrain asymmetry is
+  characterized.
 - The next motor tests should be right-side compensation tests, still latched
   and operator-controlled.
 - Any future correction must live in a shared drive calibration layer used by

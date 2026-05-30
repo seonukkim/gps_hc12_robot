@@ -256,6 +256,9 @@ float lastRawLeftCmd = 0.0f;
 float lastRawRightCmd = 0.0f;
 float lastCalibratedLeftCmd = 0.0f;
 float lastCalibratedRightCmd = 0.0f;
+float lastOutputLeftPinCmd = 0.0f;
+float lastOutputRightPinCmd = 0.0f;
+bool lastMixerBypassedForMotorPulse = false;
 
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 bool singleWaypointAutoTimingActiveFlag = false;
@@ -352,6 +355,9 @@ void motorStop() {
   lastCalibratedRightCmd = 0.0f;
   lastLeftOutputCmd = 0.0f;
   lastRightOutputCmd = 0.0f;
+  lastOutputLeftPinCmd = 0.0f;
+  lastOutputRightPinCmd = 0.0f;
+  lastMixerBypassedForMotorPulse = false;
 }
 
 void clearAutoCommand() {
@@ -734,12 +740,23 @@ float applyMotorCalibration(float raw, float sign, float scale, float minCmd) {
   return clampUnit(calibrated);
 }
 
-void applyDriveCommand(float logicalLeft, float logicalRight) {
+void writeEscOutputPins(float leftPinCmd, float rightPinCmd) {
+  lastOutputLeftPinCmd = leftPinCmd;
+  lastOutputRightPinCmd = rightPinCmd;
+
+  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(leftPinCmd * ESC_RANGE_US);
+  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(rightPinCmd * ESC_RANGE_US);
+  escLeft.writeMicroseconds(clampPulse(leftPulse));
+  escRight.writeMicroseconds(clampPulse(rightPulse));
+}
+
+void applyDriveCommandInternal(float logicalLeft, float logicalRight, bool motorPulseDirectWheelMode) {
   // Inputs are direct logical wheel commands. Mixers, if any, must run before this function.
   lastLogicalLeftCmd = logicalLeft;
   lastLogicalRightCmd = logicalRight;
   lastRawLeftCmd = logicalLeft;
   lastRawRightCmd = logicalRight;
+  lastMixerBypassedForMotorPulse = motorPulseDirectWheelMode;
 
   float calibratedLeft =
       applyMotorCalibration(logicalLeft, LEFT_MOTOR_SIGN_VALUE, LEFT_MOTOR_SCALE_VALUE, LEFT_MOTOR_MIN_CMD_VALUE);
@@ -759,10 +776,27 @@ void applyDriveCommand(float logicalLeft, float logicalRight) {
   lastLeftOutputCmd = outputLeft;
   lastRightOutputCmd = outputRight;
 
-  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(outputLeft * ESC_RANGE_US);
-  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(outputRight * ESC_RANGE_US);
-  escLeft.writeMicroseconds(clampPulse(leftPulse));
-  escRight.writeMicroseconds(clampPulse(rightPulse));
+  float leftPinCmd = outputLeft;
+  float rightPinCmd = outputRight;
+  if (motorPulseDirectWheelMode) {
+    // The current motor controller inputs behave like steer/throttle:
+    //   left wheel  = throttle + steer
+    //   right wheel = throttle - steer
+    // Convert direct wheel commands back to those physical PWM inputs so
+    // MOTOR_PULSE_LEFT_CMD/RIGHT_CMD remain true wheel commands.
+    leftPinCmd = clampUnit((outputLeft - outputRight) * 0.5f);   // steer input
+    rightPinCmd = clampUnit((outputLeft + outputRight) * 0.5f);  // throttle input
+  }
+
+  writeEscOutputPins(leftPinCmd, rightPinCmd);
+}
+
+void applyDriveCommand(float logicalLeft, float logicalRight) {
+  applyDriveCommandInternal(logicalLeft, logicalRight, false);
+}
+
+void applyMotorPulseDirectWheelCommand(float logicalLeft, float logicalRight) {
+  applyDriveCommandInternal(logicalLeft, logicalRight, true);
 }
 
 void applyAutoCommand(float left, float right) {
@@ -1095,8 +1129,14 @@ void debugPrintStatus() {
   Serial.print(lastLeftOutputCmd, 3);
   Serial.print(F(" output_right_cmd="));
   Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" output_left_pin_cmd="));
+  Serial.print(lastOutputLeftPinCmd, 3);
+  Serial.print(F(" output_right_pin_cmd="));
+  Serial.print(lastOutputRightPinCmd, 3);
   Serial.print(F(" motor_output_swap_lr="));
   Serial.print(MOTOR_OUTPUT_SWAP_LR_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" mixer_bypassed_for_motor_pulse="));
+  Serial.print(lastMixerBypassedForMotorPulse ? F("true") : F("false"));
   Serial.print(F(" drive_calibration_enable="));
   Serial.print(DRIVE_CALIBRATION_ENABLED ? F("true") : F("false"));
   Serial.print(F(" left_motor_sign="));
@@ -1718,7 +1758,7 @@ void loop() {
     if (motorPulseReadyFlag) {
       currentMode = AUTO_RUNNING;
       currentControlSource = CONTROL_SOURCE_AUTO;
-      applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE, MOTOR_PULSE_RIGHT_CMD_VALUE);
+      applyMotorPulseDirectWheelCommand(MOTOR_PULSE_LEFT_CMD_VALUE, MOTOR_PULSE_RIGHT_CMD_VALUE);
     } else {
       currentMode = AUTO_READY;
       currentControlSource = CONTROL_SOURCE_STOP;

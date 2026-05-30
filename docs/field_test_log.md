@@ -1959,9 +1959,10 @@ Code-path inspection:
 - Motor pulse output bypasses RC stick angle remapping.
 - In `MOTOR_PULSE_TEST_MODE`, RC steering/throttle are used only for the neutral
   precondition.
-- When AUTO pulse is ready, firmware calls
-  `applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE, MOTOR_PULSE_RIGHT_CMD_VALUE)`,
-  not `applyManualOverride(...)` or `mapRcManualAxes(...)`.
+- Initial code-path inspection showed the AUTO pulse did not call
+  `applyManualOverride(...)` or `mapRcManualAxes(...)`, but later physical
+  results showed the output pins behaved like steer/throttle inputs rather than
+  direct left/right wheel outputs.
 
 Interpretation:
 
@@ -2007,7 +2008,11 @@ Firmware update:
   - `logical_left_cmd` / `logical_right_cmd`
   - `calibrated_left_cmd` / `calibrated_right_cmd`
   - `output_left_cmd` / `output_right_cmd`
+  - `output_left_pin_cmd` / `output_right_pin_cmd`
   - `motor_output_swap_lr`
+- `mixer_bypassed_for_motor_pulse=true` means firmware RC/station/waypoint
+  mixers were bypassed. The direct wheel command is then converted to the
+  current motor controller's steer/throttle-style PWM inputs.
 - `MOTOR_OUTPUT_SWAP_LR` exists for final output-stage swapping only and remains
   off by default.
 

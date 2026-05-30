@@ -136,12 +136,13 @@
   wheel forward; right-only `+0.22` rotates the right wheel forward and curves
   left as expected; both `+0.22/+0.22` rotate both wheels forward but curve/rotate
   right; both `-0.22/-0.22` rotate backward but curve left while reversing. Code
-  inspection confirms motor pulse output bypasses RC stick angle remapping:
-  RC stick values are only used for the neutral precondition, then AUTO pulse
-  calls `applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE, MOTOR_PULSE_RIGHT_CMD_VALUE)`.
-  The current actuator-level interpretation is left side stronger or right side
-  weaker under equal motor pulse commands. Next step is right-side compensation
-  tests through the shared drive calibration layer.
+  inspection confirms motor pulse output bypasses RC stick angle remapping, but
+  later `+0.25` direct-pulse tests showed the physical PWM inputs behave like
+  steer/throttle rather than direct left/right wheel outputs. Firmware now routes
+  motor pulse AUTO through `applyMotorPulseDirectWheelCommand(...)`, which logs
+  `logical_*`, `calibrated_*`, `output_*`, and `output_*_pin_cmd` stages. Next
+  step is to re-run direct left-only/right-only pulse validation before any
+  scale compensation.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed

@@ -790,11 +790,14 @@ the staged command path clearly:
 - `logical_left_cmd` / `logical_right_cmd`
 - `calibrated_left_cmd` / `calibrated_right_cmd`
 - `output_left_cmd` / `output_right_cmd`
+- `output_left_pin_cmd` / `output_right_pin_cmd`
 - `motor_output_swap_lr=false` unless explicitly testing a physical output swap
 
 The firmware now separates those stages. `MOTOR_PULSE_LEFT_CMD` and
 `MOTOR_PULSE_RIGHT_CMD` are intended to be direct logical wheel commands, not
-steering/throttle commands.
+steering/throttle commands. In motor pulse mode, the firmware converts those
+direct wheel commands to the current controller's steer/throttle-style PWM input
+pair only at the final pin-write stage.
 
 ## Heading / BMI160 Is Not Integrated
 

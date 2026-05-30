@@ -253,13 +253,17 @@ Current calibration result:
   `0.00/+0.25` also moved the left wheel backward. Treat that as a direct wheel
   command validation failure until the staged USBDBG fields prove otherwise.
 - Motor pulse output bypasses RC stick angle remapping. In pulse mode, RC
-  steering/throttle are used only for the neutral precondition; pulse output
-  goes directly through `applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE,
-  MOTOR_PULSE_RIGHT_CMD_VALUE)`.
+  steering/throttle are used only for the neutral precondition.
 - After the 2026-05-30 differential retest, `MOTOR_PULSE_LEFT_CMD` and
   `MOTOR_PULSE_RIGHT_CMD` must be treated as direct logical wheel commands, not
   steering/throttle inputs. Verify this with the staged USBDBG fields below
   before using any calibration result.
+- In `MOTOR_PULSE_TEST_MODE` AUTO pulse, firmware now calls
+  `applyMotorPulseDirectWheelCommand(...)`. That applies optional drive
+  calibration once, optional `MOTOR_OUTPUT_SWAP_LR` once, then converts the
+  final direct wheel command to the current physical PWM inputs. The current
+  motor controller inputs behave like steer/throttle, so a left-only wheel
+  command is written as a combined steer/throttle pair internally.
 
 Differential pulse and shared drive calibration support is now available:
 
@@ -271,6 +275,10 @@ Differential pulse and shared drive calibration support is now available:
   calibration layer.
 - `output_left_cmd` / `output_right_cmd` are the final commands sent to the
   physical left/right motor outputs.
+- `output_left_pin_cmd` / `output_right_pin_cmd` are the actual PWM channel
+  commands. In motor pulse direct-wheel mode these can differ from
+  `output_left_cmd` / `output_right_cmd` because the firmware converts direct
+  wheel commands to the current controller's steer/throttle-style inputs.
 - `MOTOR_OUTPUT_SWAP_LR=1` swaps the final output stage only. The default is
   `0`; do not enable it unless a direct left/right pulse proves the physical
   outputs are wired opposite to the intended side.
@@ -317,14 +325,16 @@ Expected GPS fields in that build include increasing `gps_chars`,
 Expected USB debug fields:
 
 ```text
-logical_left_cmd=... logical_right_cmd=... raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... output_left_cmd=... output_right_cmd=... final_left_cmd=... final_right_cmd=... motor_output_swap_lr=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
+logical_left_cmd=... logical_right_cmd=... raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... output_left_cmd=... output_right_cmd=... output_left_pin_cmd=... output_right_pin_cmd=... final_left_cmd=... final_right_cmd=... motor_output_swap_lr=... mixer_bypassed_for_motor_pulse=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
 motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_left_cmd=... motor_pulse_right_cmd=... motor_pulse_ms=... motor_pulse_elapsed_ms=... motor_pulse_latched_stop=... motor_pulse_ready=... motor_pulse_block_reason=...
 ```
 
 `left_cmd` / `right_cmd` and `final_left_cmd` / `final_right_cmd` are the same
-final physical output values sent to the ESC pulse conversion. Use
-`logical_left_cmd` / `logical_right_cmd` or `raw_left_cmd` / `raw_right_cmd` to
-inspect the pre-calibration direct wheel command.
+final intended wheel output values after calibration and optional output swap.
+Use `logical_left_cmd` / `logical_right_cmd` or `raw_left_cmd` /
+`raw_right_cmd` to inspect the pre-calibration direct wheel command. Use
+`output_left_pin_cmd` / `output_right_pin_cmd` to inspect the actual PWM channel
+commands being written.
 
 Expected block reasons include `MODE_OFF`, `RC_INVALID`, `RC_NOT_NEUTRAL`,
 `LATCHED_STOP`, and `OK`.
