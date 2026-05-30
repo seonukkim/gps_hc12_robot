@@ -26,8 +26,44 @@
 #define MOTOR_PULSE_CMD 0.15
 #endif
 
+#ifndef MOTOR_PULSE_LEFT_CMD
+#define MOTOR_PULSE_LEFT_CMD MOTOR_PULSE_CMD
+#endif
+
+#ifndef MOTOR_PULSE_RIGHT_CMD
+#define MOTOR_PULSE_RIGHT_CMD MOTOR_PULSE_CMD
+#endif
+
 #ifndef MOTOR_PULSE_MS
 #define MOTOR_PULSE_MS 300
+#endif
+
+#ifndef DRIVE_CALIBRATION_ENABLE
+#define DRIVE_CALIBRATION_ENABLE 0
+#endif
+
+#ifndef LEFT_MOTOR_SIGN
+#define LEFT_MOTOR_SIGN 1
+#endif
+
+#ifndef RIGHT_MOTOR_SIGN
+#define RIGHT_MOTOR_SIGN 1
+#endif
+
+#ifndef LEFT_MOTOR_SCALE
+#define LEFT_MOTOR_SCALE 1.0
+#endif
+
+#ifndef RIGHT_MOTOR_SCALE
+#define RIGHT_MOTOR_SCALE 1.0
+#endif
+
+#ifndef LEFT_MOTOR_MIN_CMD
+#define LEFT_MOTOR_MIN_CMD 0.0
+#endif
+
+#ifndef RIGHT_MOTOR_MIN_CMD
+#define RIGHT_MOTOR_MIN_CMD 0.0
 #endif
 
 #ifndef GROUND_CRAWL_TEST_MODE
@@ -80,7 +116,16 @@ constexpr uint8_t GPS_MIN_SATS = GPS_MOTION_MIN_SATS;
 constexpr double GPS_MAX_HDOP = GPS_MOTION_MAX_HDOP;
 constexpr bool MOTOR_PULSE_ENABLED = MOTOR_PULSE_TEST_MODE != 0;
 constexpr float MOTOR_PULSE_CMD_VALUE = MOTOR_PULSE_CMD;
+constexpr float MOTOR_PULSE_LEFT_CMD_VALUE = MOTOR_PULSE_LEFT_CMD;
+constexpr float MOTOR_PULSE_RIGHT_CMD_VALUE = MOTOR_PULSE_RIGHT_CMD;
 constexpr uint32_t MOTOR_PULSE_MS_VALUE = MOTOR_PULSE_MS;
+constexpr bool DRIVE_CALIBRATION_ENABLED = DRIVE_CALIBRATION_ENABLE != 0;
+constexpr float LEFT_MOTOR_SIGN_VALUE = LEFT_MOTOR_SIGN;
+constexpr float RIGHT_MOTOR_SIGN_VALUE = RIGHT_MOTOR_SIGN;
+constexpr float LEFT_MOTOR_SCALE_VALUE = LEFT_MOTOR_SCALE;
+constexpr float RIGHT_MOTOR_SCALE_VALUE = RIGHT_MOTOR_SCALE;
+constexpr float LEFT_MOTOR_MIN_CMD_VALUE = LEFT_MOTOR_MIN_CMD;
+constexpr float RIGHT_MOTOR_MIN_CMD_VALUE = RIGHT_MOTOR_MIN_CMD;
 constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
@@ -200,6 +245,10 @@ float autoLeftCmd = 0.0f;
 float autoRightCmd = 0.0f;
 float lastLeftOutputCmd = 0.0f;
 float lastRightOutputCmd = 0.0f;
+float lastRawLeftCmd = 0.0f;
+float lastRawRightCmd = 0.0f;
+float lastCalibratedLeftCmd = 0.0f;
+float lastCalibratedRightCmd = 0.0f;
 
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 bool singleWaypointAutoTimingActiveFlag = false;
@@ -288,6 +337,10 @@ void writeFrame(const char *type, uint32_t seq, const String &payload) {
 void motorStop() {
   escLeft.writeMicroseconds(ESC_NEUTRAL_US);
   escRight.writeMicroseconds(ESC_NEUTRAL_US);
+  lastRawLeftCmd = 0.0f;
+  lastRawRightCmd = 0.0f;
+  lastCalibratedLeftCmd = 0.0f;
+  lastCalibratedRightCmd = 0.0f;
   lastLeftOutputCmd = 0.0f;
   lastRightOutputCmd = 0.0f;
 }
@@ -657,14 +710,37 @@ float clampGroundCrawl(float value) {
   return value;
 }
 
-void applyDriveCommand(float left, float right) {
-  left = clampUnit(left);
-  right = clampUnit(right);
-  lastLeftOutputCmd = left;
-  lastRightOutputCmd = right;
+float applyMotorCalibration(float raw, float sign, float scale, float minCmd) {
+  if (!DRIVE_CALIBRATION_ENABLED) {
+    return clampUnit(raw);
+  }
 
-  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(left * ESC_RANGE_US);
-  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(right * ESC_RANGE_US);
+  float calibrated = raw * sign * scale;
+  float minMagnitude = absFloat(minCmd);
+  if (calibrated > 0.0f && calibrated < minMagnitude) {
+    calibrated = minMagnitude;
+  } else if (calibrated < 0.0f && -calibrated < minMagnitude) {
+    calibrated = -minMagnitude;
+  }
+  return clampUnit(calibrated);
+}
+
+void applyDriveCommand(float left, float right) {
+  lastRawLeftCmd = left;
+  lastRawRightCmd = right;
+
+  float calibratedLeft =
+      applyMotorCalibration(left, LEFT_MOTOR_SIGN_VALUE, LEFT_MOTOR_SCALE_VALUE, LEFT_MOTOR_MIN_CMD_VALUE);
+  float calibratedRight =
+      applyMotorCalibration(right, RIGHT_MOTOR_SIGN_VALUE, RIGHT_MOTOR_SCALE_VALUE, RIGHT_MOTOR_MIN_CMD_VALUE);
+
+  lastCalibratedLeftCmd = calibratedLeft;
+  lastCalibratedRightCmd = calibratedRight;
+  lastLeftOutputCmd = calibratedLeft;
+  lastRightOutputCmd = calibratedRight;
+
+  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(calibratedLeft * ESC_RANGE_US);
+  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(calibratedRight * ESC_RANGE_US);
   escLeft.writeMicroseconds(clampPulse(leftPulse));
   escRight.writeMicroseconds(clampPulse(rightPulse));
 }
@@ -979,6 +1055,28 @@ void debugPrintStatus() {
   Serial.print(lastLeftOutputCmd, 3);
   Serial.print(F(" right_cmd="));
   Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" raw_left_cmd="));
+  Serial.print(lastRawLeftCmd, 3);
+  Serial.print(F(" raw_right_cmd="));
+  Serial.print(lastRawRightCmd, 3);
+  Serial.print(F(" calibrated_left_cmd="));
+  Serial.print(lastCalibratedLeftCmd, 3);
+  Serial.print(F(" calibrated_right_cmd="));
+  Serial.print(lastCalibratedRightCmd, 3);
+  Serial.print(F(" drive_calibration_enable="));
+  Serial.print(DRIVE_CALIBRATION_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" left_motor_sign="));
+  Serial.print(LEFT_MOTOR_SIGN_VALUE, 1);
+  Serial.print(F(" right_motor_sign="));
+  Serial.print(RIGHT_MOTOR_SIGN_VALUE, 1);
+  Serial.print(F(" left_motor_scale="));
+  Serial.print(LEFT_MOTOR_SCALE_VALUE, 3);
+  Serial.print(F(" right_motor_scale="));
+  Serial.print(RIGHT_MOTOR_SCALE_VALUE, 3);
+  Serial.print(F(" left_motor_min_cmd="));
+  Serial.print(LEFT_MOTOR_MIN_CMD_VALUE, 3);
+  Serial.print(F(" right_motor_min_cmd="));
+  Serial.print(RIGHT_MOTOR_MIN_CMD_VALUE, 3);
   Serial.print(F(" fixed_wiring_gps_serial2_diag="));
   Serial.print(FIXED_WIRING_GPS_SERIAL2_DIAG ? F("true") : F("false"));
   Serial.print(F(" hc12_enabled="));
@@ -988,6 +1086,10 @@ void debugPrintStatus() {
   Serial.print(MOTOR_PULSE_ENABLED ? F("true") : F("false"));
   Serial.print(F(" motor_pulse_cmd="));
   Serial.print(MOTOR_PULSE_CMD_VALUE, 3);
+  Serial.print(F(" motor_pulse_left_cmd="));
+  Serial.print(MOTOR_PULSE_LEFT_CMD_VALUE, 3);
+  Serial.print(F(" motor_pulse_right_cmd="));
+  Serial.print(MOTOR_PULSE_RIGHT_CMD_VALUE, 3);
   Serial.print(F(" motor_pulse_ms="));
   Serial.print(MOTOR_PULSE_MS_VALUE);
   Serial.print(F(" motor_pulse_elapsed_ms="));
@@ -1488,6 +1590,10 @@ void setup() {
   Serial.println("RC MANUAL mode can drive normally; AUTO emits one guarded motor pulse if sticks are neutral.");
   Serial.print("MOTOR_PULSE_CMD=");
   Serial.println(MOTOR_PULSE_CMD_VALUE, 3);
+  Serial.print("MOTOR_PULSE_LEFT_CMD=");
+  Serial.println(MOTOR_PULSE_LEFT_CMD_VALUE, 3);
+  Serial.print("MOTOR_PULSE_RIGHT_CMD=");
+  Serial.println(MOTOR_PULSE_RIGHT_CMD_VALUE, 3);
   Serial.print("MOTOR_PULSE_MS=");
   Serial.println(MOTOR_PULSE_MS_VALUE);
 #elif FIXED_WIRING_GPS_SERIAL2_DIAG
@@ -1580,7 +1686,7 @@ void loop() {
     if (motorPulseReadyFlag) {
       currentMode = AUTO_RUNNING;
       currentControlSource = CONTROL_SOURCE_AUTO;
-      applyAutoCommand(MOTOR_PULSE_CMD_VALUE, MOTOR_PULSE_CMD_VALUE);
+      applyAutoCommand(MOTOR_PULSE_LEFT_CMD_VALUE, MOTOR_PULSE_RIGHT_CMD_VALUE);
     } else {
       currentMode = AUTO_READY;
       currentControlSource = CONTROL_SOURCE_STOP;

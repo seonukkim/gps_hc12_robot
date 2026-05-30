@@ -1824,12 +1824,18 @@ Repository action:
   `firmware/openrb_robot_controller/openrb_robot_controller.ino`.
 - Added compile-time parameters:
   - `MOTOR_PULSE_CMD`, default `0.15`
+  - `MOTOR_PULSE_LEFT_CMD`, default `MOTOR_PULSE_CMD`
+  - `MOTOR_PULSE_RIGHT_CMD`, default `MOTOR_PULSE_CMD`
   - `MOTOR_PULSE_MS`, default `300`
 - In this mode, HC-12 is disabled and GPS readiness / waypoint target distance
   are not used.
 - RC MANUAL mode remains available.
 - AUTO emits one neutral-stick pulse, then latches stop until returning to
   MANUAL.
+- Added shared drive calibration layer behind `DRIVE_CALIBRATION_ENABLE=1`.
+  Defaults are identity/off, and the layer is applied to MANUAL, station manual,
+  single-waypoint AUTO, and motor pulse outputs through the common drive output
+  path.
 
 Validation status:
 
@@ -1869,6 +1875,47 @@ Interpretation:
      `AUTO_MOTION_ARMED=0`, no motor pulse mode.
   3. Motor pulse deadband validation: `MOTOR_PULSE_TEST_MODE=1`, ignore GPS
      fields.
+
+## 2026-05-30: Motor Pulse Deadband And Drivetrain Asymmetry
+
+Setup:
+
+- Firmware: `firmware/openrb_robot_controller`
+- Mode: `MOTOR_PULSE_TEST_MODE=1`
+- Pulse duration: `MOTOR_PULSE_MS=300`
+
+Observed result:
+
+- `MOTOR_PULSE_CMD=0.180` produced valid software output but no visible physical
+  rover motion.
+- `MOTOR_PULSE_CMD=0.220` produced visible physical rover motion.
+- The 0.22 USBDBG log showed symmetric software output:
+  - `left_cmd=0.220`
+  - `right_cmd=0.220`
+  - `motor_pulse_ready=true`
+  - `motor_pulse_block_reason=OK`
+- However, the observed physical motion looked more like rotation than straight
+  forward motion.
+- Manual RC driving also appears asymmetric:
+  - forward driving tends to drift/curve left;
+  - backward driving tends to drift/curve right.
+
+Interpretation:
+
+- The current blocker is drivetrain / motor output calibration, not GPS and not
+  path planning.
+- The pattern suggests the right-side drive may be stronger than the left side,
+  or the left side may have higher friction/deadband.
+- Possible causes include mechanical friction, wiring/electrical differences,
+  motor/ESC mismatch, or software output scaling.
+
+Next action:
+
+- Do not proceed to GPS path planning yet.
+- Run differential left/right motor pulse calibration so each side can be tested
+  independently and then together.
+- Use the shared drive calibration layer for measured trim or deadband
+  compensation, not path planning code.
 
 ## Known Manual Direction Attempts
 

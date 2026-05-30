@@ -123,6 +123,29 @@ Rules:
 - This mode is for motor deadband calibration only. It is not path following,
   not GPS autonomy, and not coverage driving.
 
+Latest calibration state:
+
+- `MOTOR_PULSE_CMD=0.180` produced valid software output but no visible motion.
+- `MOTOR_PULSE_CMD=0.220` produced visible motion with symmetric software
+  output (`left_cmd=0.220`, `right_cmd=0.220`,
+  `motor_pulse_ready=true`, `motor_pulse_block_reason=OK`).
+- The physical motion looked more like rotation than straight forward motion.
+- Manual RC forward motion tends to drift/curve left; backward motion tends to
+  drift/curve right.
+
+Safety decision:
+
+- Do not proceed to GPS path planning or waypoint-driving tests until low-level
+  drivetrain asymmetry is characterized.
+- The next motor tests should be differential left/right pulse tests, still
+  latched and operator-controlled.
+- Any future correction must live in a shared drive calibration layer used by
+  both MANUAL and AUTO, not in path planning.
+- The shared drive calibration layer is implemented behind
+  `DRIVE_CALIBRATION_ENABLE=1`. Default identity/off values preserve normal
+  behavior. Minimum command compensation applies only when the raw command is
+  nonzero; zero remains zero.
+
 ## Station Defaults
 
 Allowed by default:

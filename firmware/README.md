@@ -229,6 +229,34 @@ steering/throttle are neutral, then latches stop until the operator returns to
 MANUAL. USBDBG runs at `100` ms in this mode so the short pulse window is
 observable.
 
+Current calibration result:
+
+- `MOTOR_PULSE_CMD=0.180` produced valid software output but no visible physical
+  motion.
+- `MOTOR_PULSE_CMD=0.220` produced visible physical motion.
+- The 0.22 log showed symmetric software output:
+  `left_cmd=0.220`, `right_cmd=0.220`, `motor_pulse_ready=true`,
+  `motor_pulse_block_reason=OK`.
+- Physical motion looked more like rotation than straight forward motion.
+- Manual RC forward tends to drift/curve left; backward tends to drift/curve
+  right.
+
+Differential pulse and shared drive calibration support is now available:
+
+- `MOTOR_PULSE_LEFT_CMD` and `MOTOR_PULSE_RIGHT_CMD` override the left/right
+  pulse independently. If omitted, both default to `MOTOR_PULSE_CMD` for
+  backward compatibility.
+- `DRIVE_CALIBRATION_ENABLE=1` enables the shared calibration layer used by RC
+  MANUAL, station manual, single-waypoint AUTO, and motor pulse output.
+- Identity defaults preserve current behavior:
+  - `LEFT_MOTOR_SIGN=1`, `RIGHT_MOTOR_SIGN=1`
+  - `LEFT_MOTOR_SCALE=1.0`, `RIGHT_MOTOR_SCALE=1.0`
+  - `LEFT_MOTOR_MIN_CMD=0.0`, `RIGHT_MOTOR_MIN_CMD=0.0`
+- Minimum command compensation applies only when the raw command is nonzero.
+  A raw `0.0` always remains `0.0`.
+
+Do not tune drivetrain asymmetry in GPS path planning.
+
 Important GPS interpretation:
 
 - `MOTOR_PULSE_TEST_MODE=1` intentionally skips `GPS_SERIAL.begin(...)` and the
@@ -261,7 +289,8 @@ Expected GPS fields in that build include increasing `gps_chars`,
 Expected USB debug fields:
 
 ```text
-motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_ms=... motor_pulse_elapsed_ms=... motor_pulse_latched_stop=... motor_pulse_ready=... motor_pulse_block_reason=...
+raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
+motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_left_cmd=... motor_pulse_right_cmd=... motor_pulse_ms=... motor_pulse_elapsed_ms=... motor_pulse_latched_stop=... motor_pulse_ready=... motor_pulse_block_reason=...
 ```
 
 Expected block reasons include `MODE_OFF`, `RC_INVALID`, `RC_NOT_NEUTRAL`,

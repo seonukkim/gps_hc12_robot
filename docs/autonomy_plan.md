@@ -44,6 +44,10 @@ Motor deadband calibration is now temporarily split out from GPS/path planning:
 `MOTOR_PULSE_TEST_MODE=1` ignores GPS readiness and waypoint distance, disables
 HC-12, preserves RC MANUAL, and emits one AUTO-only neutral-stick pulse before
 latching stop. Use it only to identify motor/drivetrain response thresholds.
+The first calibration result shows `0.180` is below visible motion while `0.220`
+does move, but symmetric `0.220` software output produced rotation-like motion
+rather than straight motion. Manual RC forward/backward also curves in opposite
+directions. Treat drivetrain asymmetry as the current blocker.
 
 Staged plan:
 
@@ -100,10 +104,17 @@ Staged plan:
    neutral RC, motion-grade GPS, near-field target window, and manual override.
    `SINGLE_WP_CRAWL_BASE_CMD` controls the candidate command; `GROUND_CRAWL_MAX_CMD`
    remains the final safety clamp. Do not reuse stale targets.
-14. Low-speed floor test: only after guarded crawl behavior and sensor-frame
-   assumptions are validated.
-15. Multi-waypoint motion: only after single-waypoint behavior is proven.
-16. Coverage path / lawnmower driving: last step, after mission sequencing,
+14. Differential left/right motor pulse calibration: characterize left-only,
+   right-only, and matched left/right thresholds with `MOTOR_PULSE_LEFT_CMD` and
+   `MOTOR_PULSE_RIGHT_CMD` before any GPS path work.
+15. Shared drive calibration layer: apply any deadband compensation, left/right
+   trim, or output scaling in one common layer used by both MANUAL and AUTO.
+   This layer is behind `DRIVE_CALIBRATION_ENABLE=1`; identity/off defaults
+   preserve current behavior.
+16. Low-speed floor test: only after guarded crawl behavior, drivetrain
+   calibration, and sensor-frame assumptions are validated.
+17. Multi-waypoint motion: only after single-waypoint behavior is proven.
+18. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame

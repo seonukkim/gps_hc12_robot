@@ -120,6 +120,18 @@
   `gps_uart_probe` or the no-motion single-waypoint main-controller build
   (`FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1`,
   `AUTO_MOTION_ARMED=0`) for GPS validation.
+- Current drivetrain calibration state: `MOTOR_PULSE_CMD=0.180` produced valid
+  software output but no visible motion; `MOTOR_PULSE_CMD=0.220` produced visible
+  motion. The 0.22 log showed symmetric software output (`left_cmd=0.220`,
+  `right_cmd=0.220`, `motor_pulse_ready=true`,
+  `motor_pulse_block_reason=OK`), but the rover appeared to rotate rather than
+  drive straight. Manual RC forward motion tends to drift/curve left, and
+  backward motion tends to drift/curve right. This suggests right-side drive may
+  be stronger than left-side drive, or the left side may have higher friction or
+  deadband. Differential motor pulse support is now available with
+  `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD`, and a shared drive
+  calibration layer is available behind `DRIVE_CALIBRATION_ENABLE=1` for both
+  MANUAL and AUTO paths.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed

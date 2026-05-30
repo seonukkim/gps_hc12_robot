@@ -617,6 +617,19 @@ distance, preserves RC MANUAL driving, and emits one AUTO-only pulse only after
 `rc_ok=true` and centered steering/throttle. After `MOTOR_PULSE_MS`, it latches
 zero output until the operator returns to MANUAL.
 
+Current drivetrain calibration state: `MOTOR_PULSE_CMD=0.180` produced valid
+software output but no visible motion; `MOTOR_PULSE_CMD=0.220` produced visible
+motion. The 0.22 log showed symmetric software output (`left_cmd=0.220`,
+`right_cmd=0.220`, `motor_pulse_ready=true`,
+`motor_pulse_block_reason=OK`), but the rover appeared to rotate rather than
+drive straight. Manual RC forward motion tends to drift/curve left, and backward
+motion tends to drift/curve right. Do not proceed to GPS path planning yet; the
+next step is differential left/right motor pulse calibration. The firmware now
+supports `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` plus a shared
+`DRIVE_CALIBRATION_ENABLE` layer with sign, scale, and minimum-command
+compensation applied consistently to MANUAL, station manual, AUTO, and motor
+pulse outputs. Defaults are identity/off, so normal builds are unchanged.
+
 Do not use motor pulse logs to validate GPS. In `MOTOR_PULSE_TEST_MODE=1`, the
 main controller intentionally skips GPS initialization and GPS byte processing,
 so `gps_chars=0`, `last_rmc_status=NA`, `last_gga_fix_quality=NA`, and

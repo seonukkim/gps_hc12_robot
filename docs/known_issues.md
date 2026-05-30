@@ -723,6 +723,35 @@ or `Serial2/9600` wiring failed. Validate GPS separately with
 `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` and
 `AUTO_MOTION_ARMED=0`, with no `MOTOR_PULSE_TEST_MODE`.
 
+## Drivetrain Asymmetry Suspected
+
+Current calibration observations:
+
+- `MOTOR_PULSE_CMD=0.180` produced valid software output but no visible motion.
+- `MOTOR_PULSE_CMD=0.220` produced visible motion.
+- The 0.22 log showed symmetric software output:
+  - `left_cmd=0.220`
+  - `right_cmd=0.220`
+  - `motor_pulse_ready=true`
+  - `motor_pulse_block_reason=OK`
+- The observed physical motion looked more like rotation than straight forward
+  motion.
+- Manual RC driving is also asymmetric:
+  - forward tends to drift/curve left;
+  - backward tends to drift/curve right.
+
+Working hypothesis:
+
+- The right-side drive may be stronger than the left-side drive, or the left
+  side may have higher friction/deadband.
+- Causes may be mechanical, electrical, motor/ESC-related, or software scaling.
+
+Do not hide this in GPS/path planning. Use differential left/right motor pulse
+calibration (`MOTOR_PULSE_LEFT_CMD`, `MOTOR_PULSE_RIGHT_CMD`) to characterize
+the drivetrain, then apply corrections through the shared drive calibration
+layer (`DRIVE_CALIBRATION_ENABLE=1`) used by both MANUAL and AUTO command
+paths. Keep defaults identity/off until measured values justify a change.
+
 ## Heading / BMI160 Is Not Integrated
 
 The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is
