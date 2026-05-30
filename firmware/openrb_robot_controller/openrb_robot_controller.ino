@@ -740,12 +740,12 @@ float applyMotorCalibration(float raw, float sign, float scale, float minCmd) {
   return clampUnit(calibrated);
 }
 
-void writeEscOutputPins(float leftPinCmd, float rightPinCmd) {
-  lastOutputLeftPinCmd = leftPinCmd;
-  lastOutputRightPinCmd = rightPinCmd;
+void writeEscOutputPins(float physicalACmd, float physicalBCmd) {
+  lastOutputLeftPinCmd = physicalACmd;
+  lastOutputRightPinCmd = physicalBCmd;
 
-  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(leftPinCmd * ESC_RANGE_US);
-  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(rightPinCmd * ESC_RANGE_US);
+  int leftPulse = ESC_NEUTRAL_US + static_cast<int>(physicalACmd * ESC_RANGE_US);
+  int rightPulse = ESC_NEUTRAL_US + static_cast<int>(physicalBCmd * ESC_RANGE_US);
   escLeft.writeMicroseconds(clampPulse(leftPulse));
   escRight.writeMicroseconds(clampPulse(rightPulse));
 }
@@ -776,19 +776,17 @@ void applyDriveCommandInternal(float logicalLeft, float logicalRight, bool motor
   lastLeftOutputCmd = outputLeft;
   lastRightOutputCmd = outputRight;
 
-  float leftPinCmd = outputLeft;
-  float rightPinCmd = outputRight;
-  if (motorPulseDirectWheelMode) {
-    // The current motor controller inputs behave like steer/throttle:
-    //   left wheel  = throttle + steer
-    //   right wheel = throttle - steer
-    // Convert direct wheel commands back to those physical PWM inputs so
-    // MOTOR_PULSE_LEFT_CMD/RIGHT_CMD remain true wheel commands.
-    leftPinCmd = clampUnit((outputLeft - outputRight) * 0.5f);   // steer input
-    rightPinCmd = clampUnit((outputLeft + outputRight) * 0.5f);  // throttle input
-  }
+  // Physical output channel A is throttle and channel B is turn.
+  // Probe-confirmed wheel model:
+  //   physical_left_wheel  = A - B
+  //   physical_right_wheel = A + B
+  // Therefore the inverse from logical wheel commands is:
+  //   A = (left + right) / 2
+  //   B = (right - left) / 2
+  float physicalACmd = clampUnit((outputLeft + outputRight) * 0.5f);
+  float physicalBCmd = clampUnit((outputRight - outputLeft) * 0.5f);
 
-  writeEscOutputPins(leftPinCmd, rightPinCmd);
+  writeEscOutputPins(physicalACmd, physicalBCmd);
 }
 
 void applyDriveCommand(float logicalLeft, float logicalRight) {
@@ -1133,6 +1131,13 @@ void debugPrintStatus() {
   Serial.print(lastOutputLeftPinCmd, 3);
   Serial.print(F(" output_right_pin_cmd="));
   Serial.print(lastOutputRightPinCmd, 3);
+  Serial.print(F(" physical_a_cmd="));
+  Serial.print(lastOutputLeftPinCmd, 3);
+  Serial.print(F(" physical_b_cmd="));
+  Serial.print(lastOutputRightPinCmd, 3);
+  Serial.print(F(" physical_a_role=throttle"));
+  Serial.print(F(" physical_b_role=turn"));
+  Serial.print(F(" wheel_to_physical_mapping=diff_to_throttle_turn"));
   Serial.print(F(" motor_output_swap_lr="));
   Serial.print(MOTOR_OUTPUT_SWAP_LR_ENABLED ? F("true") : F("false"));
   Serial.print(F(" mixer_bypassed_for_motor_pulse="));

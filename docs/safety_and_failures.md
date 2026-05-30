@@ -144,14 +144,18 @@ Latest calibration state:
   and right-only command behaved like forward throttle. Firmware now converts
   `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` from direct wheel commands to
   those PWM inputs only at the final pin-write stage.
+- Latest evidence shows the logical wheel commands themselves are correct.
+  `firmware/physical_output_pin_probe` confirmed physical output A is throttle
+  and physical output B is turn, so the integrated controller now maps
+  logical wheels with `A=(left+right)/2` and `B=(right-left)/2`.
 
 Safety decision:
 
 - Do not proceed to GPS path planning or waypoint-driving tests until low-level
-  direct wheel pulse behavior is validated, then drivetrain asymmetry is
-  characterized.
-- The next motor tests should be right-side compensation tests, still latched
-  and operator-controlled.
+  corrected direct wheel pulse behavior is validated, then drivetrain asymmetry
+  is characterized.
+- The next motor tests should be both-wheel forward/reverse mapping validation
+  before single-wheel or side compensation tests.
 - Any future correction must live in a shared drive calibration layer used by
   both MANUAL and AUTO, not in path planning.
 - The shared drive calibration layer is implemented behind

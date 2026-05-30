@@ -764,16 +764,15 @@ Latest differential pulse observations:
 
 Interpretation:
 
-- Basic motor polarity is likely not completely inverted.
-- The motor pulse path bypasses RC stick angle remapping, so this is an
-  actuator/drivetrain observation rather than a manual-stick remap artifact.
-- Symmetric motor pulse output now points toward left/right drivetrain
-  asymmetry, likely left side stronger or right side weaker under equal command.
-- Manual RC curvature may still involve the RC angle remap or stick mixing, but
-  do not use that as the primary explanation for motor pulse results.
+- Basic motor polarity was not enough to explain the behavior.
+- The motor pulse path bypasses RC stick angle remapping, but the physical PWM
+  pins were later found to be throttle/turn inputs rather than direct wheel-side
+  outputs.
+- Treat the old symmetric pulse observations as pre-mapping-fix evidence. Do not
+  use them to tune left/right scale.
 
-Next debugging step: code-path inspection plus right-side compensation tests
-through `DRIVE_CALIBRATION_ENABLE=1`.
+Next debugging step: validate the corrected `A=(left+right)/2`,
+`B=(right-left)/2` mapping with both-wheel forward/reverse tests.
 
 Latest critical retest:
 
@@ -798,6 +797,21 @@ The firmware now separates those stages. `MOTOR_PULSE_LEFT_CMD` and
 steering/throttle commands. In motor pulse mode, the firmware converts those
 direct wheel commands to the current controller's steer/throttle-style PWM input
 pair only at the final pin-write stage.
+
+Latest pin-path conclusion:
+
+- `logical_left_cmd` / `logical_right_cmd` now match the compile-time
+  `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` values.
+- `output_left_pin_cmd` and `output_right_pin_cmd` are physical controller pin
+  commands, not physical left/right wheel commands.
+- `firmware/physical_output_pin_probe` confirmed A is throttle and B is turn.
+- The integrated conversion now uses `A=(left+right)/2` and
+  `B=(right-left)/2`.
+
+Do not tune `LEFT_MOTOR_SCALE`, `RIGHT_MOTOR_SCALE`, `LEFT_MOTOR_MIN_CMD`, or
+`RIGHT_MOTOR_MIN_CMD` until the corrected mapping is physically verified with
+both-wheel forward/reverse motor pulse tests. Single-wheel logical commands are
+halved at the physical pin level and can still sit near deadband.
 
 ## Heading / BMI160 Is Not Integrated
 

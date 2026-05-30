@@ -1966,20 +1966,14 @@ Code-path inspection:
 
 Interpretation:
 
-- Basic motor polarity is likely not completely inverted: both left-only and
-  right-only positive pulses rotate their respective wheels forward.
-- Symmetric motor pulse behavior suggests left/right drivetrain asymmetry under
-  equal commands, likely left side stronger or right side weaker.
-- Manual RC asymmetry may also include the earlier RC angle remap or stick
-  mixing path, but the motor pulse observations are independent of that remap.
+- This interpretation was later superseded by the physical output pin probe.
+- Motor pulse output bypassed RC stick angle remapping, but the physical PWM
+  pins were not direct left/right wheel outputs.
 
 Next action:
 
 - Do not proceed to GPS path planning yet.
-- Inspect the shared drive output path and test right-side compensation.
-- Candidate compensation direction to test: increase right-side output or reduce
-  left-side output through `DRIVE_CALIBRATION_ENABLE=1`, not through path
-  planning.
+- Resolve physical pin mapping before any side compensation.
 
 ## 2026-05-30: Direct Wheel Pulse Path Fix
 
@@ -2021,6 +2015,94 @@ Next action:
 - Re-run left-only, right-only, both-forward, and both-reverse pulse tests.
 - Only proceed to scale/deadband calibration after direct wheel commands behave
   as expected.
+
+## 2026-05-30: Physical Output Pin Probe Added
+
+Latest physical observations after direct logical wheel command tests:
+
+1. `MOTOR_PULSE_LEFT_CMD=+0.25`, `MOTOR_PULSE_RIGHT_CMD=0.00`
+   - `logical_left_cmd=0.250`
+   - `logical_right_cmd=0.000`
+   - `output_left_pin_cmd=0.125`
+   - `output_right_pin_cmd=0.125`
+   - rover stopped
+2. `MOTOR_PULSE_LEFT_CMD=0.00`, `MOTOR_PULSE_RIGHT_CMD=+0.25`
+   - `logical_left_cmd=0.000`
+   - `logical_right_cmd=0.250`
+   - `output_left_pin_cmd=-0.125`
+   - `output_right_pin_cmd=0.125`
+   - brief backward twitch or nearly stopped
+3. `MOTOR_PULSE_LEFT_CMD=+0.22`, `MOTOR_PULSE_RIGHT_CMD=+0.22`
+   - `output_left_pin_cmd=0.000`
+   - `output_right_pin_cmd=0.220`
+   - left wheel forward, right wheel backward, rover rotated left
+4. `MOTOR_PULSE_LEFT_CMD=-0.22`, `MOTOR_PULSE_RIGHT_CMD=-0.22`
+   - `output_left_pin_cmd=0.000`
+   - `output_right_pin_cmd=-0.220`
+   - left wheel backward, right wheel forward, rover rotated right
+
+Interpretation:
+
+- Logical wheel commands are now reaching the firmware correctly.
+- The remaining bug is the logical-wheel-to-physical-pin conversion.
+- `output_left_pin_cmd` and `output_right_pin_cmd` are physical controller pin
+  inputs whose roles must be discovered. They are not confirmed left/right wheel
+  outputs.
+- Do not tune scale or minimum command compensation yet.
+
+Firmware addition:
+
+- Added `firmware/physical_output_pin_probe/physical_output_pin_probe.ino`.
+- The probe writes directly to OpenRB D4 and D5, the same final Servo PWM pins
+  used by `openrb_robot_controller`.
+- It bypasses RC, GPS, HC-12, station commands, manual mix, waypoint logic,
+  logical wheel conversion, drive calibration, and motor pulse logic.
+
+Next action:
+
+- Run the physical pin truth table:
+  - A `+0.25`, B `0.00`
+  - A `-0.25`, B `0.00`
+  - A `0.00`, B `+0.25`
+  - A `0.00`, B `-0.25`
+- If physical pin A is throttle and physical pin B is steering/turn, update the
+  integrated conversion to `throttle = (left + right) / 2` and
+  `turn = (right - left) / 2`, assigned to the confirmed pins.
+
+## 2026-05-30: Physical Pin Truth Table Applied
+
+Standalone physical pin probe result:
+
+1. A `+0.25`, B `0.00`: both wheels forward, rover forward.
+2. A `-0.25`, B `0.00`: both wheels backward, rover backward.
+3. A `0.00`, B `+0.25`: left wheel backward, right wheel forward, rover rotates
+   left.
+4. A `0.00`, B `-0.25`: left wheel forward, right wheel backward, rover rotates
+   right.
+
+Conclusion:
+
+- Physical output channel A is throttle / forward-backward.
+- Physical output channel B is turn / steering.
+- B positive means right wheel forward and left wheel backward.
+- Physical wheel model: `physical_left_wheel = A - B`,
+  `physical_right_wheel = A + B`.
+
+Firmware update:
+
+- `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` remain logical wheel commands.
+- The integrated low-level output layer now converts:
+  - `physical_a_cmd = (calibrated_left_cmd + calibrated_right_cmd) / 2`
+  - `physical_b_cmd = (calibrated_right_cmd - calibrated_left_cmd) / 2`
+- USBDBG prints `physical_a_cmd`, `physical_b_cmd`,
+  `physical_a_role=throttle`, `physical_b_role=turn`, and
+  `wheel_to_physical_mapping=diff_to_throttle_turn`.
+
+Validation guidance:
+
+- Start with both-wheel forward/reverse tests because single-wheel logical
+  commands are halved at the physical pin level.
+- Do not tune scale/min-cmd until the corrected mapping is physically verified.
 
 ## Known Manual Direction Attempts
 

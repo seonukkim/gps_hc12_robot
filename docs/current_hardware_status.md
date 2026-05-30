@@ -143,6 +143,12 @@
   `logical_*`, `calibrated_*`, `output_*`, and `output_*_pin_cmd` stages. Next
   step is to re-run direct left-only/right-only pulse validation before any
   scale compensation.
+- Latest pin-path status: `logical_left_cmd` and `logical_right_cmd` are correct.
+  `firmware/physical_output_pin_probe` confirmed physical output channel A is
+  throttle and physical output channel B is turn. The integrated controller now
+  converts logical wheel commands with `A=(left+right)/2` and
+  `B=(right-left)/2`. `output_left_pin_cmd` / `output_right_pin_cmd` remain
+  compatibility aliases for physical A/B pin commands, not wheel-side commands.
 - Final unified dry-run GPS observation: `gps_chars` increases continuously,
   open-sky antenna placement produced `gps_fix=true`, and
   `target_distance_m` / `target_bearing_deg` were computed

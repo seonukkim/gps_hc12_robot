@@ -141,6 +141,7 @@ HC-12, or motor behavior from the wrong mode.
 | Single-waypoint experiment | `firmware/openrb_robot_controller` with `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | OpenRB-150 | Guarded one-target candidate-command experiment | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO computes candidate commands; armed motion gated to zero unless the ground crawl flag is also set |
 | Guarded ground crawl | `firmware/openrb_robot_controller` with `...SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1` | OpenRB-150 | Only path to armed motion; safety-bounded crawl for deadband calibration | reads fixed GPS wiring on `Serial2` at `9600` | disabled/ignored to avoid possible `Serial2` conflict | RC MANUAL drives normally; AUTO output clamped to ±`GROUND_CRAWL_MAX_CMD` and hard-latched to stop after `GROUND_CRAWL_MAX_AUTO_MS`, else neutral |
 | Motor pulse calibration | `firmware/openrb_robot_controller` with `MOTOR_PULSE_TEST_MODE=1` | OpenRB-150 | GPS-independent motor deadband calibration | not used | disabled/ignored | RC MANUAL drives normally; AUTO emits one neutral-stick pulse for `MOTOR_PULSE_MS`, then latches stop until MANUAL |
+| Physical output pin probe | `firmware/physical_output_pin_probe` | OpenRB-150 | Truth-table probe for the two final PWM output pins | not used | not used | writes one timed pulse directly to physical output pin A/B after a startup delay, then neutral forever |
 | RC channel probe | `firmware/rc_channel_probe` | OpenRB-150 | Identify which raw PPM channel changes for each RC stick/switch | not used | not used | no motor outputs |
 | Standalone GPS probe | `firmware/gps_uart_probe` | OpenRB-150 | GPS UART/baud validation | selectable; current fixed GPS path is `Serial2` at `9600` | not used | no motor outputs |
 | Serial3 loopback test | `firmware/serial3_loopback_test` | OpenRB-150 | Historical UART pin test | not a GPS test | not used | no motor outputs |
@@ -630,14 +631,20 @@ supports `MOTOR_PULSE_LEFT_CMD` / `MOTOR_PULSE_RIGHT_CMD` plus a shared
 compensation applied consistently to MANUAL, station manual, AUTO, and motor
 pulse outputs. Defaults are identity/off, so normal builds are unchanged.
 
-Latest differential pulse observations: left-only `+0.22` rotates the left wheel
-forward; right-only `+0.22` rotates the right wheel forward and curves left as
-expected; both `+0.22/+0.22` rotate both wheels forward but curve/rotate right;
-both `-0.22/-0.22` rotate backward but curve left while reversing. Code
-inspection confirms motor pulse output bypasses RC stick angle remapping, so
-these observations should be treated as actuator/drivetrain calibration data.
-Next step is right-side compensation testing through the shared drive
-calibration layer, not GPS path planning.
+Earlier differential pulse observations were confounded by the physical output
+pin roles. Code inspection confirmed motor pulse output bypasses RC stick angle
+remapping, and the physical pin probe has now confirmed A is throttle and B is
+turn. Validate the corrected logical-wheel mapping with both-wheel
+forward/reverse tests before any side compensation or path planning.
+
+Latest pin-path status: `firmware/physical_output_pin_probe` confirmed physical
+pin A is throttle and physical pin B is turn. `MOTOR_PULSE_LEFT_CMD` and
+`MOTOR_PULSE_RIGHT_CMD` remain logical wheel commands. The integrated controller
+now converts logical wheels to physical pins with `A=(L+R)/2` and
+`B=(R-L)/2`. The fields `output_left_pin_cmd` and `output_right_pin_cmd` are
+compatibility aliases for physical A/B pin commands, not physical left/right
+wheel commands. Single-wheel logical tests are halved at the physical pin level,
+so use both-wheel forward/reverse first when validating the mapping.
 
 Do not use motor pulse logs to validate GPS. In `MOTOR_PULSE_TEST_MODE=1`, the
 main controller intentionally skips GPS initialization and GPS byte processing,

@@ -29,6 +29,7 @@ Firmware: openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
 | Single-waypoint experiment | `FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT=1` | guarded one-target candidate-command experiment | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO is neutral unless `AUTO_MOTION_ARMED=1` AND `GROUND_CRAWL_TEST_MODE=1` |
 | Guarded ground crawl | `...SINGLE_WAYPOINT_EXPERIMENT=1 -DAUTO_MOTION_ARMED=1 -DGROUND_CRAWL_TEST_MODE=1` | only path to armed motion; clamps to ±`GROUND_CRAWL_MAX_CMD` and latches stop after `GROUND_CRAWL_MAX_AUTO_MS` | `Serial2` at `9600` | disabled/ignored | MANUAL can drive; AUTO crawls clamped/latched, else neutral |
 | Motor pulse calibration | `MOTOR_PULSE_TEST_MODE=1` | GPS-independent motor deadband calibration | not used | disabled/ignored | MANUAL can drive; AUTO emits one neutral-stick pulse for `MOTOR_PULSE_MS`, then latches stop until MANUAL |
+| Physical output pin probe | `firmware/physical_output_pin_probe` | final PWM output pin truth-table probe | not used | not used | writes directly to physical output pin A/B after a startup delay, then neutral forever |
 
 Exact macOS Arduino CLI path used in this repo:
 
@@ -276,12 +277,15 @@ Differential pulse and shared drive calibration support is now available:
 - `output_left_cmd` / `output_right_cmd` are the final commands sent to the
   physical left/right motor outputs.
 - `output_left_pin_cmd` / `output_right_pin_cmd` are the actual PWM channel
-  commands. In motor pulse direct-wheel mode these can differ from
-  `output_left_cmd` / `output_right_cmd` because the firmware converts direct
-  wheel commands to the current controller's steer/throttle-style inputs.
-- `MOTOR_OUTPUT_SWAP_LR=1` swaps the final output stage only. The default is
-  `0`; do not enable it unless a direct left/right pulse proves the physical
-  outputs are wired opposite to the intended side.
+  commands. They are compatibility names for physical A/B pins, not physical
+  left/right wheel outputs.
+- Physical pin A is throttle / forward-backward. Physical pin B is turn /
+  steering. The probe-confirmed wheel model is `left = A - B`,
+  `right = A + B`, so the integrated controller converts logical wheel commands
+  with `A = (left + right) / 2` and `B = (right - left) / 2`.
+- `MOTOR_OUTPUT_SWAP_LR=1` swaps logical left/right wheel commands before the
+  physical A/B conversion. The default is `0`; do not enable it unless a direct
+  left/right pulse proves the logical wheel sides are reversed.
 - `DRIVE_CALIBRATION_ENABLE=1` enables the shared calibration layer used by RC
   MANUAL, station manual, single-waypoint AUTO, and motor pulse output.
 - Identity defaults preserve current behavior:
@@ -292,6 +296,50 @@ Differential pulse and shared drive calibration support is now available:
   A raw `0.0` always remains `0.0`.
 
 Do not tune drivetrain asymmetry in GPS path planning.
+
+### Physical output pin probe
+
+Use this before any further motor scale, sign, or minimum-command tuning. Recent
+logs show `MOTOR_PULSE_LEFT_CMD` and `MOTOR_PULSE_RIGHT_CMD` reach
+`logical_left_cmd` and `logical_right_cmd` correctly. The probe confirmed the
+physical pin roles:
+
+- physical pin A (`ESC_LEFT_PIN`, OpenRB D4): throttle / forward-backward
+- physical pin B (`ESC_RIGHT_PIN`, OpenRB D5): turn / steering
+- B positive means right wheel forward and left wheel backward
+
+The standalone probe bypasses RC, GPS, HC-12, station commands, manual mixing,
+waypoint logic, logical wheel conversion, and drive calibration. It attaches the
+same Servo PWM outputs as the integrated controller:
+
+- physical pin A: OpenRB D4, same output as `ESC_LEFT_PIN`
+- physical pin B: OpenRB D5, same output as `ESC_RIGHT_PIN`
+- neutral: `1500 us`
+- command range: ±`300 us`
+
+Compile-time options:
+
+- `PHYSICAL_PIN_A_CMD`, default `0.0`
+- `PHYSICAL_PIN_B_CMD`, default `0.0`
+- `PHYSICAL_PIN_PROBE_MS`, default `500`
+- `PHYSICAL_PIN_PROBE_START_DELAY_MS`, default `3000`
+
+Expected USB fields include:
+
+```text
+physical_output_pin_probe=true phase=WAIT/PULSE/STOP elapsed_ms=... physical_pin_a_cmd=... physical_pin_b_cmd=... physical_pin_a=4 physical_pin_b=5 written_pin_a_cmd=... written_pin_b_cmd=...
+```
+
+Truth-table rule:
+
+- Pin A alone creates straight forward/reverse motion, so pin A is throttle.
+- Pin B alone creates in-place turn/spin, so pin B is steering/turn.
+- The integrated wheel-to-pin conversion is now
+  `throttle = (left + right) / 2` and `turn = (right - left) / 2`.
+- Single-wheel logical commands are split across throttle and turn. For example,
+  logical left-only `+0.50/0.00` becomes physical `A=+0.25`, `B=-0.25`. This
+  can still be near deadband, so validate the mapping first with both-wheel
+  forward/reverse tests.
 
 Important GPS interpretation:
 
@@ -325,7 +373,7 @@ Expected GPS fields in that build include increasing `gps_chars`,
 Expected USB debug fields:
 
 ```text
-logical_left_cmd=... logical_right_cmd=... raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... output_left_cmd=... output_right_cmd=... output_left_pin_cmd=... output_right_pin_cmd=... final_left_cmd=... final_right_cmd=... motor_output_swap_lr=... mixer_bypassed_for_motor_pulse=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
+logical_left_cmd=... logical_right_cmd=... raw_left_cmd=... raw_right_cmd=... calibrated_left_cmd=... calibrated_right_cmd=... output_left_cmd=... output_right_cmd=... output_left_pin_cmd=... output_right_pin_cmd=... physical_a_cmd=... physical_b_cmd=... physical_a_role=throttle physical_b_role=turn wheel_to_physical_mapping=diff_to_throttle_turn final_left_cmd=... final_right_cmd=... motor_output_swap_lr=... mixer_bypassed_for_motor_pulse=... drive_calibration_enable=... left_motor_sign=... right_motor_sign=... left_motor_scale=... right_motor_scale=... left_motor_min_cmd=... right_motor_min_cmd=...
 motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_left_cmd=... motor_pulse_right_cmd=... motor_pulse_ms=... motor_pulse_elapsed_ms=... motor_pulse_latched_stop=... motor_pulse_ready=... motor_pulse_block_reason=...
 ```
 
@@ -333,6 +381,7 @@ motor_pulse_test_mode=true motor_pulse_cmd=... motor_pulse_left_cmd=... motor_pu
 final intended wheel output values after calibration and optional output swap.
 Use `logical_left_cmd` / `logical_right_cmd` or `raw_left_cmd` /
 `raw_right_cmd` to inspect the pre-calibration direct wheel command. Use
+`physical_a_cmd` / `physical_b_cmd` or the compatibility aliases
 `output_left_pin_cmd` / `output_right_pin_cmd` to inspect the actual PWM channel
 commands being written.
 

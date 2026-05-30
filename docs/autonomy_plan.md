@@ -46,13 +46,11 @@ HC-12, preserves RC MANUAL, and emits one AUTO-only neutral-stick pulse before
 latching stop. Use it only to identify motor/drivetrain response thresholds.
 The first calibration result shows `0.180` is below visible motion while `0.220`
 does move, but symmetric `0.220` software output produced rotation-like motion
-rather than straight motion. Manual RC forward/backward also curves in opposite
-directions. Differential pulse tests now show both left-only and right-only
-positive pulses rotate the correct side forward, so gross polarity inversion is
-unlikely. Symmetric `+0.22/+0.22` curves/rotates right and symmetric
-`-0.22/-0.22` curves left while reversing, pointing to drivetrain asymmetry
-under equal commands. Treat right-side compensation / shared drive calibration
-as the current blocker.
+rather than straight motion. The physical pin probe has now clarified the output
+path: physical output A is throttle, physical output B is turn, and logical
+wheel commands must be converted with `A=(left+right)/2` and
+`B=(right-left)/2`. The current blocker is validating that corrected mapping
+with both-wheel forward/reverse tests, not right-side compensation yet.
 
 Staged plan:
 
@@ -109,18 +107,24 @@ Staged plan:
    neutral RC, motion-grade GPS, near-field target window, and manual override.
    `SINGLE_WP_CRAWL_BASE_CMD` controls the candidate command; `GROUND_CRAWL_MAX_CMD`
    remains the final safety clamp. Do not reuse stale targets.
-14. Differential left/right motor pulse calibration: characterize left-only,
-   right-only, and matched left/right thresholds with `MOTOR_PULSE_LEFT_CMD` and
-   `MOTOR_PULSE_RIGHT_CMD` before any GPS path work. Initial observations are
-   complete enough to start right-side compensation tests.
-15. Shared drive calibration layer: apply any deadband compensation, left/right
+14. Physical output pin truth table: complete. `firmware/physical_output_pin_probe`
+   confirmed A is throttle and B is turn. The integrated conversion now uses
+   `A=(left+right)/2` and `B=(right-left)/2`.
+15. Corrected direct wheel pulse validation: first run both-wheel forward and
+   reverse tests. Single-wheel logical commands are halved at the physical pin
+   level and may still be near deadband.
+16. Differential left/right motor pulse calibration: after corrected both-wheel
+   behavior is verified, characterize left-only, right-only, and matched
+   left/right thresholds with `MOTOR_PULSE_LEFT_CMD` and
+   `MOTOR_PULSE_RIGHT_CMD` before any GPS path work.
+17. Shared drive calibration layer: apply any deadband compensation, left/right
    trim, or output scaling in one common layer used by both MANUAL and AUTO.
    This layer is behind `DRIVE_CALIBRATION_ENABLE=1`; identity/off defaults
    preserve current behavior.
-16. Low-speed floor test: only after guarded crawl behavior, drivetrain
+18. Low-speed floor test: only after guarded crawl behavior, drivetrain
    calibration, and sensor-frame assumptions are validated.
-17. Multi-waypoint motion: only after single-waypoint behavior is proven.
-18. Coverage path / lawnmower driving: last step, after mission sequencing,
+19. Multi-waypoint motion: only after single-waypoint behavior is proven.
+20. Coverage path / lawnmower driving: last step, after mission sequencing,
    heading control, logging, and safety policy are complete.
 
 ## GPS Antenna Frame Vs Rover Body Frame
