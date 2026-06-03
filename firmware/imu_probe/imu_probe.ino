@@ -290,7 +290,9 @@ uint8_t scanAndReport() {
     Serial.println(
         "note=SDA/SCL did not release HIGH; skipping scan. Check IMU power, "
         "GND, pull-ups, and wiring before trusting any result.");
-    Serial.println("i2c_scan_count=0 imu_present=false");
+    Serial.println(
+        "i2c_scan_count=0 imu_present=false imu_probe_pass=false "
+        "imu_probe_block_reason=BUS_STUCK_LOW");
     return 0;
   }
   Serial.println("bus_state=RELEASED_HIGH");
@@ -310,14 +312,18 @@ uint8_t scanAndReport() {
   if (foundCount > MAX_VALID_FOUND_COUNT) {
     Serial.print("i2c_scan_count=");
     Serial.println(foundCount);
-    Serial.println("scan_result=INVALID_SCAN_TOO_MANY_ADDRESSES imu_present=false");
+    Serial.println(
+        "scan_result=INVALID_SCAN_TOO_MANY_ADDRESSES imu_present=false "
+        "imu_probe_pass=false imu_probe_block_reason=INVALID_SCAN");
     return 0;
   }
 
   Serial.print("i2c_scan_count=");
   Serial.println(foundCount);
   if (foundCount == 0) {
-    Serial.println("scan_result=NO_I2C_DEVICES imu_present=false");
+    Serial.println(
+        "scan_result=NO_I2C_DEVICES imu_present=false imu_probe_pass=false "
+        "imu_probe_block_reason=NO_I2C_DEVICES");
     return 0;
   }
 
@@ -328,8 +334,16 @@ uint8_t scanAndReport() {
       firstMpu = found[i];
     }
   }
+  bool mpuClassPresent = firstMpu != 0;
   Serial.print("imu_present=true imu_mpu_class_present=");
-  Serial.println(firstMpu != 0 ? "true" : "false");
+  Serial.print(mpuClassPresent ? "true" : "false");
+  // imu_present=true alone is NOT a pass: a single non-MPU address such as 0x03
+  // (UNKNOWN_I2C_DEVICE) is IMU_NOT_MPU_CLASS_DETECTED. A pass requires an
+  // MPU/ICM-style address (0x68/0x69); whoami is then read in continuous mode.
+  Serial.print(" imu_probe_pass=");
+  Serial.print(mpuClassPresent ? "true" : "false");
+  Serial.print(" imu_probe_block_reason=");
+  Serial.println(mpuClassPresent ? "OK" : "IMU_NOT_MPU_CLASS_DETECTED");
   return firstMpu;
 }
 

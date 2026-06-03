@@ -38,6 +38,74 @@ What this changes:
 IMU candidate (unchanged): I2C `~0x69`, WHO_AM_I observed `0x6F`; treat as an
 MPU/ICM register-map-compatible clone/variant until proven otherwise.
 
+## HC-12 Mac temporary station validation: DEFERRED (2026-06-03)
+
+Decision: HC-12 RF validation on the Mac temporary station is **DEFERRED**. It is
+NOT a blocker for GPS / IMU / path-following dry-run work, which runs over the USB
+monitor and does not need HC-12.
+
+State at deferral:
+
+- Station USB-Serial (`/dev/cu.usbserial-02442CA5`) is **stable** with DTR/RTS
+  forced low. The DTR/RTS-safe station tools work: `read-only` and `write-only`
+  open cleanly with `serial_error_count=0`.
+- RF link was **not established** in the Mac temporary station setup:
+  - station read-only: `total_bytes=0`, `detected_uart_ports=none`
+  - station write-only: `tx_count>0`, `serial_error_count=0`,
+    verdict `STATION_TX_OK_NO_RX` (station TX path healthy, nothing came back)
+  - OpenRB uart sweep: `Serial3_tx` increases but `Serial3_rx` stays `0`
+- Interpretation: the station TX and USB bridge are fine; the RF path simply did
+  not carry bytes in this temporary setup. This is a physical RF / settings /
+  station question, not a firmware/code fault, and not a GPS/IMU blocker.
+
+Required follow-up (do not delete the HC-12 tools):
+
+- Final HC-12 validation must be **repeated on the Ubuntu Station + USB-Serial**
+  setup (the intended station), not on the Mac temporary station.
+- Until then, HC-12 is **optional** for the current USB-monitor-based dry-run.
+  The integrated dry-run build sets `hc12_enabled=true` on Serial3 but does not
+  require any HC-12 RX to succeed (`hc12_rx_count` may stay 0).
+
+See `docs/outdoor_validation_checklist.md` (Stage G) for the Ubuntu-station HC-12
+re-validation, and the section below for the in-place diagnosis procedure.
+
+## IMU indoor status: BLOCKED (2026-06-03, IMU_NOT_MPU_CLASS_DETECTED)
+
+The latest indoor `firmware/imu_probe` (Stage C) run is **NOT an IMU pass**.
+Upload/monitor work and the I2C bus is released high, but the probe repeatedly
+sees only:
+
+```text
+i2c_addr=0x03 imu_candidate=UNKNOWN_I2C_DEVICE whoami=NA
+imu_present=true imu_mpu_class_present=false
+```
+
+Interpretation: `imu_present=true` alone is **not** a pass — it is set whenever
+any address ACKs, and a lone `0x03` reading `UNKNOWN_I2C_DEVICE` is a bus
+artifact / non-IMU device, not the IMU. Current indoor IMU status is therefore
+**IMU_BLOCKED / IMU_NOT_MPU_CLASS_DETECTED**.
+
+Strict IMU pass criteria (use these everywhere now):
+
+- `imu_mpu_class_present=true`, AND
+- a valid MPU/ICM-style address (`0x68` or `0x69`), AND
+- a readable WHO_AM_I (and in continuous mode, gyro calibration completes).
+
+Known-good reference: `i2c_addr=0x69`, `whoami=0x6F`,
+`imu_mpu_class_present=true`. The probe now also prints an explicit
+`imu_probe_pass` / `imu_probe_block_reason`; check a probe log with
+`scripts/check_imu_probe_log.sh`.
+
+Impact:
+
+- The integrated no-motion dry-run still runs for safety/logging (motors stay
+  disabled), but **heading validation is NOT passed** until either a valid
+  MPU/ICM IMU is detected OR GPS course-over-ground heading is valid
+  (`gps_motion_ready=true` and `heading_ready=true`).
+- Do not proceed to outdoor heading validation or any guarded crawl until a
+  heading source is valid. Fix the IMU wiring/power/module first, or rely on GPS
+  course heading outdoors.
+
 ## HC-12 operational diagnosis without unplugging the module
 
 The HC-12 is fixed on the board and cannot be removed. The repeatable field loop

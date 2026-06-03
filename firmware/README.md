@@ -1206,6 +1206,16 @@ it and reads raw accel/gyro/temp. Treat this as **signal validation only**: do
 not assume a specific datasheet, scale factor, or trusted yaw/heading from it. The
 rover-mounted IMU may be different or faulty and must be validated separately.
 
+**Strict pass criteria** (`imu_present=true` alone is NOT a pass): a pass requires
+`imu_mpu_class_present=true` with a `0x68`/`0x69` address and a readable WHO_AM_I.
+The scan now prints an explicit `imu_probe_pass` / `imu_probe_block_reason`
+(`OK` when an MPU/ICM-class address is found, else `IMU_NOT_MPU_CLASS_DETECTED` /
+`NO_I2C_DEVICES` / `BUS_STUCK_LOW`). A lone `i2c_addr=0x03` reading
+`UNKNOWN_I2C_DEVICE` is a bus artifact / non-IMU device — `imu_mpu_class_present`
+will be `false` and the verdict `IMU_NOT_MPU_CLASS_DETECTED`. Check a captured log
+with `scripts/check_imu_probe_log.sh <log>`. (Indoor status as of 2026-06-03 is
+BLOCKED for exactly this reason; see `docs/current_hardware_status.md`.)
+
 Beyond the scan, the default build now locks onto the first MPU-class device and
 runs continuous diagnostics: it prints `accel_raw_*`, `gyro_raw_*`, `temp_raw`,
 `accel_mag_g`, `gyro_mag_dps`, `stationary_detected`/`motion_detected`, a
