@@ -38,6 +38,51 @@ What this changes:
 IMU candidate (unchanged): I2C `~0x69`, WHO_AM_I observed `0x6F`; treat as an
 MPU/ICM register-map-compatible clone/variant until proven otherwise.
 
+## HC-12 operational diagnosis without unplugging the module
+
+The HC-12 is fixed on the board and cannot be removed. The repeatable field loop
+uses `tools/hc12_operational_diagnose.py` (station) + `firmware/uart_port_sweep_probe`
+(OpenRB) + `tools/hc12_diagnose_report.py` (report). No unplugging, loopback, or
+AT mode. Wiring is already verified; `total_bytes=0` is a state to interpret, not
+an automatic code bug. HC-12 is expected on Serial3 (D14/D13); GPS stays on
+Serial2. Full commands are in `firmware/README.md`.
+
+Five states to distinguish:
+
+1. Station OFF / counterpart off: `NO_RX` / `total_bytes=0` is EXPECTED and does
+   not prove firmware failure. Mark with `--station-off` → verdict
+   `TEST_INVALID_STATION_OFF`; the link test is invalid until both HC-12 sides
+   are powered and one is transmitting.
+2. Station USB stability (`--mode stability`): open/close OK + rising
+   `stability_alive_ticks` + `serial_error_count=0` means the USB bridge is alive;
+   `in_waiting=0` means no bytes, not failure (`USB_SERIAL_STABLE_NO_RF_BYTES`).
+3. OpenRB uart sweep: run concurrently with a station `read-only` test; the
+   detected `@UART,<n>` port number is the HC-12 TX UART.
+4. Station write-only: run while the OpenRB sweep monitor is open and watch which
+   `SerialN_rx` rises (Serial2 rx is GPS NMEA, not HC-12).
+5. HC-12 link / ping-pong: only meaningful when both sides are powered and one
+   responds (`pong_rx>0` → `HC12_LINK_OK`).
+
+Observed 2026-06-03: station `stability` and `read-only` runs opened
+`/dev/cu.usbserial-02442CA5` cleanly with `serial_error_count=0` and
+`total_bytes=0` → `USB_SERIAL_STABLE_NO_RF_BYTES` (USB bridge healthy; no RF bytes
+because the counterpart was not transmitting in that test). This is the expected
+"station/off" interpretation, not a firmware fault.
+
+DTR/RTS handling (Mac temporary station, 2026-06-03): earlier `write-only` /
+`ping-pong` runs failed with `OSError Errno 6 Device not configured` →
+`STATION_USB_UNSTABLE`. A manual PySerial test only worked with hardware flow
+control off and DTR/RTS forced low (`rtscts=False`, `dsrdtr=False`,
+`setDTR(False)`, `setRTS(False)`). The station USB-Serial is therefore not
+necessarily unstable — pyserial's default DTR/RTS assertion on open resets some
+adapters. All station tools now open through `tools/station_serial.safe_open_serial`
+with `--dtr low --rts low --write-timeout-s 1` by default, and print
+`dtr_mode/rts_mode/rtscts/dsrdtr`. After the fix, a real `write-only` run on
+`/dev/cu.usbserial-02442CA5` reached `tx_count>0`, `serial_error_count=0`,
+verdict `STATION_TX_OK_NO_RX` (TX healthy, no RF back) — not unstable. Treat
+`DEVICE_NOT_CONFIGURED` during write as DTR/RTS / adapter-reset behavior, not a
+code or firmware fault.
+
 ## Breadboard Development Status (2026-05-30)
 
 A breadboard rig (no rover chassis, no motors) is used for safe indoor

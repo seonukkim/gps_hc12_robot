@@ -1011,6 +1011,135 @@ IMU yaw only after the outdoor GPS-vs-IMU agreement check). Even then, motion is
 wheel-off-ground / open-area-with-kill-switch only. See
 [`docs/outdoor_validation_checklist.md`](../docs/outdoor_validation_checklist.md).
 
+## UART Port Sweep Probe (`firmware/uart_port_sweep_probe`)
+
+Use this to find which OpenRB-150 hardware UART a fixed module (e.g. the HC-12)
+is actually wired to, without removing the module and without a loopback or AT
+command. Symptom it solves: `hc12_link_probe` on `Serial3` shows `tx_count`
+rising but the station receives 0 bytes (and the OpenRB `rx_count` stays 0),
+i.e. the HC-12 is probably not on the assumed UART.
+
+OpenRB-150 UART pin map (from core 0.2.1 `variant.cpp` / `variant.h`):
+
+| UART | SERCOM | TX | RX | MCU pins | Board header |
+|---|---|---|---|---|---|
+| `Serial1` | SERCOM2 | D26 | D27 | PA12 / PA13 | SD-SPI header (MOSI / SCK) |
+| `Serial2` | SERCOM4 | D28 | D29 | PA14 / PA15 | SD-SPI header (SS / MISO) — **GPS** |
+| `Serial3` | SERCOM5 | D14 | D13 | PB22 / PB23 | dedicated "Serial3 / exp uart" header |
+
+The probe drives all three UARTs with `@UART,1,TX_TEST` / `@UART,2,TX_TEST` /
+`@UART,3,TX_TEST` (once per `UART_SWEEP_TX_PERIOD_MS`, default 1 s) and reads all
+three, printing per-port `SerialN_tx` / `SerialN_rx` / `SerialN_rx_preview` plus a
+real-time `uart_rx_event` / `RX_FIRST_DETECTED` line. Identification:
+
+- TX side: the UART whose `@UART,<n>,TX_TEST` frame reaches the station (read with
+  `tools/serial_raw_read.py`) is where the HC-12 **TX** is wired.
+- RX side: the UART whose `rx_count` rises when the station sends is where the
+  HC-12 **RX** is wired. `Serial2_rx` showing `$GP`/`$GN` NMEA confirms GPS on
+  `Serial2` (expected, not the HC-12).
+
+Safety: USB Serial + the three UARTs only. No motors/ESC/Servo, no GPS parsing,
+no RC/PPM, no I2C, no autonomy. It does not change motor/path-following code and
+enables no motion. `UART_SWEEP_TX_MASK` (default `0x07`) selects which ports to
+drive (`bit0`=Serial1, `bit1`=Serial2, `bit2`=Serial3); `UART_SWEEP_BAUD` default
+`9600`.
+
+```bash
+# OpenRB: compile + upload + monitor (USB) the sweep probe
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-uart-sweep firmware/uart_port_sweep_probe && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-uart-sweep firmware/uart_port_sweep_probe && sleep 2 && arduino-cli monitor -p "$PORT" --config baudrate=115200
+
+# Station (separate terminal, HC-12-USB bridge): read raw bytes for 15 s and report which @UART,<n> arrived
+uv run python tools/serial_raw_read.py --baud 9600 --duration-s 15
+```
+
+If the station prints `detected_uart_ports=[2]`, the HC-12 TX is on `Serial2`
+(then it shares the GPS UART — see the coexistence rule); `[1]` means `Serial1`,
+`[3]` means `Serial3`. `0 bytes` means the HC-12 is on none of the swept UARTs at
+this baud (try `-DUART_SWEEP_BAUD=...`) or the station bridge baud is wrong.
+
+## HC-12 operational diagnosis without unplugging the module
+
+The HC-12 is fixed on the board and cannot be removed right now, so the field
+diagnosis must work in place — no unplugging, no direct loopback, no AT mode.
+Wiring has already been physically verified; treat `total_bytes=0` as a *state*
+to interpret, not as automatic proof of a code/firmware bug. Authoritative
+mapping: HC-12 is expected on **Serial3** (D14 TX / D13 RX), GPS stays on
+**Serial2**.
+
+Two station tools drive the loop:
+
+- `tools/hc12_operational_diagnose.py` — opens the station USB-Serial bridge
+  (auto-detects `/dev/cu.usbserial*` / `cu.wchusbserial*` / `cu.SLAB_USBtoUART*`,
+  and excludes `/dev/cu.usbmodem*` which is the OpenRB). Modes: `read-only`,
+  `write-only`, `ping-pong`, `stability`. It handles `SerialException`,
+  `OSError Errno 6 Device not configured`, and a port disappearing/reappearing
+  (`--reconnect`), and never crashes with a traceback — it prints structured
+  status (`serial_error_count`, `reconnect_count`, `active_port`, `last_error`,
+  `total_bytes`, `detected_uart_ports`, `verdict`).
+- `tools/hc12_diagnose_report.py` — parses the most recent logs and writes a
+  Markdown verdict + next action to `outputs/reports/hc12_diagnosis_<ts>.md`.
+
+`scripts/hc12_field_check.sh` prints the exact ordered terminal commands.
+
+### Distinguish these five states
+
+1. **Station OFF / counterpart off** — if the opposite HC-12 side is not powered
+   or its firmware is not transmitting, `NO_RX` / `total_bytes=0` is **expected**
+   and does **not** prove a firmware failure. Record it with `--station-off`
+   (verdict `TEST_INVALID_STATION_OFF`); the link test is invalid until both
+   sides are powered and one side is transmitting.
+2. **Station USB-Serial stability** — `stability` mode opens the bridge and polls
+   `in_waiting` without sending. Open/close OK and rising `stability_alive_ticks`
+   with `serial_error_count=0` means the USB bridge is alive; `in_waiting=0` /
+   `total_bytes=0` just means no bytes, not a failure
+   (verdict `USB_SERIAL_STABLE_NO_RF_BYTES`).
+3. **OpenRB UART sweep** — must run **concurrently** with a station `read-only`
+   test. The probe (`firmware/uart_port_sweep_probe`) sends
+   `@UART,1/2/3,TX_TEST`; whichever port number the station detects is the UART
+   the HC-12 TX is on (`UART_SWEEP_RECEIVED_ON_SERIAL3` etc.).
+4. **Station write-only** — must run while the OpenRB uart-sweep monitor is open,
+   so you can watch which `SerialN_rx` counter rises (the HC-12 RX port). Serial2
+   rx is normally GPS NMEA, not the HC-12.
+5. **HC-12 link probe / ping-pong** — only meaningful when **both** sides are
+   powered and one side responds. `pong_rx>0` → `HC12_LINK_OK`.
+
+### Mac temporary station: DTR/RTS must be forced low
+
+On the Mac temporary station, some USB-Serial bridges report
+`OSError Errno 6 Device not configured` (verdict `STATION_USB_UNSTABLE`) on
+**write-only** / **ping-pong** because pyserial asserts DTR/RTS on open and the
+adapter resets. A manual PySerial test only succeeded with hardware flow control
+off and DTR/RTS forced low (`rtscts=False`, `dsrdtr=False`, `setDTR(False)`,
+`setRTS(False)`). So:
+
+- All station tools now open via `tools/station_serial.safe_open_serial`, which
+  reproduces that known-good sequence and bounds writes with `write_timeout`.
+  Defaults are `--dtr low --rts low --write-timeout-s 1`.
+- `DEVICE_NOT_CONFIGURED` during a write is most likely DTR/RTS toggling or the
+  USB-Serial adapter reset behavior — **not** a code/firmware fault. The start
+  and status summaries print `dtr_mode`, `rts_mode`, `rtscts`, `dsrdtr`.
+- A clean write (frames sent, `serial_error_count=0`) with no reply is now
+  `STATION_TX_OK_NO_RX` (TX path healthy, no RF back), never
+  `STATION_USB_UNSTABLE`.
+- The **manual-equivalent write test** is `--mode write-only` with the default
+  `--dtr low --rts low`.
+
+### Commands
+
+```bash
+# Terminal 1 (OpenRB): uart sweep, capture USB to a report-parseable log
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-uart-sweep firmware/uart_port_sweep_probe && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-uart-sweep firmware/uart_port_sweep_probe && sleep 2 && mkdir -p outputs/logs && arduino-cli monitor -p "$PORT" --config baudrate=115200 | tee outputs/logs/uart_sweep_openrb_$(date +%Y%m%d_%H%M%S).log
+
+# Terminal 2 (station): DTR/RTS forced low (the default) — stability, read-only, write-only, ping-pong
+uv run python tools/hc12_operational_diagnose.py --mode stability  --duration-s 20 --reconnect --dtr low --rts low
+uv run python tools/hc12_operational_diagnose.py --mode read-only  --duration-s 60 --reconnect --raw-log --dtr low --rts low
+uv run python tools/hc12_operational_diagnose.py --mode write-only --duration-s 60 --reconnect --dtr low --rts low
+uv run python tools/hc12_operational_diagnose.py --mode ping-pong  --duration-s 60 --reconnect --dtr low --rts low
+
+# Generate the Markdown report (add --station-off if the counterpart was off)
+uv run python tools/hc12_diagnose_report.py
+```
+
 ## IMU Probe (signal + motion + relative-yaw diagnostics)
 
 Use this standalone sketch to check whether an IMU is electrically present and

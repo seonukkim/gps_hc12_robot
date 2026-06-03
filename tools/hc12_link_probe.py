@@ -24,6 +24,8 @@ try:
 except ImportError:
     import _bootstrap  # type: ignore  # noqa: F401
 
+from tools.station_serial import DTR_RTS_MODES, safe_open_serial
+
 from gps_coverage_core.protocol import decode_frame, encode_frame
 
 LINK_OK_MAX_AGE_S = 3.0
@@ -54,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-dir", default="outputs/logs", help="Directory for the timestamped probe log"
     )
+    parser.add_argument("--dtr", choices=DTR_RTS_MODES, default="low", help="DTR after open")
+    parser.add_argument("--rts", choices=DTR_RTS_MODES, default="low", help="RTS after open")
+    parser.add_argument("--write-timeout-s", type=float, default=1.0)
     return parser
 
 
@@ -79,14 +84,15 @@ def _log_line(handle, direction: str, data: bytes) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    import serial  # imported here so --help works without pyserial installed
-
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"hc12_link_probe_{dt.datetime.now():%Y%m%d_%H%M%S}.log"
 
     ping_period_s = max(args.ping_interval_ms, 1) / 1000.0
-    print(f"Opening {args.port} @ {args.baud} for HC-12 link probe (PING only).")
+    print(
+        f"Opening {args.port} @ {args.baud} for HC-12 link probe (PING only; "
+        f"dtr={args.dtr} rts={args.rts} rtscts=False dsrdtr=False)."
+    )
     print(f"Logging to {log_path}")
 
     seq = 0
@@ -99,9 +105,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     last_ping = 0.0
     start = time.monotonic()
 
-    with serial.Serial(args.port, args.baud, timeout=0.2) as ser, log_path.open(
-        "w", encoding="utf-8"
-    ) as log_handle:
+    ser, ctl_state = safe_open_serial(
+        args.port, args.baud, dtr=args.dtr, rts=args.rts, write_timeout_s=args.write_timeout_s
+    )
+    if ctl_state.get("warnings"):
+        print("control_line_warning " + ",".join(ctl_state["warnings"]))
+    with log_path.open("w", encoding="utf-8") as log_handle:
         try:
             while True:
                 now = time.monotonic()
@@ -153,6 +162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         ser.write(clear_frame)
         _log_line(log_handle, "TX", clear_frame)
 
+    try:
+        ser.close()
+    except Exception:  # noqa: BLE001
+        pass
     print(f"\nDone. tx_count={tx_count} rx_count={rx_count} pong_rx={pong_rx} log={log_path}")
     return 0
 
