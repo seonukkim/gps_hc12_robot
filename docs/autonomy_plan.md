@@ -944,3 +944,24 @@ companion to the station path-planning preview (`tools/path_planning_preview.py`
 This is still not real autonomous waypoint following. Do not enable physical
 output until the RC/PPM Manual/Auto channel holds reliably and an IMU/GPS heading
 source is validated (calibration + drift). IMU `0x69`/`0x6F` is signal-only for now.
+
+## IMU Heading Diagnostic Stage (Breadboard -> Outdoor)
+
+The rebuilt breadboard circuit made the IMU and HC-12 reliable, so the next stage
+adds IMU heading *diagnostics* (not control) ahead of outdoor validation.
+
+- `firmware/imu_probe` now does gyro-bias calibration, motion detection, and
+  relative-yaw integration with configurable axis/sign.
+- `firmware/openrb_robot_controller` with `IMU_ENABLE=1` reads the IMU read-only
+  in the path-following dry-run and prints yaw + a seeded GPS-course-vs-IMU-yaw
+  delta comparison (`heading_agreement_diag`, `heading_agreement_error_deg`).
+- IMU yaw is relative and drifts; it is diagnostic-only and never drives motors.
+  The plan to qualify it as a heading source: validate raw signal -> calibrate
+  bias -> find axis/sign -> integrate relative yaw -> compare delta vs GPS
+  course-over-ground outdoors -> only then guard it for path following.
+
+Scope note: UI and ROS2 are optional. ROS2 should not be over-prioritized
+because the director plans to try ViAM over the summer, which may replace or
+reduce the value of a ROS2 integration. Keep the core protocol, planning, and
+firmware dry-run independent of ROS2 so either path stays open. The priority is
+physical path planning / path-following validation with the safety gates intact.

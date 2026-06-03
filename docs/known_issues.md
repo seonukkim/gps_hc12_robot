@@ -998,3 +998,33 @@ Status:
   D14/D13). To run GPS + HC-12 together, wire HC-12 to one of those and select
   it with `HC12_PROBE_SERIAL_PORT` / `PATH_FOLLOWING_HC12_SERIAL_PORT`. The
   path-following HC-12 protocol rejects `Serial2` at compile time.
+
+## Old Circuit Was The Root Cause Of IMU/HC-12 Failures (Resolved 2026-06-03)
+
+Status:
+
+- After a director meeting, the previous board/circuit was found to have
+  wiring/circuit issues. The circuit was rebuilt on a breadboard.
+- HC-12 now works with the computer/station, and the IMU is detected and works.
+- The earlier IMU and HC-12 failures were therefore most likely the old
+  circuit/wiring, not the OpenRB-150 board or the firmware/code.
+- Wiring rule reaffirmed: GPS on `Serial2`; HC-12 on `Serial3` (or `Serial1`),
+  never `Serial2`. Path-following builds reject HC-12 on `Serial2` at compile
+  time.
+- Remaining blockers before physical driving are unchanged: the RC/PPM
+  Manual/Auto mode channel must hold, and a heading source must be validated
+  outdoors (GPS course, and an IMU-yaw-vs-GPS-course agreement check).
+
+## IMU Yaw Is Relative And Drifts (Not An Absolute Heading)
+
+Status:
+
+- Gyro-integrated yaw (`imu_relative_yaw_deg`) is relative, reset to 0 at start,
+  and drifts unless calibrated/fused/seeded. It is NOT a compass heading.
+- The probe and the controller dry-run print it as diagnostic only. The
+  controller never uses IMU yaw for motor output: `HEADING_SOURCE_MODE` values
+  other than GPS_COURSE (0) / GPS_COURSE_WITH_IMU_DIAG (2) report
+  `physical_block_reason=HEADING_SOURCE_NOT_APPROVED_FOR_MOTION`.
+- Correct path: validate raw signal, calibrate gyro bias, find axis/sign,
+  integrate relative yaw, compare IMU-yaw delta with GPS course-over-ground
+  outdoors, and only then consider it a guarded heading source.

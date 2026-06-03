@@ -2485,3 +2485,22 @@ Pending at that time:
   path preview. Default builds do not move motors.
 - Blockers unchanged: RC/PPM Manual/Auto channel must hold HIGH, and a heading
   source must be validated, before any physical path following.
+
+## 2026-06-03 Circuit Rebuild + IMU Diagnostic Prep
+
+- Met the director; the previous board/circuit had wiring/circuit issues.
+- Rebuilt the circuit on a breadboard: HC-12 now connects to the computer, and
+  the IMU is detected and works. Earlier IMU/HC-12 failures were the old circuit,
+  not the OpenRB-150 or the code.
+- Wiring: GPS on `Serial2`, HC-12 on `Serial3`/`Serial1` (never `Serial2`).
+- Firmware: `firmware/imu_probe` gained motion diagnostics, gyro-bias
+  calibration, and relative-yaw integration (configurable axis/sign).
+  `firmware/openrb_robot_controller` gained read-only IMU diagnostics behind
+  `IMU_ENABLE` (default 0; default build byte-identical) with a
+  GPS-course-vs-IMU-yaw seeded delta comparison.
+- IMU yaw is relative and drifts; it is diagnostic-only and never drives motors.
+- Physical motion remains disabled by default. Next: outdoor no-motor validation
+  per `docs/outdoor_validation_checklist.md` (GPS fix + course, IMU drift,
+  GPS/IMU agreement), then guarded physical only if blockers clear.
+- ROS2 deprioritized (director may try ViAM in summer); priority is physical
+  path-following validation.

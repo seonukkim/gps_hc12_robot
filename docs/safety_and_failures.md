@@ -376,3 +376,20 @@ This does not weaken STOP, failsafe, manual override, heartbeat, or the
 wheel-off-ground rule. HC-12 path-following commands are never connected to motor
 execution unless every gate above is satisfied. Physical path following is not
 approved while the RC/PPM mode channel and heading source remain unvalidated.
+
+## IMU Heading Is Diagnostic-Only
+
+The controller can read the IMU (read-only, `IMU_ENABLE=1`) for diagnostics, but
+IMU yaw is never a motor-driving heading source by default:
+
+- Gyro yaw is relative and drifts; it is not an absolute heading.
+- Physical path-following motion requires a GPS-course heading. `HEADING_SOURCE_MODE`
+  values other than GPS_COURSE (0) and GPS_COURSE_WITH_IMU_DIAG (2) are blocked
+  with `physical_block_reason=HEADING_SOURCE_NOT_APPROVED_FOR_MOTION`.
+- IMU diagnostics (`IMU_ENABLE`) do not block manual drive and do not weaken GPS
+  thresholds. A missing/failed IMU only sets `imu_present=false`; the dry-run and
+  manual drive still work.
+- Before IMU yaw can ever become a guarded heading source it must pass the
+  outdoor GPS-course-vs-IMU-yaw agreement check
+  (`heading_agreement_diag=SEEDED_DELTA_COMPARE`, small
+  `heading_agreement_error_deg`). See `docs/outdoor_validation_checklist.md`.

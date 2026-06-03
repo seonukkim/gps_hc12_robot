@@ -1,42 +1,52 @@
 // firmware/imu_probe/imu_probe.ino
 //
-// Standalone IMU / I2C SIGNAL VALIDATION probe for the OpenRB-150 rover.
+// Standalone IMU diagnostic probe for the OpenRB-150 rover (breadboard prep).
 //
-// Goal: confirm whether an IMU is electrically present and *readable* on the
-// board's default Wire bus. This is signal validation ONLY. It does not provide
-// trusted heading/yaw and must not be used for autonomy yet.
+// Goal: validate the IMU signal and provide the motion / gyro-bias / relative-yaw
+// diagnostics needed BEFORE outdoor GPS-course-vs-IMU comparison. This is a
+// diagnostic tool only. It does NOT provide a trusted/absolute heading.
 //
 // SAFETY: this sketch initializes ONLY USB Serial and Wire (I2C). It does NOT
-// initialize or drive:
-//   - motors / ESC / Servo outputs
-//   - GPS UART
-//   - HC-12 UART
-//   - RC / PPM input
-//   - any rover autonomy / waypoint logic
+// initialize or drive motors/ESC/Servo, GPS UART, HC-12 UART, RC/PPM, or any
+// rover autonomy.
 //
-// Fixed IMU wiring (see docs/current_hardware_status.md):
-//   - SDA = OpenRB D11 = PA08  (PIN_WIRE_SDA = 11)
-//   - SCL = OpenRB D12 = PA09  (PIN_WIRE_SCL = 12)
-// These are the OpenRB-150 default `Wire` pins, so this probe uses the hardware
-// Wire peripheral (the same path as firmware/i2c_scanner_test).
+// HEADING REALITY CHECK:
+//   - Gyro-integrated yaw here is RELATIVE and DRIFTS. It is reset to 0 at start.
+//   - It is NOT an absolute compass heading.
+//   - An absolute heading requires a GPS course-over-ground seed, a magnetometer,
+//     or another reference, plus calibration and a drift/agreement check.
+//   - Use this probe only to: (1) confirm raw signal, (2) estimate gyro bias,
+//     (3) find the yaw axis/sign, (4) watch relative-yaw drift while stationary,
+//     so it can later be compared against GPS course-over-ground outdoors.
 //
-// History: earlier scans repeatedly reported the bus stuck LOW before probing
-// (BUS_STUCK_LOW_BEFORE_SCAN), so this probe keeps the proven bus-released-high
-// guard before scanning and refuses to treat a stuck/floating bus as a device.
+// IMU wiring: SDA = D11/PA08, SCL = D12/PA09 (OpenRB default Wire bus).
 
 #include <Wire.h>
 
 // ---- Compile-time options ---------------------------------------------------
-// Generic-scanner-only mode: scan + label I2C addresses, no register access.
 #ifndef IMU_PROBE_SCAN_ONLY
-#define IMU_PROBE_SCAN_ONLY 0
+#define IMU_PROBE_SCAN_ONLY 0          // 1 = generic I2C scanner + labels only
 #endif
-// Raw-register reads for 0x68/0x69 MPU/ICM-class devices. When 1, the probe
-// wakes the device (writes PWR_MGMT_1) and burst-reads accel/temp/gyro. When 0,
-// the probe stays read-only and reports WHO_AM_I only (requirement 8: keep it
-// simple if raw support is uncertain).
 #ifndef IMU_PROBE_RAW_ENABLE
-#define IMU_PROBE_RAW_ENABLE 1
+#define IMU_PROBE_RAW_ENABLE 1         // 0 = WHO_AM_I only, no wake/raw reads
+#endif
+#ifndef IMU_CALIBRATION_SECONDS
+#define IMU_CALIBRATION_SECONDS 5      // stationary gyro-bias estimation window
+#endif
+#ifndef IMU_YAW_DIAG
+#define IMU_YAW_DIAG 0                 // 1 = integrate gyro axis into relative yaw
+#endif
+#ifndef IMU_YAW_AXIS
+#define IMU_YAW_AXIS 2                 // 0=X, 1=Y, 2=Z (yaw is usually Z)
+#endif
+#ifndef IMU_YAW_SIGN
+#define IMU_YAW_SIGN 1                 // +1 or -1
+#endif
+#ifndef IMU_GYRO_LSB_PER_DPS
+#define IMU_GYRO_LSB_PER_DPS 131.0     // MPU default FS_SEL=0 (+/-250 dps)
+#endif
+#ifndef IMU_ACCEL_LSB_PER_G
+#define IMU_ACCEL_LSB_PER_G 16384.0    // MPU default AFS_SEL=0 (+/-2 g)
 #endif
 
 constexpr long USB_BAUD = 115200;
@@ -46,8 +56,14 @@ constexpr uint8_t I2C_ADDR_MIN = 0x03;
 constexpr uint8_t I2C_ADDR_MAX = 0x77;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 3000;
 constexpr uint32_t SCAN_PERIOD_MS = 1000;
+constexpr uint32_t SAMPLE_PERIOD_MS = 20;     // ~50 Hz continuous sampling
+constexpr uint32_t REPORT_PERIOD_MS = 250;    // 4 Hz USB report
 constexpr uint8_t MAX_VALID_FOUND_COUNT = 8;
 constexpr uint32_t I2C_CLOCK_HZ = 100000;
+
+// Motion / stationary thresholds (calibrated gyro and accel-vs-1g).
+constexpr double STATIONARY_GYRO_DPS = 2.0;
+constexpr double STATIONARY_ACCEL_G_TOL = 0.12;
 
 // MPU6050 / MPU9250 / ICM-2068x style register map (0x68 / 0x69 family).
 constexpr uint8_t MPU_REG_WHO_AM_I = 0x75;
@@ -55,8 +71,38 @@ constexpr uint8_t MPU_REG_PWR_MGMT_1 = 0x6B;
 constexpr uint8_t MPU_REG_ACCEL_XOUT_H = 0x3B;
 constexpr uint8_t MPU_BURST_LEN = 14;  // accel(6) + temp(2) + gyro(6)
 
+// Continuous diagnostics (calibration/yaw/motion) need register reads.
+#define IMU_PROBE_CONTINUOUS (!IMU_PROBE_SCAN_ONLY && IMU_PROBE_RAW_ENABLE)
+
 uint32_t scanPass = 0;
 uint32_t lastScanMs = 0;
+
+// Locked IMU device + live sample state.
+uint8_t imuAddress = 0;
+bool imuWhoamiOk = false;
+uint8_t imuWhoami = 0;
+int16_t accelRawX = 0, accelRawY = 0, accelRawZ = 0;
+int16_t gyroRawX = 0, gyroRawY = 0, gyroRawZ = 0;
+int16_t tempRaw = 0;
+double accelMagG = 0.0;
+double gyroMagDps = 0.0;
+bool stationaryDetected = false;
+bool motionDetected = false;
+
+// Gyro-bias calibration.
+bool imuCalibrating = false;
+bool imuCalibrated = false;
+uint32_t calStartMs = 0;
+double gyroSumX = 0.0, gyroSumY = 0.0, gyroSumZ = 0.0;
+uint32_t calSampleCount = 0;
+double gyroBiasX = 0.0, gyroBiasY = 0.0, gyroBiasZ = 0.0;
+
+// Relative-yaw integration diagnostic.
+double imuRelativeYawDeg = 0.0;
+bool haveLastSample = false;
+uint32_t lastSampleMicros = 0;
+uint32_t lastReportMs = 0;
+uint32_t lastSampleMs = 0;
 
 void printHexByte(uint8_t value) {
   Serial.print("0x");
@@ -72,8 +118,6 @@ bool isMpuClassAddress(uint8_t address) {
   return address == 0x68 || address == 0x69;
 }
 
-// Address-only candidate hint per requirement 6. Address alone does NOT identify
-// a device; it only narrows the candidate family.
 const char *candidateLabel(uint8_t address) {
   switch (address) {
     case 0x68:
@@ -91,15 +135,9 @@ const char *candidateLabel(uint8_t address) {
   }
 }
 
-// Decode the MPU-style WHO_AM_I (register 0x75). Note: ICM-209xx and ICM-426xx
-// parts use a different WHO_AM_I register, so an unknown value here is expected
-// for those and is not a failure.
-//
-// 0x6F: observed on the known-good breadboard module at I2C 0x69. It is not a
-// standard InvenSense/ST device ID, but the part ACKs at 0x69 and answers the
-// 0x75 WHO_AM_I register, so it is MPU register-map compatible (a likely
-// MPU-6050/6500-class clone or variant). Treat it as signal-validation only; do
-// not assume a specific datasheet, scale factor, or trusted yaw/heading from it.
+// Decode the MPU-style WHO_AM_I (register 0x75). 0x6F is the known-good
+// breadboard module at 0x69: not a standard InvenSense/ST ID but MPU register-map
+// compatible (a likely MPU-6050/6500-class clone/variant), signal-only.
 const char *whoamiLabel(uint8_t whoami) {
   switch (whoami) {
     case 0x68:
@@ -127,6 +165,16 @@ const char *whoamiLabel(uint8_t whoami) {
 
 int16_t be16(uint8_t hi, uint8_t lo) {
   return static_cast<int16_t>(static_cast<uint16_t>(hi) << 8 | lo);
+}
+
+double wrap180(double deg) {
+  while (deg > 180.0) {
+    deg -= 360.0;
+  }
+  while (deg < -180.0) {
+    deg += 360.0;
+  }
+  return deg;
 }
 
 bool readRegisters(uint8_t address, uint8_t reg, uint8_t *buffer, uint8_t length) {
@@ -176,6 +224,26 @@ bool busReleasedHigh() {
          digitalRead(DEFAULT_WIRE_SCL_PIN) == HIGH;
 }
 
+int16_t gyroAxisRaw(uint8_t axis) {
+  if (axis == 0) {
+    return gyroRawX;
+  }
+  if (axis == 1) {
+    return gyroRawY;
+  }
+  return gyroRawZ;
+}
+
+double gyroAxisBias(uint8_t axis) {
+  if (axis == 0) {
+    return gyroBiasX;
+  }
+  if (axis == 1) {
+    return gyroBiasY;
+  }
+  return gyroBiasZ;
+}
+
 void reportAddress(uint8_t address) {
   Serial.print("i2c_addr=");
   printHexByte(address);
@@ -186,8 +254,6 @@ void reportAddress(uint8_t address) {
   Serial.println(" mode=scan_only");
 #else
   if (!isMpuClassAddress(address)) {
-    // No portable register map for non-0x68 candidates here. Report address +
-    // candidate hint only; a magnetometer/BNO055 needs its own driver.
     Serial.println(" whoami=NA note=no_raw_register_support_for_this_address");
     return;
   }
@@ -202,57 +268,12 @@ void reportAddress(uint8_t address) {
   } else {
     Serial.print("NA whoami_label=READ_FAILED");
   }
-
-#if IMU_PROBE_RAW_ENABLE
-  // Wake the device (clear SLEEP bit) so accel/gyro produce live data. Writing
-  // 0x00 to PWR_MGMT_1 is the standard, idempotent wake for the MPU/ICM-2068x
-  // family and is gated to 0x68/0x69 addresses only.
-  bool wakeOk = writeRegister(address, MPU_REG_PWR_MGMT_1, 0x00);
-  Serial.print(" wake_attempted=true wake_ok=");
-  Serial.print(wakeOk ? "true" : "false");
-
-  uint8_t buf[MPU_BURST_LEN];
-  if (readRegisters(address, MPU_REG_ACCEL_XOUT_H, buf, MPU_BURST_LEN)) {
-    int16_t accelX = be16(buf[0], buf[1]);
-    int16_t accelY = be16(buf[2], buf[3]);
-    int16_t accelZ = be16(buf[4], buf[5]);
-    int16_t tempRaw = be16(buf[6], buf[7]);
-    int16_t gyroX = be16(buf[8], buf[9]);
-    int16_t gyroY = be16(buf[10], buf[11]);
-    int16_t gyroZ = be16(buf[12], buf[13]);
-    // MPU6050 temperature formula (approximate; MPU9250/ICM use different
-    // constants), so temp_raw is the trustworthy field.
-    float tempC = static_cast<float>(tempRaw) / 340.0f + 36.53f;
-
-    Serial.print(" accel_raw_x=");
-    Serial.print(accelX);
-    Serial.print(" accel_raw_y=");
-    Serial.print(accelY);
-    Serial.print(" accel_raw_z=");
-    Serial.print(accelZ);
-    Serial.print(" gyro_raw_x=");
-    Serial.print(gyroX);
-    Serial.print(" gyro_raw_y=");
-    Serial.print(gyroY);
-    Serial.print(" gyro_raw_z=");
-    Serial.print(gyroZ);
-    Serial.print(" temp_raw=");
-    Serial.print(tempRaw);
-    Serial.print(" temp_c_mpu6050_approx=");
-    Serial.print(tempC, 2);
-    Serial.println();
-  } else {
-    Serial.println(
-        " accel_raw_x=NA accel_raw_y=NA accel_raw_z=NA gyro_raw_x=NA "
-        "gyro_raw_y=NA gyro_raw_z=NA temp_raw=NA raw_read=FAILED");
-  }
-#else
-  Serial.println(" raw_read=disabled");
-#endif  // IMU_PROBE_RAW_ENABLE
+  Serial.println();
 #endif  // IMU_PROBE_SCAN_ONLY
 }
 
-void scanAndReport() {
+// Scan the bus; print discovery; return the first MPU-class address (or 0).
+uint8_t scanAndReport() {
   scanPass++;
   uint32_t sampleMs = millis();
 
@@ -269,9 +290,8 @@ void scanAndReport() {
     Serial.println(
         "note=SDA/SCL did not release HIGH; skipping scan. Check IMU power, "
         "GND, pull-ups, and wiring before trusting any result.");
-    Serial.println("i2c_scan_count=0");
-    Serial.println("imu_present=false");
-    return;
+    Serial.println("i2c_scan_count=0 imu_present=false");
+    return 0;
   }
   Serial.println("bus_state=RELEASED_HIGH");
 
@@ -290,31 +310,195 @@ void scanAndReport() {
   if (foundCount > MAX_VALID_FOUND_COUNT) {
     Serial.print("i2c_scan_count=");
     Serial.println(foundCount);
-    Serial.println("scan_result=INVALID_SCAN_TOO_MANY_ADDRESSES");
-    Serial.println(
-        "note=Many ACKs usually means a stuck/floating bus, not many devices.");
-    Serial.println("imu_present=false");
-    return;
+    Serial.println("scan_result=INVALID_SCAN_TOO_MANY_ADDRESSES imu_present=false");
+    return 0;
   }
 
   Serial.print("i2c_scan_count=");
   Serial.println(foundCount);
   if (foundCount == 0) {
-    Serial.println("scan_result=NO_I2C_DEVICES");
-    Serial.println("imu_present=false");
-    return;
+    Serial.println("scan_result=NO_I2C_DEVICES imu_present=false");
+    return 0;
   }
 
-  bool mpuClassSeen = false;
+  uint8_t firstMpu = 0;
   for (uint16_t i = 0; i < foundCount; ++i) {
     reportAddress(found[i]);
-    if (isMpuClassAddress(found[i])) {
-      mpuClassSeen = true;
+    if (firstMpu == 0 && isMpuClassAddress(found[i])) {
+      firstMpu = found[i];
     }
   }
   Serial.print("imu_present=true imu_mpu_class_present=");
-  Serial.println(mpuClassSeen ? "true" : "false");
+  Serial.println(firstMpu != 0 ? "true" : "false");
+  return firstMpu;
 }
+
+#if IMU_PROBE_CONTINUOUS
+bool imuReadRaw() {
+  uint8_t buf[MPU_BURST_LEN];
+  if (!readRegisters(imuAddress, MPU_REG_ACCEL_XOUT_H, buf, MPU_BURST_LEN)) {
+    return false;
+  }
+  accelRawX = be16(buf[0], buf[1]);
+  accelRawY = be16(buf[2], buf[3]);
+  accelRawZ = be16(buf[4], buf[5]);
+  tempRaw = be16(buf[6], buf[7]);
+  gyroRawX = be16(buf[8], buf[9]);
+  gyroRawY = be16(buf[10], buf[11]);
+  gyroRawZ = be16(buf[12], buf[13]);
+  return true;
+}
+
+// Lock onto an MPU-class device: read WHO_AM_I, wake it, start the calibration.
+void imuLockOn(uint8_t address) {
+  imuAddress = address;
+  imuWhoamiOk = readRegisters(address, MPU_REG_WHO_AM_I, &imuWhoami, 1);
+  writeRegister(address, MPU_REG_PWR_MGMT_1, 0x00);  // wake (clear SLEEP)
+  delay(10);
+  imuCalibrating = true;
+  imuCalibrated = false;
+  calStartMs = millis();
+  gyroSumX = gyroSumY = gyroSumZ = 0.0;
+  calSampleCount = 0;
+  imuRelativeYawDeg = 0.0;
+  haveLastSample = false;
+  Serial.print("imu_locked_addr=");
+  printHexByte(address);
+  Serial.print(" whoami=");
+  if (imuWhoamiOk) {
+    printHexByte(imuWhoami);
+    Serial.print(" whoami_label=");
+    Serial.print(whoamiLabel(imuWhoami));
+  } else {
+    Serial.print("NA");
+  }
+  Serial.print(" calibrating_for_s=");
+  Serial.println(IMU_CALIBRATION_SECONDS);
+  Serial.println("Hold the IMU STILL during calibration.");
+}
+
+void imuSample() {
+  if (!imuReadRaw()) {
+    return;
+  }
+  uint32_t nowMicros = micros();
+
+  // Magnitudes for motion/stationary diagnostics.
+  double ax = accelRawX / IMU_ACCEL_LSB_PER_G;
+  double ay = accelRawY / IMU_ACCEL_LSB_PER_G;
+  double az = accelRawZ / IMU_ACCEL_LSB_PER_G;
+  accelMagG = sqrt(ax * ax + ay * ay + az * az);
+
+  double gx = (gyroRawX - gyroBiasX) / IMU_GYRO_LSB_PER_DPS;
+  double gy = (gyroRawY - gyroBiasY) / IMU_GYRO_LSB_PER_DPS;
+  double gz = (gyroRawZ - gyroBiasZ) / IMU_GYRO_LSB_PER_DPS;
+  gyroMagDps = sqrt(gx * gx + gy * gy + gz * gz);
+
+  stationaryDetected =
+      (gyroMagDps < STATIONARY_GYRO_DPS) &&
+      (fabs(accelMagG - 1.0) < STATIONARY_ACCEL_G_TOL);
+  motionDetected = !stationaryDetected;
+
+  if (imuCalibrating) {
+    gyroSumX += gyroRawX;
+    gyroSumY += gyroRawY;
+    gyroSumZ += gyroRawZ;
+    calSampleCount++;
+    if (millis() - calStartMs >= (uint32_t)IMU_CALIBRATION_SECONDS * 1000UL &&
+        calSampleCount > 0) {
+      gyroBiasX = gyroSumX / calSampleCount;
+      gyroBiasY = gyroSumY / calSampleCount;
+      gyroBiasZ = gyroSumZ / calSampleCount;
+      imuCalibrating = false;
+      imuCalibrated = true;
+      Serial.print("imu_calibrated=true gyro_bias_x=");
+      Serial.print(gyroBiasX, 2);
+      Serial.print(" gyro_bias_y=");
+      Serial.print(gyroBiasY, 2);
+      Serial.print(" gyro_bias_z=");
+      Serial.println(gyroBiasZ, 2);
+    }
+  }
+
+#if IMU_YAW_DIAG
+  // Relative yaw integration (diagnostic only; drifts; not absolute heading).
+  if (imuCalibrated) {
+    if (haveLastSample) {
+      double dtS = (nowMicros - lastSampleMicros) / 1000000.0;
+      double rateDps = (gyroAxisRaw(IMU_YAW_AXIS) - gyroAxisBias(IMU_YAW_AXIS)) /
+                       IMU_GYRO_LSB_PER_DPS;
+      imuRelativeYawDeg = wrap180(imuRelativeYawDeg + (IMU_YAW_SIGN) * rateDps * dtS);
+    }
+    haveLastSample = true;
+  }
+#endif
+  lastSampleMicros = nowMicros;
+}
+
+void imuReport() {
+  Serial.print("imu_probe_alive=true sample_ms=");
+  Serial.print(millis());
+  Serial.print(" bus_state=RELEASED_HIGH i2c_addr=");
+  printHexByte(imuAddress);
+  Serial.print(" whoami=");
+  if (imuWhoamiOk) {
+    printHexByte(imuWhoami);
+  } else {
+    Serial.print("NA");
+  }
+  Serial.print(" whoami_label=");
+  Serial.print(imuWhoamiOk ? whoamiLabel(imuWhoami) : "NA");
+  Serial.print(" accel_raw_x=");
+  Serial.print(accelRawX);
+  Serial.print(" accel_raw_y=");
+  Serial.print(accelRawY);
+  Serial.print(" accel_raw_z=");
+  Serial.print(accelRawZ);
+  Serial.print(" gyro_raw_x=");
+  Serial.print(gyroRawX);
+  Serial.print(" gyro_raw_y=");
+  Serial.print(gyroRawY);
+  Serial.print(" gyro_raw_z=");
+  Serial.print(gyroRawZ);
+  Serial.print(" temp_raw=");
+  Serial.print(tempRaw);
+  Serial.print(" accel_mag_g=");
+  Serial.print(accelMagG, 3);
+  Serial.print(" gyro_mag_dps=");
+  Serial.print(gyroMagDps, 2);
+  Serial.print(" stationary_detected=");
+  Serial.print(stationaryDetected ? "true" : "false");
+  Serial.print(" motion_detected=");
+  Serial.print(motionDetected ? "true" : "false");
+  Serial.print(" imu_calibrated=");
+  Serial.print(imuCalibrated ? "true" : "false");
+  Serial.print(" gyro_bias_x=");
+  Serial.print(gyroBiasX, 2);
+  Serial.print(" gyro_bias_y=");
+  Serial.print(gyroBiasY, 2);
+  Serial.print(" gyro_bias_z=");
+  Serial.print(gyroBiasZ, 2);
+  Serial.print(" gyro_cal_x=");
+  Serial.print(gyroRawX - gyroBiasX, 1);
+  Serial.print(" gyro_cal_y=");
+  Serial.print(gyroRawY - gyroBiasY, 1);
+  Serial.print(" gyro_cal_z=");
+  Serial.print(gyroRawZ - gyroBiasZ, 1);
+#if IMU_YAW_DIAG
+  Serial.print(" imu_yaw_diag=true imu_relative_yaw_deg=");
+  Serial.print(imuRelativeYawDeg, 2);
+  Serial.print(" imu_yaw_axis=");
+  Serial.print(IMU_YAW_AXIS);
+  Serial.print(" imu_yaw_sign=");
+  Serial.print(IMU_YAW_SIGN);
+  Serial.print(" yaw_note=");
+  Serial.print(imuCalibrated ? "RELATIVE_DRIFTS_NOT_ABSOLUTE" : "WAITING_CALIBRATION");
+#else
+  Serial.print(" imu_yaw_diag=false");
+#endif
+  Serial.println();
+}
+#endif  // IMU_PROBE_CONTINUOUS
 
 void setup() {
   Serial.begin(USB_BAUD);
@@ -324,21 +508,29 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println("Firmware: imu_probe i2c-signal-validation 2026-05-30");
+  Serial.println("Firmware: imu_probe imu-motion-yaw-diagnostic 2026-06-03");
   Serial.println(
-      "Safe IMU/I2C probe. No motors, GPS, HC-12, RC, or autonomy are "
-      "initialized.");
+      "Safe IMU probe. No motors, GPS, HC-12, RC, or autonomy are initialized.");
   Serial.print("usb_baud=");
   Serial.println(USB_BAUD);
   Serial.print("scan_only=");
-  Serial.println(IMU_PROBE_SCAN_ONLY ? "true" : "false");
-  Serial.print("raw_read_enable=");
-  Serial.println(IMU_PROBE_RAW_ENABLE ? "true" : "false");
+  Serial.print(IMU_PROBE_SCAN_ONLY ? "true" : "false");
+  Serial.print(" raw_read_enable=");
+  Serial.print(IMU_PROBE_RAW_ENABLE ? "true" : "false");
+  Serial.print(" continuous_diag=");
+  Serial.println(IMU_PROBE_CONTINUOUS ? "true" : "false");
+  Serial.print("calibration_seconds=");
+  Serial.print(IMU_CALIBRATION_SECONDS);
+  Serial.print(" yaw_diag=");
+  Serial.print(IMU_YAW_DIAG ? "true" : "false");
+  Serial.print(" yaw_axis=");
+  Serial.print(IMU_YAW_AXIS);
+  Serial.print(" yaw_sign=");
+  Serial.println(IMU_YAW_SIGN);
   Serial.println(
-      "Expected fixed IMU wiring: SDA=D11/PA08, SCL=D12/PA09 (default Wire).");
-  Serial.println(
-      "WARNING: IMU heading/yaw is NOT trusted yet (needs calibration and "
-      "drift checks). This probe validates signal only.");
+      "WARNING: gyro yaw is RELATIVE and DRIFTS; it is not an absolute compass "
+      "heading. Absolute heading needs a GPS-course seed or magnetometer plus a "
+      "drift/agreement check. This probe is diagnostic only.");
 
   configurePinsAsInputs();
   printPinStates("pre_wire");
@@ -352,14 +544,45 @@ void setup() {
 #endif
   printPinStates("post_wire");
 
-  scanAndReport();
+  uint8_t firstMpu = scanAndReport();
   lastScanMs = millis();
+#if IMU_PROBE_CONTINUOUS
+  if (firstMpu != 0) {
+    imuLockOn(firstMpu);
+  }
+#else
+  (void)firstMpu;
+#endif
 }
 
 void loop() {
   uint32_t now = millis();
+
+#if IMU_PROBE_CONTINUOUS
+  if (imuAddress == 0) {
+    // Not locked yet: keep scanning until an MPU-class device appears.
+    if (now - lastScanMs >= SCAN_PERIOD_MS) {
+      uint8_t firstMpu = scanAndReport();
+      lastScanMs = now;
+      if (firstMpu != 0) {
+        imuLockOn(firstMpu);
+      }
+    }
+    return;
+  }
+  if (now - lastSampleMs >= SAMPLE_PERIOD_MS) {
+    imuSample();
+    lastSampleMs = now;
+  }
+  if (now - lastReportMs >= REPORT_PERIOD_MS) {
+    imuReport();
+    lastReportMs = now;
+  }
+#else
+  // Scanner-only / raw-disabled fallback: periodic scan + labels.
   if (now - lastScanMs >= SCAN_PERIOD_MS) {
     scanAndReport();
     lastScanMs = now;
   }
+#endif
 }

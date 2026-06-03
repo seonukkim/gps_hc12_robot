@@ -2,6 +2,51 @@
 #include <TinyGPS++.h>
 #include <math.h>
 
+// ---- IMU diagnostic integration (Task D) ----
+// Read-only IMU diagnostics on the Wire bus (D11 SDA / D12 SCL). Disabled by
+// default: with IMU_ENABLE=0 there is no Wire include, no IMU code, and the
+// default controller behaviour is unchanged. IMU yaw here is a RELATIVE,
+// drifting diagnostic and is never used to drive motors.
+#ifndef IMU_ENABLE
+#define IMU_ENABLE 0
+#endif
+#ifndef IMU_HEADING_DRYRUN
+#define IMU_HEADING_DRYRUN 0
+#endif
+#ifndef IMU_YAW_DIAG
+#define IMU_YAW_DIAG 0
+#endif
+#ifndef IMU_CALIBRATION_SECONDS
+#define IMU_CALIBRATION_SECONDS 5
+#endif
+#ifndef IMU_YAW_AXIS
+#define IMU_YAW_AXIS 2
+#endif
+#ifndef IMU_YAW_SIGN
+#define IMU_YAW_SIGN 1
+#endif
+#ifndef IMU_I2C_ADDR
+#define IMU_I2C_ADDR 0x69
+#endif
+#ifndef IMU_GYRO_LSB_PER_DPS
+#define IMU_GYRO_LSB_PER_DPS 131.0
+#endif
+#ifndef IMU_ACCEL_LSB_PER_G
+#define IMU_ACCEL_LSB_PER_G 16384.0
+#endif
+// HEADING_SOURCE_MODE: 0=GPS_COURSE (default/existing), 1=IMU_RELATIVE,
+// 2=GPS_COURSE_WITH_IMU_DIAG, 3=MOCK_HEADING, 4=FUSION_DIAG. Only GPS-course
+// modes (0/2) are approved to drive motors; the rest are diagnostic-only.
+#ifndef HEADING_SOURCE_MODE
+#define HEADING_SOURCE_MODE 0
+#endif
+#ifndef MOCK_HEADING_DEG
+#define MOCK_HEADING_DEG 0.0
+#endif
+#if IMU_ENABLE
+#include <Wire.h>
+#endif
+
 #ifndef FIXED_WIRING_GPS_SERIAL2_DIAG
 #define FIXED_WIRING_GPS_SERIAL2_DIAG 0
 #endif
@@ -1961,6 +2006,185 @@ void processHC12Line(const String &line) {
   }
 }
 
+// ===================== IMU diagnostic integration (Task D) =====================
+// Read-only IMU diagnostics. Compiled only when IMU_ENABLE=1. Never drives
+// motors. Gyro-integrated yaw is RELATIVE and DRIFTS (diagnostic, not a heading).
+#if IMU_ENABLE
+constexpr uint8_t  IMU_CTL_ADDR = IMU_I2C_ADDR;
+constexpr uint8_t  IMU_REG_WHO_AM_I = 0x75;
+constexpr uint8_t  IMU_REG_PWR_MGMT_1 = 0x6B;
+constexpr uint8_t  IMU_REG_ACCEL_XOUT_H = 0x3B;
+constexpr uint8_t  IMU_BURST_LEN = 14;
+constexpr double   IMU_GYRO_LSB_PER_DPS_VALUE = IMU_GYRO_LSB_PER_DPS;
+constexpr double   IMU_ACCEL_LSB_PER_G_VALUE = IMU_ACCEL_LSB_PER_G;
+constexpr uint8_t  IMU_YAW_AXIS_VALUE = IMU_YAW_AXIS;
+constexpr float    IMU_YAW_SIGN_VALUE = IMU_YAW_SIGN;
+constexpr uint32_t IMU_SAMPLE_PERIOD_MS = 20;
+constexpr uint32_t IMU_CAL_MS = static_cast<uint32_t>(IMU_CALIBRATION_SECONDS) * 1000UL;
+
+bool imuPresentFlag = false;
+bool imuWhoamiOkFlag = false;
+uint8_t imuWhoamiValue = 0;
+int16_t imuAccelRawX = 0, imuAccelRawY = 0, imuAccelRawZ = 0;
+int16_t imuGyroRawX = 0, imuGyroRawY = 0, imuGyroRawZ = 0;
+int16_t imuTempRaw = 0;
+double imuAccelMagG = 0.0, imuGyroMagDps = 0.0;
+bool imuStationaryFlag = false;
+bool imuCalibratingFlag = false;
+bool imuCalibratedFlag = false;
+uint32_t imuCalStartMs = 0;
+double imuGyroSumX = 0.0, imuGyroSumY = 0.0, imuGyroSumZ = 0.0;
+uint32_t imuCalCount = 0;
+double imuGyroBiasX = 0.0, imuGyroBiasY = 0.0, imuGyroBiasZ = 0.0;
+double imuRelativeYawDeg = 0.0;
+bool imuHaveLastSample = false;
+uint32_t imuLastSampleMicros = 0;
+uint32_t imuLastSampleMs = 0;
+const char *imuHeadingBlockReason = "INIT";
+
+double imuWrap180(double deg) {
+  while (deg > 180.0) deg -= 360.0;
+  while (deg < -180.0) deg += 360.0;
+  return deg;
+}
+
+bool imuCtlReadRegs(uint8_t reg, uint8_t *buf, uint8_t len) {
+  Wire.beginTransmission(IMU_CTL_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  uint8_t n = Wire.requestFrom(IMU_CTL_ADDR, len);
+  if (n != len) {
+    while (Wire.available()) Wire.read();
+    return false;
+  }
+  for (uint8_t i = 0; i < len; ++i) buf[i] = Wire.read();
+  return true;
+}
+
+bool imuCtlWriteReg(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(IMU_CTL_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+int16_t imuCtlBe16(uint8_t hi, uint8_t lo) {
+  return static_cast<int16_t>(static_cast<uint16_t>(hi) << 8 | lo);
+}
+
+int16_t imuGyroAxisRaw(uint8_t axis) {
+  return axis == 0 ? imuGyroRawX : (axis == 1 ? imuGyroRawY : imuGyroRawZ);
+}
+double imuGyroAxisBias(uint8_t axis) {
+  return axis == 0 ? imuGyroBiasX : (axis == 1 ? imuGyroBiasY : imuGyroBiasZ);
+}
+
+void imuControllerInit() {
+  Wire.begin();
+  Wire.setClock(100000);
+#if defined(WIRE_HAS_TIMEOUT)
+  Wire.setWireTimeout(25000, true);
+#endif
+  imuWhoamiOkFlag = imuCtlReadRegs(IMU_REG_WHO_AM_I, &imuWhoamiValue, 1);
+  imuPresentFlag = imuWhoamiOkFlag;  // present if it ACKs the WHO_AM_I read
+  if (imuPresentFlag) {
+    imuCtlWriteReg(IMU_REG_PWR_MGMT_1, 0x00);  // wake (clear SLEEP)
+    delay(10);
+    imuCalibratingFlag = true;
+    imuCalStartMs = millis();
+    imuHeadingBlockReason = "CALIBRATING";
+  } else {
+    imuHeadingBlockReason = "IMU_NOT_PRESENT";
+  }
+  Serial.print(F("imu_init imu_present="));
+  Serial.print(imuPresentFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_i2c_addr=0x"));
+  if (IMU_CTL_ADDR < 0x10) Serial.print('0');
+  Serial.print(IMU_CTL_ADDR, HEX);
+  Serial.print(F(" imu_whoami="));
+  if (imuWhoamiOkFlag) {
+    Serial.print(F("0x"));
+    if (imuWhoamiValue < 0x10) Serial.print('0');
+    Serial.print(imuWhoamiValue, HEX);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.println();
+}
+
+bool imuControllerReadRaw() {
+  uint8_t buf[IMU_BURST_LEN];
+  if (!imuCtlReadRegs(IMU_REG_ACCEL_XOUT_H, buf, IMU_BURST_LEN)) return false;
+  imuAccelRawX = imuCtlBe16(buf[0], buf[1]);
+  imuAccelRawY = imuCtlBe16(buf[2], buf[3]);
+  imuAccelRawZ = imuCtlBe16(buf[4], buf[5]);
+  imuTempRaw = imuCtlBe16(buf[6], buf[7]);
+  imuGyroRawX = imuCtlBe16(buf[8], buf[9]);
+  imuGyroRawY = imuCtlBe16(buf[10], buf[11]);
+  imuGyroRawZ = imuCtlBe16(buf[12], buf[13]);
+  return true;
+}
+
+// Read-only sampling: gyro-bias calibration, motion diagnostic, and relative-yaw
+// integration. Runs whenever IMU_ENABLE; it never affects motor output.
+void imuControllerUpdate(uint32_t now) {
+  if (!imuPresentFlag) {
+    imuHeadingBlockReason = "IMU_NOT_PRESENT";
+    return;
+  }
+  if (now - imuLastSampleMs < IMU_SAMPLE_PERIOD_MS) return;
+  imuLastSampleMs = now;
+  if (!imuControllerReadRaw()) {
+    imuHeadingBlockReason = "IMU_READ_FAILED";
+    return;
+  }
+  uint32_t nowMicros = micros();
+
+  double ax = imuAccelRawX / IMU_ACCEL_LSB_PER_G_VALUE;
+  double ay = imuAccelRawY / IMU_ACCEL_LSB_PER_G_VALUE;
+  double az = imuAccelRawZ / IMU_ACCEL_LSB_PER_G_VALUE;
+  imuAccelMagG = sqrt(ax * ax + ay * ay + az * az);
+  double gx = (imuGyroRawX - imuGyroBiasX) / IMU_GYRO_LSB_PER_DPS_VALUE;
+  double gy = (imuGyroRawY - imuGyroBiasY) / IMU_GYRO_LSB_PER_DPS_VALUE;
+  double gz = (imuGyroRawZ - imuGyroBiasZ) / IMU_GYRO_LSB_PER_DPS_VALUE;
+  imuGyroMagDps = sqrt(gx * gx + gy * gy + gz * gz);
+  imuStationaryFlag = (imuGyroMagDps < 2.0) && (fabs(imuAccelMagG - 1.0) < 0.12);
+
+  if (imuCalibratingFlag) {
+    imuGyroSumX += imuGyroRawX;
+    imuGyroSumY += imuGyroRawY;
+    imuGyroSumZ += imuGyroRawZ;
+    imuCalCount++;
+    if (now - imuCalStartMs >= IMU_CAL_MS && imuCalCount > 0) {
+      imuGyroBiasX = imuGyroSumX / imuCalCount;
+      imuGyroBiasY = imuGyroSumY / imuCalCount;
+      imuGyroBiasZ = imuGyroSumZ / imuCalCount;
+      imuCalibratingFlag = false;
+      imuCalibratedFlag = true;
+    }
+    imuHeadingBlockReason = "CALIBRATING";
+  }
+
+  if (imuCalibratedFlag) {
+    if (imuHaveLastSample) {
+      double dtS = (nowMicros - imuLastSampleMicros) / 1000000.0;
+      double rate = (imuGyroAxisRaw(IMU_YAW_AXIS_VALUE) - imuGyroAxisBias(IMU_YAW_AXIS_VALUE)) /
+                    IMU_GYRO_LSB_PER_DPS_VALUE;
+      imuRelativeYawDeg = imuWrap180(imuRelativeYawDeg + IMU_YAW_SIGN_VALUE * rate * dtS);
+    }
+    imuHaveLastSample = true;
+    imuHeadingBlockReason = "RELATIVE_YAW_DIAG_ONLY";
+  }
+  imuLastSampleMicros = nowMicros;
+}
+
+// imu_heading_ready means the relative-yaw diagnostic is producing values. It is
+// NOT an absolute heading and is NOT approved to drive motors.
+bool imuHeadingReady() { return imuPresentFlag && imuCalibratedFlag; }
+#endif  // IMU_ENABLE
+
 // ============== Path-following dry-run + guarded execution (Tasks E/F/G) ==============
 // Compiled only when PATH_FOLLOWING_DRYRUN=1. Self-contained and motor-safe by
 // default: physical output is impossible unless PATH_FOLLOWING_PHYSICAL_COMPILE_GATE
@@ -2039,6 +2263,27 @@ float pfDesiredLogicalRightCmd = 0.0f;
 float pfDesiredPhysicalACmd = 0.0f;
 float pfDesiredPhysicalBCmd = 0.0f;
 const char *pfBlockReason = "MODE_OFF";
+
+const char *headingSourceModeName() {
+  switch (HEADING_SOURCE_MODE) {
+    case 1: return "IMU_RELATIVE";
+    case 2: return "GPS_COURSE_WITH_IMU_DIAG";
+    case 3: return "MOCK_HEADING";
+    case 4: return "FUSION_DIAG";
+    default: return "GPS_COURSE";
+  }
+}
+// Only GPS-course-based heading is approved to drive motors; IMU/MOCK/FUSION are
+// diagnostic-only. This keeps physical motion tied to GPS course-over-ground.
+constexpr bool PF_HEADING_SOURCE_APPROVED_FOR_MOTION =
+    (HEADING_SOURCE_MODE == 0) || (HEADING_SOURCE_MODE == 2);
+#if IMU_ENABLE
+double pfHeadingAgreementErrorDeg = 0.0;
+const char *pfHeadingAgreementDiag = "NA";
+bool pfHeadingSeedValid = false;
+double pfHeadingSeedGpsCourse = 0.0;
+double pfHeadingSeedImuYaw = 0.0;
+#endif
 
 bool pfNeutralOkFlag = false;
 bool pfAutoTimingActive = false;
@@ -2288,6 +2533,30 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
     }
   }
 
+#if IMU_ENABLE
+  // GPS-course vs IMU-yaw seeded delta comparison (diagnostic only; never drives
+  // motors). IMU yaw is relative, so we compare CHANGE in GPS course against
+  // CHANGE in IMU yaw since the first moment both were available.
+  if (pfHeadingReadyFlag && imuHeadingReady()) {
+    if (!pfHeadingSeedValid) {
+      pfHeadingSeedValid = true;
+      pfHeadingSeedGpsCourse = pfEstimatedCourseDeg;
+      pfHeadingSeedImuYaw = imuRelativeYawDeg;
+      pfHeadingAgreementErrorDeg = 0.0;
+      pfHeadingAgreementDiag = "SEEDED";
+    } else {
+      double gpsDelta = normalizeBearingErrorDegrees(pfEstimatedCourseDeg - pfHeadingSeedGpsCourse);
+      double imuDelta = normalizeBearingErrorDegrees(imuRelativeYawDeg - pfHeadingSeedImuYaw);
+      pfHeadingAgreementErrorDeg = normalizeBearingErrorDegrees(gpsDelta - imuDelta);
+      pfHeadingAgreementDiag = "SEEDED_DELTA_COMPARE";
+    }
+  } else if (!imuHeadingReady()) {
+    pfHeadingAgreementDiag = "IMU_NOT_READY";
+  } else {
+    pfHeadingAgreementDiag = "WAITING_GPS_COURSE";
+  }
+#endif
+
   bool autoActive = rcValid && autoSwitchOn && !rcManualActive;
   if (rcManualActive) {
     pfLatchedStopFlag = false;  // latch clears only on MANUAL
@@ -2327,6 +2596,10 @@ bool pfHc12TargetFreshIfUsed() {
 const char *pathFollowingPhysicalBlockReason(bool rcValid, bool autoSwitchOn, bool rcManualActive) {
   if (!PATH_FOLLOWING_PHYSICAL_COMPILE_GATE) {
     return "COMPILE_GATE_OFF";
+  }
+  if (!PF_HEADING_SOURCE_APPROVED_FOR_MOTION) {
+    // IMU_RELATIVE / MOCK_HEADING / FUSION_DIAG are diagnostic-only.
+    return "HEADING_SOURCE_NOT_APPROVED_FOR_MOTION";
   }
   if (!PATH_FOLLOWING_MODE_CHANNEL_STABLE_ACK) {
     return "MODE_CHANNEL_NOT_STABLE";
@@ -2521,6 +2794,74 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
   Serial.print(pfHc12TargetValid ? F("true") : F("false"));
   Serial.print(F(" hc12_estop="));
   Serial.print(pfHc12Estop ? F("true") : F("false"));
+  Serial.print(F(" hc12_enabled="));
+  Serial.print(PATH_FOLLOWING_HC12_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" hc12_port="));
+  Serial.print(PF_HC12_PORT_NAME);
+
+  Serial.print(F(" heading_source="));
+  Serial.print(headingSourceModeName());
+#if IMU_ENABLE
+  Serial.print(F(" imu_enabled=true imu_present="));
+  Serial.print(imuPresentFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_i2c_addr=0x"));
+  if (IMU_CTL_ADDR < 0x10) Serial.print('0');
+  Serial.print(IMU_CTL_ADDR, HEX);
+  Serial.print(F(" imu_whoami="));
+  if (imuWhoamiOkFlag) {
+    Serial.print(F("0x"));
+    if (imuWhoamiValue < 0x10) Serial.print('0');
+    Serial.print(imuWhoamiValue, HEX);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" imu_calibrated="));
+  Serial.print(imuCalibratedFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_gyro_bias_x="));
+  Serial.print(imuGyroBiasX, 2);
+  Serial.print(F(" imu_gyro_bias_y="));
+  Serial.print(imuGyroBiasY, 2);
+  Serial.print(F(" imu_gyro_bias_z="));
+  Serial.print(imuGyroBiasZ, 2);
+  Serial.print(F(" imu_gyro_cal_x="));
+  Serial.print(imuGyroRawX - imuGyroBiasX, 1);
+  Serial.print(F(" imu_gyro_cal_y="));
+  Serial.print(imuGyroRawY - imuGyroBiasY, 1);
+  Serial.print(F(" imu_gyro_cal_z="));
+  Serial.print(imuGyroRawZ - imuGyroBiasZ, 1);
+  Serial.print(F(" imu_accel_mag_g="));
+  Serial.print(imuAccelMagG, 3);
+  Serial.print(F(" imu_gyro_mag_dps="));
+  Serial.print(imuGyroMagDps, 2);
+  Serial.print(F(" imu_stationary="));
+  Serial.print(imuStationaryFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_relative_yaw_deg="));
+  Serial.print(imuRelativeYawDeg, 2);
+  Serial.print(F(" imu_yaw_axis="));
+  Serial.print(IMU_YAW_AXIS_VALUE);
+  Serial.print(F(" imu_yaw_sign="));
+  Serial.print(static_cast<int>(IMU_YAW_SIGN_VALUE));
+  Serial.print(F(" imu_heading_ready="));
+  Serial.print(imuHeadingReady() ? F("true") : F("false"));
+  Serial.print(F(" imu_heading_block_reason="));
+  Serial.print(imuHeadingBlockReason);
+  Serial.print(F(" gps_course_deg="));
+  if (pfHeadingReadyFlag) {
+    Serial.print(pfEstimatedCourseDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" heading_agreement_diag="));
+  Serial.print(pfHeadingAgreementDiag);
+  Serial.print(F(" heading_agreement_error_deg="));
+  if (pfHeadingSeedValid) {
+    Serial.print(pfHeadingAgreementErrorDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+#else
+  Serial.print(F(" imu_enabled=false"));
+#endif
   Serial.println();
 }
 #endif  // PATH_FOLLOWING_DRYRUN
@@ -2544,6 +2885,9 @@ void setup() {
   Serial.print("Firmware: ");
   Serial.println(FIRMWARE_ID);
   Serial.println("OpenRB robot controller starting.");
+#if IMU_ENABLE
+  imuControllerInit();
+#endif
 #if MOTOR_PULSE_TEST_MODE
   Serial.println("MOTOR_PULSE_TEST_MODE enabled.");
   Serial.println("HC-12 link is disabled/ignored.");
@@ -2638,6 +2982,9 @@ void loop() {
   readRcChannels(steeringUs, throttleUs, modeUs);
 
   uint32_t now = millis();
+#if IMU_ENABLE
+  imuControllerUpdate(now);  // read-only IMU diagnostics; never affects motors
+#endif
   bool rcValid = rcChannelsValid(steeringUs, throttleUs, modeUs);
   bool autoSwitchOn = rcAutoSwitchOn(modeUs);
   bool stationManualFresh = stationManualValid();

@@ -9,6 +9,35 @@
 > Wiring Plan: GPS cannot be moved, HC-12 cannot be moved, and the current
 > wiring must be audited.
 
+## Circuit Rebuild Root Cause (2026-06-03)
+
+After meeting the director, the previous board/circuit was found to have
+wiring/circuit issues. The circuit was rebuilt on a breadboard, and:
+
+- HC-12 now works and connects to the computer/station successfully.
+- The IMU now works and is detected reliably.
+- Therefore the earlier IMU and HC-12 failures were most likely caused by the
+  old circuit/wiring, not by the OpenRB-150 board or the firmware/code.
+
+What this changes:
+
+- GPS stays on `Serial2`. HC-12 must be on `Serial3` or `Serial1` (not
+  `Serial2`); path-following builds reject HC-12 on `Serial2` at compile time.
+- Physical path planning is now plausible, but outdoor validation is still
+  required first (GPS fix + course-over-ground, IMU yaw drift check, and a
+  GPS-course-vs-IMU-yaw agreement comparison). See
+  `docs/outdoor_validation_checklist.md`.
+- Priority is physical path planning / path-following validation and the safe
+  firmware dry-run. UI and ROS2 are optional. Do not over-prioritize ROS2: the
+  director plans to try ViAM over the summer, which may replace or reduce the
+  value of a ROS2 integration. Keep core firmware/station tooling ROS2-independent.
+- Physical motor execution remains disabled by default (all four
+  path-following motion gates plus the mode-channel acknowledgement default to
+  `0`). IMU yaw is diagnostic-only and is never used to drive motors.
+
+IMU candidate (unchanged): I2C `~0x69`, WHO_AM_I observed `0x6F`; treat as an
+MPU/ICM register-map-compatible clone/variant until proven otherwise.
+
 ## Breadboard Development Status (2026-05-30)
 
 A breadboard rig (no rover chassis, no motors) is used for safe indoor

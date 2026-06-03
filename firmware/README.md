@@ -975,12 +975,43 @@ Override the compile-time path or mock position, e.g.
 `-DPATH_FOLLOWING_WP1_LAT=... -DPATH_FOLLOWING_WP1_LON=...` (WP1..WP3,
 `PATH_FOLLOWING_WP_COUNT`) and `-DPATH_FOLLOWING_MOCK_CURRENT_LAT=... -DPATH_FOLLOWING_MOCK_CURRENT_LON=...`.
 
+#### IMU diagnostic integration in the dry-run (`IMU_ENABLE=1`)
+
+The controller can read the IMU (read-only, on the Wire bus) alongside the
+path-following dry-run. It is fully gated by `IMU_ENABLE` (default `0`): with
+`IMU_ENABLE=0` there is no Wire include, no IMU code, and the default controller
+is byte-for-byte unchanged. With `IMU_ENABLE=1` (`IMU_HEADING_DRYRUN=1`,
+`IMU_YAW_DIAG=1`) the dry-run also prints `imu_enabled`, `imu_present`,
+`imu_i2c_addr`, `imu_whoami`, `imu_calibrated`, `imu_gyro_bias_x/y/z`,
+`imu_gyro_cal_x/y/z`, `imu_accel_mag_g`, `imu_gyro_mag_dps`, `imu_stationary`,
+`imu_relative_yaw_deg`, `imu_yaw_axis`, `imu_yaw_sign`, `imu_heading_ready`, and
+`imu_heading_block_reason`. When GPS course and IMU yaw are both available it
+prints a seeded delta comparison: `gps_course_deg`, `heading_source`,
+`heading_agreement_diag`, `heading_agreement_error_deg` (the change in GPS course
+minus the change in IMU yaw since the first moment both were ready).
+
+`HEADING_SOURCE_MODE` selects the heading intent: `0`=GPS_COURSE (default),
+`1`=IMU_RELATIVE, `2`=GPS_COURSE_WITH_IMU_DIAG, `3`=MOCK_HEADING, `4`=FUSION_DIAG.
+**Only GPS-course modes (0/2) are approved to drive motors**; the others report
+`physical_block_reason=HEADING_SOURCE_NOT_APPROVED_FOR_MOTION`. IMU yaw is never
+used for motor output. The IMU heading reality check applies: gyro yaw is relative
+and drifts and must be compared against GPS course-over-ground outdoors before it
+is trusted.
+
+Integrated GPS + IMU + HC-12 dry-run (no motor output; HC-12 on Serial3):
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && mkdir -p outputs/logs && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-integrated --build-property 'compiler.cpp.extra_flags=-DPATH_FOLLOWING_DRYRUN=1 -DIMU_ENABLE=1 -DIMU_HEADING_DRYRUN=1 -DIMU_YAW_DIAG=1 -DHEADING_SOURCE_MODE=2 -DPHYSICAL_PATH_FOLLOWING_ENABLE=0 -DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 -DPATH_FOLLOWING_HC12_SERIAL_PORT=3' firmware/openrb_robot_controller && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-controller-integrated firmware/openrb_robot_controller && sleep 2 && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli monitor -p "$PORT" --config baudrate=115200 | tee outputs/logs/integrated_dryrun_$(date +%Y%m%d_%H%M%S).log
+```
+
 Physical path following is **not approved**. Do not set the four motion gates or
 `PATH_FOLLOWING_MODE_CHANNEL_STABLE=1` until the RC/PPM Manual/Auto channel holds
-HIGH reliably (current blocker) and an IMU/GPS heading source is validated. Even
-then, motion is wheel-off-ground / open-area-with-kill-switch only.
+HIGH reliably (current blocker) and a heading source is validated (GPS course, or
+IMU yaw only after the outdoor GPS-vs-IMU agreement check). Even then, motion is
+wheel-off-ground / open-area-with-kill-switch only. See
+[`docs/outdoor_validation_checklist.md`](../docs/outdoor_validation_checklist.md).
 
-## IMU Probe (I2C signal validation only)
+## IMU Probe (signal + motion + relative-yaw diagnostics)
 
 Use this standalone sketch to check whether an IMU is electrically present and
 *readable* on the OpenRB default `Wire` I2C bus. It is the richer successor to
@@ -1046,12 +1077,35 @@ it and reads raw accel/gyro/temp. Treat this as **signal validation only**: do
 not assume a specific datasheet, scale factor, or trusted yaw/heading from it. The
 rover-mounted IMU may be different or faulty and must be validated separately.
 
+Beyond the scan, the default build now locks onto the first MPU-class device and
+runs continuous diagnostics: it prints `accel_raw_*`, `gyro_raw_*`, `temp_raw`,
+`accel_mag_g`, `gyro_mag_dps`, `stationary_detected`/`motion_detected`, a
+stationary gyro-bias calibration (`imu_calibrated`, `gyro_bias_x/y/z`,
+`gyro_cal_x/y/z`), and `sample_ms`. With `IMU_YAW_DIAG=1` it integrates a chosen
+gyro axis into `imu_relative_yaw_deg` (reset to 0 at start), printing
+`imu_yaw_axis`/`imu_yaw_sign`.
+
+Heading reality check (printed as a warning by the probe): gyro-integrated yaw is
+**relative and drifts**; it is NOT an absolute compass heading. An absolute
+heading needs a GPS course-over-ground seed, a magnetometer, or another reference,
+plus calibration and a drift/agreement check. Use this probe only to (1) confirm
+raw signal, (2) estimate gyro bias, (3) find the yaw axis/sign, (4) watch
+relative-yaw drift while stationary — so it can be compared to GPS
+course-over-ground outdoors later.
+
 Compile-time options:
 
 - `IMU_PROBE_SCAN_ONLY` (default `0`): generic I2C scanner + labels only, no
-  register access — the simplest, fully read-only mode (requirement 5).
-- `IMU_PROBE_RAW_ENABLE` (default `1`): when not scan-only, set `0` to stay
-  read-only and report `WHO_AM_I` only (no wake / no raw reads).
+  register access — the simplest, fully read-only mode.
+- `IMU_PROBE_RAW_ENABLE` (default `1`): set `0` to stay read-only (`WHO_AM_I`
+  only, no wake/raw, no continuous diagnostics).
+- `IMU_CALIBRATION_SECONDS` (default `5`): stationary gyro-bias window. Hold the
+  IMU still during this window after boot.
+- `IMU_YAW_DIAG` (default `0`): set `1` to integrate relative yaw.
+- `IMU_YAW_AXIS` (default `2` = Z) and `IMU_YAW_SIGN` (default `1`): select the
+  gyro axis/sign used for yaw integration.
+- `IMU_GYRO_LSB_PER_DPS` (default `131.0`) / `IMU_ACCEL_LSB_PER_G` (default
+  `16384.0`): MPU default scales; adjust if the device differs.
 
 Compile (macOS + OpenRB-150):
 
@@ -1088,6 +1142,17 @@ Scan + `WHO_AM_I` only, no wake / no raw reads:
 ```bash
 arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-probe-rawoff --build-property 'compiler.cpp.extra_flags=-DIMU_PROBE_RAW_ENABLE=0' firmware/imu_probe
 ```
+
+Relative-yaw diagnostic build (configurable axis/sign) — compile + upload + monitor:
+
+```bash
+cd ~/Desktop/project-lab/gps_hc12_robot && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && mkdir -p outputs/logs && arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-yaw --build-property 'compiler.cpp.extra_flags=-DIMU_YAW_DIAG=1 -DIMU_YAW_AXIS=2 -DIMU_YAW_SIGN=1 -DIMU_CALIBRATION_SECONDS=5' firmware/imu_probe && arduino-cli upload -p "$PORT" --fqbn OpenRB-150:samd:OpenRB-150 --build-path /private/tmp/openrb-imu-yaw firmware/imu_probe && sleep 2 && PORT=$(arduino-cli board list | awk '/OpenRB-150/ {print $1; exit}') && arduino-cli monitor -p "$PORT" --config baudrate=115200 | tee outputs/logs/imu_yaw_$(date +%Y%m%d_%H%M%S).log
+```
+
+Yaw-axis/sign procedure: hold still ~5 s (calibration) → rotate the board +90°
+clockwise (yaw). Pick `IMU_YAW_AXIS` as the gyro axis that responds most to yaw,
+and set `IMU_YAW_SIGN` so a clockwise turn increases `imu_relative_yaw_deg`. Then
+confirm drift while stationary is small over ~30–60 s before trusting any delta.
 
 Physical movements to try while monitoring (validate raw signal, not heading):
 

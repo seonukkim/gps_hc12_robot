@@ -520,8 +520,14 @@ motors and no rover chassis. Full details and exact commands are in
 [`firmware/README.md`](firmware/README.md) ("Breadboard Navigation Development
 Stack"). Summary:
 
-- IMU signal check: `firmware/imu_probe` (detected at I2C `0x69`, `whoami=0x6F`,
-  signal-only; yaw/heading not trusted yet).
+- IMU diagnostics: `firmware/imu_probe` (detected at I2C `0x69`, `whoami=0x6F`).
+  Now does gyro-bias calibration, motion detection, and relative-yaw integration
+  (`IMU_YAW_DIAG=1`, configurable axis/sign). Gyro yaw is relative and drifts; it
+  is diagnostic-only and not a compass heading.
+- Integrated GPS + IMU + HC-12 dry-run: `firmware/openrb_robot_controller` with
+  `-DPATH_FOLLOWING_DRYRUN=1 -DIMU_ENABLE=1 -DIMU_HEADING_DRYRUN=1` (HC-12 on
+  Serial3) prints path-following + IMU yaw + a GPS-course-vs-IMU-yaw comparison,
+  with motors disabled. `IMU_ENABLE=0` keeps the default build unchanged.
 - HC-12 link check: `firmware/hc12_link_probe` (firmware) + `tools/hc12_link_probe.py`
   (station). Motor-free PING/PONG; never sends motor commands.
 - GPS check: `firmware/gps_uart_probe` (keeps printing `gps_block_reason` and raw
