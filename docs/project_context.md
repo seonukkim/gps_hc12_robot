@@ -16,7 +16,13 @@ Implemented and recently verified:
 - OpenRB firmware parsing for heartbeat, STOP, MANUAL, AUTO/START, GPS, status,
   ACK, and ERR frames.
 - Rover-side STOP/failsafe behavior and neutral startup.
-- GPS reading on rover `Serial3` and USB debug GPS fields.
+- GPS reading on rover GPS UART (physically `Serial2`, center 5-pin connector;
+  the legacy default build's `Serial3` reads nothing) and USB debug GPS fields.
+- Long-antenna GPS `Serial2@9600` outdoor validation with `STABLE_FIX`,
+  `gps_block_reason=OK`, satellites present, HDOP reasonable, and lat/lon present.
+- BMI160 IMU detection and normal-mode integrated diagnostics at I2C `0x68`
+  (`chip_id=0xD1`, PMU normal, plausible accel/gyro values).
+- Integrated no-motion rover build with physical motor output compile-gated off.
 - Offline/mock A/B lawnmower path generation.
 - Path preview and mock mission JSON/CSV/summary generation.
 - Python tests for protocol, geodesy, and planner behavior.
@@ -28,7 +34,7 @@ Not implemented yet:
 - mission approval state machine
 - autonomous path execution
 - closed-loop waypoint following
-- heading fusion from GPS plus BMI160 IMU
+- trusted heading fusion from GPS plus BMI160 IMU for motion control
 - ROS2 runtime bridge or planner behavior
 - micro-ROS on the rover
 
@@ -60,8 +66,15 @@ The rover should never move simply because the station generated a path.
 Known assumptions:
 
 - Rover: OpenRB-150.
-- Rover HC-12: `Serial2`, `9600`.
-- Rover GPS: `Serial3`, `9600`.
+- Rover HC-12: legacy default uses `Serial2`; diagnostics/dry-run move HC-12 to
+  `Serial3`/`Serial1` so GPS keeps `Serial2`. Current no-motion integrated
+  controller selects HC-12 on `Serial3`, but RF link is deferred/unproven.
+- Rover GPS: physically `Serial2`, `9600` (center 5-pin connector, known-good).
+  Only the legacy default build defines `GPS_SERIAL=Serial3` (reads nothing);
+  do not assume GPS is on Serial3 `D13`/`D14` unless explicitly rewired.
+- Rover IMU: BMI160 on `Wire` (`D11` SDA / `D12` SCL), detected at `0x68`;
+  the legacy `firmware/imu_probe` is MPU/ICM-only and is not a BMI160 health
+  check.
 - Rover USB debug: `115200`.
 - Station HC-12 USB default: `/dev/ttyACM0`, `9600`, with `--port` exposed.
 - RC PPM input: OpenRB `D6`.
@@ -104,8 +117,11 @@ The next development objective is remote station-side operation:
 
 ## Development Boundary
 
-Do not implement autonomy yet. The immediate work is documentation, stable
-protocol, station dry-run workflow, telemetry schema cleanup, and logs.
+Do not implement physical autonomy yet. The immediate work is documentation,
+stable protocol, station dry-run workflow, telemetry schema cleanup, sensor
+diagnostics, and logs. Any integrated validation must keep
+`PHYSICAL_PATH_FOLLOWING_ENABLE=0` and `PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0`
+unless the user explicitly requests a separate motion test.
 
 ROS2 may be useful later on the station side, but it should not be introduced
 until the simple HC-12 protocol and station workflow are stable. micro-ROS should

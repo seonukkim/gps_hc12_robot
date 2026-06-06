@@ -32,23 +32,20 @@ Rover responsibilities:
 ## Current Hardware Assumptions
 
 - Rover controller: OpenRB-150.
-- Current integrated controller HC-12 rover UART: `Serial2`, `9600` baud.
-- Current integrated controller GPS rover UART: `Serial3`, `9600` baud.
-- Current GPS probe result: central OpenRB connector works as `Serial2`,
-  `9600` baud, with readable NMEA and GPS fix.
-- Current architecture issue: the confirmed physical GPS path and integrated
-  HC-12 path both point at `Serial2`.
-- Previous Option A and Option B rewiring plans are superseded by the Fixed
-  Wiring Plan.
-- Fixed Wiring Plan: GPS cannot be moved, HC-12 cannot be moved, and the rover
-  must proceed with the current physical wiring.
-- GPS must stay on the current central OpenRB connector and is confirmed as
-  `Serial2` at `9600`.
-- HC-12 appears to be mounted under or behind the OpenRB board; its current
-  UART wiring must be audited before assuming it shares or does not share
-  `Serial2`.
-- Purple module appears to be an IMU on an I2C-style connection; do not treat
-  it as UART.
+- Legacy default `openrb_robot_controller` build: HC-12 on `Serial2`, and
+  `GPS_SERIAL=Serial3` (where it reads nothing — `gps_chars=0` is expected there).
+- GPS is physically on the **center 5-pin connector = `Serial2`, `9600`**
+  (known-good). Long-antenna outdoor probing reached `STABLE_FIX` with
+  `gps_block_reason=OK`.
+- The integrated no-motion build reads GPS on `Serial2` and selects HC-12 on
+  `Serial3`; GPS and HC-12 do not collide in that build. The HC-12 RF link is
+  still unproven and should be documented as `HC12_DEFERRED_RF_LINK`, not failed.
+- The legacy default build still has a `Serial2`/`Serial3` mismatch relative to
+  the current GPS wiring; use the no-motion dry-run build for combined sensor
+  validation.
+- IMU is a BMI160 on `Wire` (`D11` SDA / `D12` SCL), detected at address `0x68`
+  with `chip_id=0xD1`. The legacy MPU/ICM-only `firmware/imu_probe` is not a
+  valid BMI160 health check.
 - OpenRB USB debug: `115200` baud.
 - Station serial default: `/dev/ttyACM0`, override with `--port`.
 - RC receiver PPM input: OpenRB `D6`.
@@ -58,20 +55,20 @@ Rover responsibilities:
 Do not change pin mappings, serial ports, or channel assumptions without
 updating `docs/rc_channel_map.md`, `docs/manual_control.md`, and this document.
 
-UART decision table:
+Current no-motion validation boundary:
 
-| Current HC-12 wiring audit result | Decision |
-|---|---|
-| HC-12 is independent from GPS `Serial2` | Proceed with integrated GPS on `Serial2` plus HC-12 telemetry after diagnostics confirm both paths can coexist. |
-| HC-12 shares GPS `Serial2` | Do not use GPS and HC-12 simultaneously. Use USB/onboard mission flow for GPS-dependent work and mark HC-12 operation blocked by fixed hardware. |
+- `PHYSICAL_PATH_FOLLOWING_ENABLE=0`
+- `PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0`
+- expected USBDBG safety: `physical_block_reason=COMPILE_GATE_OFF`,
+  `physical_output_active=false`, `final_left_cmd=0.000`, `final_right_cmd=0.000`
 
 Next milestone:
 
-- Add an integrated GPS `Serial2` diagnostic firmware mode.
-- Audit current HC-12 wiring from code and non-motion diagnostics.
-- Run receive-only station telemetry testing only if it is safe and cannot
-  weaken STOP, heartbeat, failsafe, manual override, or RC safety.
-- Continue station-side path planning as dry-run only.
+- Outdoor integrated no-motion baseline with long-antenna GPS, BMI160, RC
+  transmitter on, and HC-12 on `Serial3`.
+- Hand-carry heading/course diagnostic; no physical path following.
+- Separate HC-12 station/RF check with PASS/FAIL split between station adapter,
+  station TX, OpenRB Serial3 config, RF RX, and parse success.
 
 ## Implemented Components
 

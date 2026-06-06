@@ -1,5 +1,84 @@
 # Current Hardware Status
 
+## No-Motion Sensor / Communication Baseline (2026-06-06)
+
+This is the current authoritative status for the recovered OpenRB-150 rover
+bring-up. Older sections below are preserved as history, but any earlier
+`NO_LOCATION`, `IMU_NOT_MPU_CLASS_DETECTED`, or GPS pin-activity blocker notes
+are superseded when they contradict this baseline.
+
+### GPS
+
+- Validated configuration: long-antenna GPS on the OpenRB center 5-pin connector.
+- Firmware UART: `Serial2` at `9600`.
+- Outdoor `firmware/gps_uart_probe` reached stable GPS fix:
+  - `gps_probe_state=STABLE_FIX`
+  - `current_valid_fix=true`
+  - `gps_block_reason=OK`
+  - `sats=6`
+  - `hdop≈3.72`
+  - latitude/longitude present
+- Indoor integrated no-motion dry-run may still print `gps_block_reason=NO_LOCATION`.
+  Treat that as expected indoor reception loss, not a regression in UART wiring
+  or firmware.
+
+### BMI160 IMU
+
+- Current IMU type: Bosch BMI160 at I2C address `0x68`.
+- Standalone BMI160 normal-mode probe passed:
+  - `chip_id=0xD1`
+  - `accel_pmu=NORMAL`
+  - `gyro_pmu=NORMAL`
+  - `accel_mag_g≈1.01`
+  - low stationary `gyro_mag_dps`
+  - `bmi160_normal_probe_pass=true`
+- Integrated `openrb_robot_controller` no-motion build now reports:
+  - `imu_type=BMI160`
+  - `imu_present=true`
+  - `imu_i2c_addr=0x68`
+  - `imu_chip_id=0xD1`
+  - `imu_pmu_normal=true`
+  - `imu_data_plausible=true`
+  - `imu_heading_ready=true`
+- `firmware/imu_probe` is a legacy MPU/ICM register-map probe. It reads
+  `WHO_AM_I` at `0x75` and MPU-style data registers, so it must not be used to
+  judge BMI160 health. Use `firmware/imu_bmi160_probe`,
+  `firmware/imu_bmi160_normal_probe`, or the integrated BMI160 USBDBG fields.
+
+### HC-12
+
+- Mac CP2104 station adapter has been seen as `/dev/cu.usbserial-02442CA5`.
+- Integrated no-motion controller is configured for HC-12 on `Serial3`:
+  - `hc12_enabled=true`
+  - `hc12_port=Serial3`
+  - `hc12_pf_port=Serial3`
+- Current integrated logs still show no proven RF link:
+  - `hc12_rx_count=0`
+  - `hc12_tx_count=0`
+  - `hc12_parse_ok=false`
+  - `hc12_last_cmd=NONE`
+- Status: `HC12_DEFERRED_RF_LINK`, not failed. This does not block GPS/BMI160
+  no-motion validation unless a real pin, power, or UART conflict is discovered.
+
+### Motor Safety And RC
+
+- Integrated no-motion logs must remain:
+  - `physical_block_reason=COMPILE_GATE_OFF`
+  - `physical_output_active=false`
+  - `final_left_cmd=0.000`
+  - `final_right_cmd=0.000`
+- Physical driving is prohibited in this baseline.
+- Current indoor integrated run can show `rc_ok=false` / `FAILSAFE` when the RC
+  transmitter is off. Recheck RC/manual outdoors with the transmitter powered on.
+
+### Next Outdoor Steps
+
+1. Run integrated no-motion baseline with the long-antenna GPS outdoors.
+2. Hand-carry the rover to validate GPS course / BMI160 heading diagnostics.
+3. Recheck RC MANUAL/AUTO with the transmitter on.
+4. Run HC-12 station/RF checks separately; do not treat RF absence as a
+   GPS/BMI160 failure.
+
 > 2026-05-27 note: GPS UART receive is now confirmed on `Serial2` at `9600`
 > with the GPS connected to the central OpenRB connector. The earlier `Serial3`
 > `D13` / `D14` checks failed because the current wiring is not on those pins.
@@ -35,8 +114,9 @@ What this changes:
   path-following motion gates plus the mode-channel acknowledgement default to
   `0`). IMU yaw is diagnostic-only and is never used to drive motors.
 
-IMU candidate (unchanged): I2C `~0x69`, WHO_AM_I observed `0x6F`; treat as an
-MPU/ICM register-map-compatible clone/variant until proven otherwise.
+Historical IMU note: older MPU/ICM-style probing saw I2C `~0x69` and
+`WHO_AM_I=0x6F`. That was superseded by BMI160-specific probing; the current
+integrated IMU is BMI160 at `0x68` with `chip_id=0xD1`.
 
 ## HC-12 Mac temporary station validation: DEFERRED (2026-06-03)
 
@@ -69,7 +149,127 @@ Required follow-up (do not delete the HC-12 tools):
 See `docs/outdoor_validation_checklist.md` (Stage G) for the Ubuntu-station HC-12
 re-validation, and the section below for the in-place diagnosis procedure.
 
-## IMU indoor status: BLOCKED (2026-06-03, IMU_NOT_MPU_CLASS_DETECTED)
+## GPS UART correction: center 5-pin connector = Serial2 @ 9600 (2026-06-03)
+
+The GPS is physically wired to the OpenRB-150 **center 5-pin connector area**,
+which is **Serial2 at 9600** — as the user wired it and as old known-good logs
+prove. It is **NOT** on the side expansion pins Serial3 `D13`/`D14`.
+
+Known-good GPS baseline (Serial2 @ 9600):
+
+```text
+selected_port=Serial2
+chars_1s ~ 500
+fix=true
+sats ~ 5
+hdop ~ 1.6
+```
+
+Recent failing logs were a **wrong-UART assumption**, not a GPS module failure:
+
+```text
+selected_port=Serial3   pin_assumption="OpenRB Serial3 RX D13, TX D14"
+chars_1s=0   gps_block_reason=NO_BYTES
+```
+
+Rules going forward:
+
+- Treat GPS default as **Serial2 @ 9600**. `firmware/gps_uart_probe` now defaults
+  to `GPS_PROBE_MODE=2` (Serial2); only `-DGPS_PROBE_MODE=3` selects Serial3.
+- Do **not** assume GPS is on Serial3 `D13`/`D14` unless the user explicitly
+  rewires it there.
+- The integrated no-motion dry-run already reads GPS on **Serial2**
+  (`PATH_FOLLOWING_DRYRUN` sets `GPS_SERIAL=Serial2`) with HC-12 optional on
+  Serial3 — GPS (Serial2) and HC-12 (Serial3) do not collide.
+- The legacy default `openrb_robot_controller` build still defines
+  `GPS_SERIAL=Serial3` (HC-12 owns Serial2 there), so `gps_chars=0` is expected
+  in that default build; it is a known legacy-mode artifact, not the GPS wiring.
+
+Procedure:
+
+- Probe GPS with `scripts/run_gps_probe_serial2_9600.sh`, then
+  `scripts/check_gps_probe_log.sh` (verdicts: `WRONG_UART`, `NO_BYTES`,
+  `INSUFFICIENT_BYTES_OR_NO_NMEA`, `BYTES_NO_FIX`, `FIX_OK`). `NO_BYTES` /
+  `INSUFFICIENT_BYTES_OR_NO_NMEA` mean wrong UART / wiring / power / baud, not a
+  dead module.
+
+### Historical GPS Serial2 probe result: NMEA not validated (2026-06-03)
+
+The Serial2 **port selection is now fixed** (`selected_port=Serial2`,
+`pin_assumption="OpenRB Serial2 center 5-pin connector"`), but the **GPS
+UART/NMEA is NOT yet validated**. The latest run had only:
+
+```text
+total_chars=2 over ~70 s   chars_1s=0 for almost all samples
+rmc_preview="NA"  gga_preview="NA"  sats=NA  hdop=NA  lat=NA lon=NA
+```
+
+`total_chars=2` over ~70 s with `NA` previews is **noise / floating / intermittent
+bytes, not real NMEA** — treat it as a **failure** (`INSUFFICIENT_BYTES_OR_NO_NMEA`),
+not a valid GPS UART path. Any `chars_1s>0` alone is NOT sufficient: a valid path
+needs sustained bytes (`total_chars >= 50`, preferably hundreds/sec) AND real NMEA
+(`$GP`/`$GN`, or a non-`NA` `rmc_preview`/`gga_preview`).
+
+Because rewiring/unplugging the GPS RX is costly right now, the next diagnostic
+is a **passive, read-only all-UART/all-baud sweep** (no rewire, never writes to
+the GPS UARTs):
+
+```bash
+scripts/run_gps_passive_uart_baud_sweep.sh          # firmware/gps_passive_uart_baud_sweep_probe
+scripts/check_gps_passive_uart_baud_sweep_log.sh    # NMEA_FOUND / BYTES_NO_NMEA / NO_UART_BYTES
+```
+
+It listens on `Serial1`/`Serial2`/`Serial3` at `{4800,9600,38400,57600,115200}`
+and reports where real NMEA appears (if anywhere):
+
+- `NMEA_FOUND` on a port/baud other than `Serial2@9600` → the assumption/baud is
+  wrong; use that port/baud.
+- `BYTES_NO_NMEA` → wrong baud / non-GPS device / logic-level issue.
+- `NO_UART_BYTES` → physical power/connector/module/level issue is most likely.
+
+Only if the sweep still shows nothing is a **physical GPS wiring/power/connector/
+orientation check on the center 5-pin connector** required (see the checklist in
+`docs/gps_bringup.md`). The known-good baseline (`chars_1s ~500`, `fix=true`) must
+be reproduced before GPS is usable. **Do not proceed to outdoor heading
+validation until sustained NMEA or a fix is observed.**
+
+### Historical GPS pin activity sweep: D29 had no visible UART edges (2026-06-03)
+
+Latest log: `outputs/logs/gps_pin_activity_20260603_150258.log`.
+
+With rover body power ON, the full pin activity sweep found no UART-like
+activity on any candidate RX pin. The expected GPS RX target on the OpenRB side,
+`Serial2_RX / D29 / PA15`, was static high:
+
+```text
+Serial2_RX / D29 / PA15: high_ratio=1.000 transition_count=0 possible_uart_activity=false pin_state=STATIC_HIGH
+PIN_SWEEP_DONE: any_pin_activity=false rx_with_activity=0
+```
+
+This means the current blocker is **electrical validation of GPS TX to OpenRB
+D29**, not GPS fix, not baud, and not the Serial2/Serial3 software selection.
+
+Next checks:
+
+1. Re-power the rover body and rerun the full pin activity sweep.
+2. Confirm `Serial2_RX(D29)` `transition_count`.
+3. Measure GPS `VCC-GND` with rover body power ON.
+4. Measure GPS `TX-GND` with rover body power ON.
+5. Measure OpenRB `D29-GND` with rover body power ON.
+6. With power OFF, check continuity between GPS `TX` and OpenRB `D29`.
+7. If an independent USB-Serial adapter is available, direct-sniff GPS TX using
+   `GPS TX -> USB-Serial RX` and `GPS GND -> USB-Serial GND` only.
+
+Current port enumeration during Codex inspection listed OpenRB as
+`/dev/cu.usbmodem112101` and also listed a CP2104 adapter at
+`/dev/cu.usbserial-02442CA5`; this is only port enumeration, not proof that GPS
+TX has been sniffed directly.
+
+## Historical IMU indoor status: SUPERSEDED (2026-06-03, IMU_NOT_MPU_CLASS_DETECTED)
+
+This section is retained as history. It used the legacy MPU/ICM-style
+`firmware/imu_probe` path and is superseded by the 2026-06-06 BMI160 baseline
+above.
 
 The latest indoor `firmware/imu_probe` (Stage C) run is **NOT an IMU pass**.
 Upload/monitor work and the I2C bus is released high, but the probe repeatedly
@@ -85,13 +285,13 @@ any address ACKs, and a lone `0x03` reading `UNKNOWN_I2C_DEVICE` is a bus
 artifact / non-IMU device, not the IMU. Current indoor IMU status is therefore
 **IMU_BLOCKED / IMU_NOT_MPU_CLASS_DETECTED**.
 
-Strict IMU pass criteria (use these everywhere now):
+Legacy MPU/ICM pass criteria for this superseded probe:
 
 - `imu_mpu_class_present=true`, AND
 - a valid MPU/ICM-style address (`0x68` or `0x69`), AND
 - a readable WHO_AM_I (and in continuous mode, gyro calibration completes).
 
-Known-good reference: `i2c_addr=0x69`, `whoami=0x6F`,
+Historical MPU/ICM-style reference: `i2c_addr=0x69`, `whoami=0x6F`,
 `imu_mpu_class_present=true`. The probe now also prints an explicit
 `imu_probe_pass` / `imu_probe_block_reason`; check a probe log with
 `scripts/check_imu_probe_log.sh`.
@@ -156,12 +356,12 @@ code or firmware fault.
 A breadboard rig (no rover chassis, no motors) is used for safe indoor
 navigation-stack development with GPS, IMU, and HC-12 connected.
 
-- IMU is now readable. `firmware/imu_probe` reports `bus_state=RELEASED_HIGH`,
+- Historical MPU/ICM-style IMU note: `firmware/imu_probe` reported `bus_state=RELEASED_HIGH`,
   `i2c_scan_count=1`, `i2c_addr=0x69`, `whoami=0x6F`, `imu_present=true`. `0x6F`
   is not a standard InvenSense/ST ID; it is treated as an MPU register-map
   compatible clone/variant for **signal validation only**. IMU yaw/heading is
-  NOT trusted yet (needs calibration + drift checks). The rover-mounted IMU may
-  be different/faulty and must be validated separately.
+  NOT trusted from this legacy probe. The current rover IMU is BMI160 at `0x68`;
+  use the 2026-06-06 baseline above for current status.
 - GPS indoors/under a roof is weak or unavailable. `gps_uart_probe` keeps
   printing raw status (`gps_chars`, `last_rmc_status`, `last_gga_fix_quality`,
   `gps_block_reason`, etc.) even with no fix; expect `gps_block_reason=NO_BYTES`

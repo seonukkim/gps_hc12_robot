@@ -109,7 +109,7 @@ def _generate_system_overview(output_dirs: Sequence[str | Path] | None) -> Figur
     _box(ax, (0.39, 0.47), 0.18, 0.14, "HC-12\nUART radio link", facecolor="#f7f4ed", edgecolor=COLOR_ORANGE)
     _box(ax, (0.68, 0.50), 0.23, 0.19, "Rover controller\nOpenRB-150 firmware\nsafety ownership", facecolor="#f3fbf5", edgecolor=COLOR_GREEN)
     _box(ax, (0.68, 0.22), 0.23, 0.15, "ESC / motor outputs\nwheel-off-ground\nbench testing", facecolor="#fff6f4", edgecolor=COLOR_RED)
-    _box(ax, (0.70, 0.76), 0.18, 0.10, "GPS module\nSerial3 telemetry", facecolor="#f3f7fb")
+    _box(ax, (0.70, 0.76), 0.18, 0.10, "GPS module\nSerial2 telemetry", facecolor="#f3f7fb")
     _box(ax, (0.38, 0.76), 0.18, 0.10, "RC transmitter\nmanual override", facecolor="#f3f7fb")
     ax.add_patch(Rectangle((0.36, 0.10), 0.30, 0.12, facecolor="#e7eef2", edgecolor=COLOR_GRAY, linewidth=1.1))
     ax.text(0.51, 0.16, "Planar hull work area\ncurrent planning assumption", ha="center", va="center", fontsize=9)

@@ -2007,28 +2007,58 @@ void processHC12Line(const String &line) {
 }
 
 // ===================== IMU diagnostic integration (Task D) =====================
-// Read-only IMU diagnostics. Compiled only when IMU_ENABLE=1. Never drives
-// motors. Gyro-integrated yaw is RELATIVE and DRIFTS (diagnostic, not a heading).
+// IMU diagnostics. Compiled only when IMU_ENABLE=1. Never drives motors.
+// Gyro-integrated yaw is RELATIVE and DRIFTS (diagnostic, not a heading).
+// Supports:
+//   - BMI160 auto-detected at 0x68/0x69 via CHIP_ID register 0x00 == 0xD1
+//   - legacy MPU/ICM path at IMU_I2C_ADDR using WHO_AM_I register 0x75
 #if IMU_ENABLE
-constexpr uint8_t  IMU_CTL_ADDR = IMU_I2C_ADDR;
+constexpr uint8_t  IMU_LEGACY_CTL_ADDR = IMU_I2C_ADDR;
 constexpr uint8_t  IMU_REG_WHO_AM_I = 0x75;
 constexpr uint8_t  IMU_REG_PWR_MGMT_1 = 0x6B;
 constexpr uint8_t  IMU_REG_ACCEL_XOUT_H = 0x3B;
-constexpr uint8_t  IMU_BURST_LEN = 14;
+constexpr uint8_t  IMU_MPU_BURST_LEN = 14;
 constexpr double   IMU_GYRO_LSB_PER_DPS_VALUE = IMU_GYRO_LSB_PER_DPS;
 constexpr double   IMU_ACCEL_LSB_PER_G_VALUE = IMU_ACCEL_LSB_PER_G;
 constexpr uint8_t  IMU_YAW_AXIS_VALUE = IMU_YAW_AXIS;
 constexpr float    IMU_YAW_SIGN_VALUE = IMU_YAW_SIGN;
 constexpr uint32_t IMU_SAMPLE_PERIOD_MS = 20;
 constexpr uint32_t IMU_CAL_MS = static_cast<uint32_t>(IMU_CALIBRATION_SECONDS) * 1000UL;
+constexpr uint8_t  BMI160_ADDR_A = 0x68;
+constexpr uint8_t  BMI160_ADDR_B = 0x69;
+constexpr uint8_t  BMI160_CHIP_ID_EXPECTED = 0xD1;
+constexpr uint8_t  BMI160_REG_CHIP_ID = 0x00;
+constexpr uint8_t  BMI160_REG_ERR_REG = 0x02;
+constexpr uint8_t  BMI160_REG_PMU_STATUS = 0x03;
+constexpr uint8_t  BMI160_REG_GYRO_X_LSB = 0x0C;
+constexpr uint8_t  BMI160_REG_ACCEL_X_LSB = 0x12;
+constexpr uint8_t  BMI160_REG_ACC_RANGE = 0x41;
+constexpr uint8_t  BMI160_REG_GYR_RANGE = 0x43;
+constexpr uint8_t  BMI160_REG_CMD = 0x7E;
+constexpr uint8_t  BMI160_CMD_ACC_NORMAL = 0x11;
+constexpr uint8_t  BMI160_CMD_GYR_NORMAL = 0x15;
 
 bool imuPresentFlag = false;
 bool imuWhoamiOkFlag = false;
 uint8_t imuWhoamiValue = 0;
+bool imuChipIdOkFlag = false;
+uint8_t imuChipIdValue = 0;
+uint8_t imuActiveAddr = 0;
+uint8_t imuErrRegValue = 0;
+bool imuErrRegOkFlag = false;
+uint8_t imuPmuStatusValue = 0;
+bool imuPmuStatusOkFlag = false;
+bool imuPmuNormalFlag = false;
+bool imuAccelRangeDefaultFlag = false;
+bool imuGyroRangeDefaultFlag = false;
+bool imuRawAllZeroFlag = false;
+bool imuDataPlausibleFlag = false;
 int16_t imuAccelRawX = 0, imuAccelRawY = 0, imuAccelRawZ = 0;
 int16_t imuGyroRawX = 0, imuGyroRawY = 0, imuGyroRawZ = 0;
 int16_t imuTempRaw = 0;
 double imuAccelMagG = 0.0, imuGyroMagDps = 0.0;
+double imuAccelLsbPerGActive = IMU_ACCEL_LSB_PER_G_VALUE;
+double imuGyroLsbPerDpsActive = IMU_GYRO_LSB_PER_DPS_VALUE;
 bool imuStationaryFlag = false;
 bool imuCalibratingFlag = false;
 bool imuCalibratedFlag = false;
@@ -2042,19 +2072,34 @@ uint32_t imuLastSampleMicros = 0;
 uint32_t imuLastSampleMs = 0;
 const char *imuHeadingBlockReason = "INIT";
 
+enum ImuControllerType {
+  IMU_TYPE_NONE,
+  IMU_TYPE_MPU_ICM,
+  IMU_TYPE_BMI160
+};
+ImuControllerType imuType = IMU_TYPE_NONE;
+
+const char *imuTypeName() {
+  switch (imuType) {
+    case IMU_TYPE_BMI160: return "BMI160";
+    case IMU_TYPE_MPU_ICM: return "MPU_ICM";
+    default: return "NONE";
+  }
+}
+
 double imuWrap180(double deg) {
   while (deg > 180.0) deg -= 360.0;
   while (deg < -180.0) deg += 360.0;
   return deg;
 }
 
-bool imuCtlReadRegs(uint8_t reg, uint8_t *buf, uint8_t len) {
-  Wire.beginTransmission(IMU_CTL_ADDR);
+bool imuCtlReadRegs(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len) {
+  Wire.beginTransmission(addr);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0) {
     return false;
   }
-  uint8_t n = Wire.requestFrom(IMU_CTL_ADDR, len);
+  uint8_t n = Wire.requestFrom(addr, len);
   if (n != len) {
     while (Wire.available()) Wire.read();
     return false;
@@ -2063,8 +2108,8 @@ bool imuCtlReadRegs(uint8_t reg, uint8_t *buf, uint8_t len) {
   return true;
 }
 
-bool imuCtlWriteReg(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(IMU_CTL_ADDR);
+bool imuCtlWriteReg(uint8_t addr, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(addr);
   Wire.write(reg);
   Wire.write(value);
   return Wire.endTransmission() == 0;
@@ -2074,11 +2119,141 @@ int16_t imuCtlBe16(uint8_t hi, uint8_t lo) {
   return static_cast<int16_t>(static_cast<uint16_t>(hi) << 8 | lo);
 }
 
+int16_t imuCtlLe16(uint8_t lo, uint8_t hi) {
+  return static_cast<int16_t>((static_cast<uint16_t>(hi) << 8) | lo);
+}
+
 int16_t imuGyroAxisRaw(uint8_t axis) {
   return axis == 0 ? imuGyroRawX : (axis == 1 ? imuGyroRawY : imuGyroRawZ);
 }
 double imuGyroAxisBias(uint8_t axis) {
   return axis == 0 ? imuGyroBiasX : (axis == 1 ? imuGyroBiasY : imuGyroBiasZ);
+}
+
+double bmi160AccelLsbPerG(uint8_t accRangeReg, bool &defaulted) {
+  defaulted = false;
+  switch (accRangeReg & 0x0F) {
+    case 0x03: return 16384.0;  // +/-2g
+    case 0x05: return 8192.0;   // +/-4g
+    case 0x08: return 4096.0;   // +/-8g
+    case 0x0C: return 2048.0;   // +/-16g
+    default:
+      defaulted = true;
+      return 16384.0;           // diagnostic fallback
+  }
+}
+
+double bmi160GyroLsbPerDps(uint8_t gyroRangeReg, bool &defaulted) {
+  defaulted = false;
+  switch (gyroRangeReg & 0x07) {
+    case 0x00: return 16.4;    // +/-2000 dps
+    case 0x01: return 32.8;    // +/-1000 dps
+    case 0x02: return 65.6;    // +/-500 dps
+    case 0x03: return 131.2;   // +/-250 dps
+    case 0x04: return 262.4;   // +/-125 dps
+    default:
+      defaulted = true;
+      return 16.4;             // diagnostic fallback
+  }
+}
+
+const char *bmi160PmuModeName(uint8_t mode) {
+  switch (mode & 0x03) {
+    case 0x00: return "SUSPEND";
+    case 0x01: return "NORMAL";
+    case 0x02: return "LOW_POWER_OR_FAST_START";
+    default: return "RESERVED";
+  }
+}
+
+uint8_t bmi160AccelPmuBits(uint8_t pmuStatus) {
+  return (pmuStatus >> 4) & 0x03;
+}
+
+uint8_t bmi160GyroPmuBits(uint8_t pmuStatus) {
+  return (pmuStatus >> 2) & 0x03;
+}
+
+void imuStartCalibration(const char *reason) {
+  imuCalibratingFlag = true;
+  imuCalibratedFlag = false;
+  imuCalStartMs = millis();
+  imuGyroSumX = imuGyroSumY = imuGyroSumZ = 0.0;
+  imuCalCount = 0;
+  imuRelativeYawDeg = 0.0;
+  imuHaveLastSample = false;
+  imuHeadingBlockReason = reason;
+}
+
+bool imuTryInitBmi160(uint8_t addr) {
+  uint8_t chipId = 0;
+  if (!imuCtlReadRegs(addr, BMI160_REG_CHIP_ID, &chipId, 1)) {
+    return false;
+  }
+  if (chipId != BMI160_CHIP_ID_EXPECTED) {
+    return false;
+  }
+
+  imuType = IMU_TYPE_BMI160;
+  imuActiveAddr = addr;
+  imuChipIdValue = chipId;
+  imuChipIdOkFlag = true;
+  imuWhoamiOkFlag = false;
+  imuWhoamiValue = 0;
+
+  bool accelCmdOk = imuCtlWriteReg(addr, BMI160_REG_CMD, BMI160_CMD_ACC_NORMAL);
+  delay(10);
+  bool gyroCmdOk = imuCtlWriteReg(addr, BMI160_REG_CMD, BMI160_CMD_GYR_NORMAL);
+  delay(100);
+  imuPmuStatusOkFlag = imuCtlReadRegs(addr, BMI160_REG_PMU_STATUS, &imuPmuStatusValue, 1);
+  imuPmuNormalFlag = imuPmuStatusOkFlag &&
+                     bmi160AccelPmuBits(imuPmuStatusValue) == 0x01 &&
+                     bmi160GyroPmuBits(imuPmuStatusValue) == 0x01;
+  imuErrRegOkFlag = imuCtlReadRegs(addr, BMI160_REG_ERR_REG, &imuErrRegValue, 1);
+
+  uint8_t accRange = 0x03;
+  if (imuCtlReadRegs(addr, BMI160_REG_ACC_RANGE, &accRange, 1)) {
+    imuAccelLsbPerGActive = bmi160AccelLsbPerG(accRange, imuAccelRangeDefaultFlag);
+  } else {
+    imuAccelRangeDefaultFlag = true;
+    imuAccelLsbPerGActive = 16384.0;
+  }
+  uint8_t gyrRange = 0x00;
+  if (imuCtlReadRegs(addr, BMI160_REG_GYR_RANGE, &gyrRange, 1)) {
+    imuGyroLsbPerDpsActive = bmi160GyroLsbPerDps(gyrRange, imuGyroRangeDefaultFlag);
+  } else {
+    imuGyroRangeDefaultFlag = true;
+    imuGyroLsbPerDpsActive = 16.4;
+  }
+
+  if (!accelCmdOk || !gyroCmdOk || !imuPmuNormalFlag) {
+    imuPresentFlag = false;
+    imuHeadingBlockReason = "BMI160_PMU_NOT_NORMAL";
+    return true;
+  }
+
+  imuPresentFlag = true;
+  imuStartCalibration("CALIBRATING");
+  return true;
+}
+
+bool imuTryInitMpuIcm(uint8_t addr) {
+  imuWhoamiOkFlag = imuCtlReadRegs(addr, IMU_REG_WHO_AM_I, &imuWhoamiValue, 1);
+  if (!imuWhoamiOkFlag) {
+    return false;
+  }
+  imuType = IMU_TYPE_MPU_ICM;
+  imuActiveAddr = addr;
+  imuPresentFlag = true;
+  imuChipIdOkFlag = false;
+  imuChipIdValue = 0;
+  imuPmuNormalFlag = true;  // not a BMI160 PMU concept
+  imuAccelLsbPerGActive = IMU_ACCEL_LSB_PER_G_VALUE;
+  imuGyroLsbPerDpsActive = IMU_GYRO_LSB_PER_DPS_VALUE;
+  imuCtlWriteReg(addr, IMU_REG_PWR_MGMT_1, 0x00);  // wake (clear SLEEP)
+  delay(10);
+  imuStartCalibration("CALIBRATING");
+  return true;
 }
 
 void imuControllerInit() {
@@ -2087,36 +2262,72 @@ void imuControllerInit() {
 #if defined(WIRE_HAS_TIMEOUT)
   Wire.setWireTimeout(25000, true);
 #endif
-  imuWhoamiOkFlag = imuCtlReadRegs(IMU_REG_WHO_AM_I, &imuWhoamiValue, 1);
-  imuPresentFlag = imuWhoamiOkFlag;  // present if it ACKs the WHO_AM_I read
-  if (imuPresentFlag) {
-    imuCtlWriteReg(IMU_REG_PWR_MGMT_1, 0x00);  // wake (clear SLEEP)
-    delay(10);
-    imuCalibratingFlag = true;
-    imuCalStartMs = millis();
-    imuHeadingBlockReason = "CALIBRATING";
-  } else {
+
+  if (!imuTryInitBmi160(BMI160_ADDR_A) && !imuTryInitBmi160(BMI160_ADDR_B) &&
+      !imuTryInitMpuIcm(IMU_LEGACY_CTL_ADDR)) {
+    imuType = IMU_TYPE_NONE;
+    imuActiveAddr = IMU_LEGACY_CTL_ADDR;
+    imuPresentFlag = false;
     imuHeadingBlockReason = "IMU_NOT_PRESENT";
   }
-  Serial.print(F("imu_init imu_present="));
+
+  Serial.print(F("imu_init imu_type="));
+  Serial.print(imuTypeName());
+  Serial.print(F(" imu_present="));
   Serial.print(imuPresentFlag ? F("true") : F("false"));
   Serial.print(F(" imu_i2c_addr=0x"));
-  if (IMU_CTL_ADDR < 0x10) Serial.print('0');
-  Serial.print(IMU_CTL_ADDR, HEX);
+  if (imuActiveAddr < 0x10) Serial.print('0');
+  Serial.print(imuActiveAddr, HEX);
+  Serial.print(F(" imu_chip_id="));
+  if (imuChipIdOkFlag) {
+    Serial.print(F("0x"));
+    if (imuChipIdValue < 0x10) Serial.print('0');
+    Serial.print(imuChipIdValue, HEX);
+  } else {
+    Serial.print(F("NA"));
+  }
   Serial.print(F(" imu_whoami="));
-  if (imuWhoamiOkFlag) {
+  if (imuType == IMU_TYPE_BMI160) {
+    Serial.print(F("NA_BMI160"));
+  } else if (imuWhoamiOkFlag) {
     Serial.print(F("0x"));
     if (imuWhoamiValue < 0x10) Serial.print('0');
     Serial.print(imuWhoamiValue, HEX);
   } else {
     Serial.print(F("NA"));
   }
+  Serial.print(F(" imu_pmu_status=0x"));
+  if (imuPmuStatusValue < 0x10) Serial.print('0');
+  Serial.print(imuPmuStatusValue, HEX);
+  Serial.print(F(" imu_pmu_normal="));
+  if (imuType == IMU_TYPE_BMI160) {
+    Serial.print(imuPmuNormalFlag ? F("true") : F("false"));
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" imu_heading_block_reason="));
+  Serial.print(imuHeadingBlockReason);
   Serial.println();
 }
 
 bool imuControllerReadRaw() {
-  uint8_t buf[IMU_BURST_LEN];
-  if (!imuCtlReadRegs(IMU_REG_ACCEL_XOUT_H, buf, IMU_BURST_LEN)) return false;
+  if (imuType == IMU_TYPE_BMI160) {
+    uint8_t gyroBuf[6] = {0};
+    uint8_t accelBuf[6] = {0};
+    if (!imuCtlReadRegs(imuActiveAddr, BMI160_REG_GYRO_X_LSB, gyroBuf, sizeof(gyroBuf))) return false;
+    if (!imuCtlReadRegs(imuActiveAddr, BMI160_REG_ACCEL_X_LSB, accelBuf, sizeof(accelBuf))) return false;
+    imuGyroRawX = imuCtlLe16(gyroBuf[0], gyroBuf[1]);
+    imuGyroRawY = imuCtlLe16(gyroBuf[2], gyroBuf[3]);
+    imuGyroRawZ = imuCtlLe16(gyroBuf[4], gyroBuf[5]);
+    imuAccelRawX = imuCtlLe16(accelBuf[0], accelBuf[1]);
+    imuAccelRawY = imuCtlLe16(accelBuf[2], accelBuf[3]);
+    imuAccelRawZ = imuCtlLe16(accelBuf[4], accelBuf[5]);
+    imuTempRaw = 0;
+    return true;
+  }
+
+  uint8_t buf[IMU_MPU_BURST_LEN];
+  if (!imuCtlReadRegs(imuActiveAddr, IMU_REG_ACCEL_XOUT_H, buf, IMU_MPU_BURST_LEN)) return false;
   imuAccelRawX = imuCtlBe16(buf[0], buf[1]);
   imuAccelRawY = imuCtlBe16(buf[2], buf[3]);
   imuAccelRawZ = imuCtlBe16(buf[4], buf[5]);
@@ -2138,18 +2349,33 @@ void imuControllerUpdate(uint32_t now) {
   imuLastSampleMs = now;
   if (!imuControllerReadRaw()) {
     imuHeadingBlockReason = "IMU_READ_FAILED";
+    imuDataPlausibleFlag = false;
     return;
   }
   uint32_t nowMicros = micros();
 
-  double ax = imuAccelRawX / IMU_ACCEL_LSB_PER_G_VALUE;
-  double ay = imuAccelRawY / IMU_ACCEL_LSB_PER_G_VALUE;
-  double az = imuAccelRawZ / IMU_ACCEL_LSB_PER_G_VALUE;
+  imuRawAllZeroFlag =
+      imuAccelRawX == 0 && imuAccelRawY == 0 && imuAccelRawZ == 0 &&
+      imuGyroRawX == 0 && imuGyroRawY == 0 && imuGyroRawZ == 0;
+
+  double ax = imuAccelRawX / imuAccelLsbPerGActive;
+  double ay = imuAccelRawY / imuAccelLsbPerGActive;
+  double az = imuAccelRawZ / imuAccelLsbPerGActive;
   imuAccelMagG = sqrt(ax * ax + ay * ay + az * az);
-  double gx = (imuGyroRawX - imuGyroBiasX) / IMU_GYRO_LSB_PER_DPS_VALUE;
-  double gy = (imuGyroRawY - imuGyroBiasY) / IMU_GYRO_LSB_PER_DPS_VALUE;
-  double gz = (imuGyroRawZ - imuGyroBiasZ) / IMU_GYRO_LSB_PER_DPS_VALUE;
+  double gx = (imuGyroRawX - imuGyroBiasX) / imuGyroLsbPerDpsActive;
+  double gy = (imuGyroRawY - imuGyroBiasY) / imuGyroLsbPerDpsActive;
+  double gz = (imuGyroRawZ - imuGyroBiasZ) / imuGyroLsbPerDpsActive;
   imuGyroMagDps = sqrt(gx * gx + gy * gy + gz * gz);
+  imuDataPlausibleFlag =
+      !imuRawAllZeroFlag &&
+      imuAccelMagG >= 0.5 && imuAccelMagG <= 1.5 &&
+      imuGyroMagDps < 500.0 &&
+      (imuType != IMU_TYPE_BMI160 || (imuPmuNormalFlag && imuChipIdOkFlag));
+  if (!imuDataPlausibleFlag) {
+    imuHeadingBlockReason = imuRawAllZeroFlag ? "IMU_RAW_ALL_ZERO" : "IMU_RAW_NOT_PLAUSIBLE";
+    return;
+  }
+
   imuStationaryFlag = (imuGyroMagDps < 2.0) && (fabs(imuAccelMagG - 1.0) < 0.12);
 
   if (imuCalibratingFlag) {
@@ -2171,7 +2397,7 @@ void imuControllerUpdate(uint32_t now) {
     if (imuHaveLastSample) {
       double dtS = (nowMicros - imuLastSampleMicros) / 1000000.0;
       double rate = (imuGyroAxisRaw(IMU_YAW_AXIS_VALUE) - imuGyroAxisBias(IMU_YAW_AXIS_VALUE)) /
-                    IMU_GYRO_LSB_PER_DPS_VALUE;
+                    imuGyroLsbPerDpsActive;
       imuRelativeYawDeg = imuWrap180(imuRelativeYawDeg + IMU_YAW_SIGN_VALUE * rate * dtS);
     }
     imuHaveLastSample = true;
@@ -2182,7 +2408,7 @@ void imuControllerUpdate(uint32_t now) {
 
 // imu_heading_ready means the relative-yaw diagnostic is producing values. It is
 // NOT an absolute heading and is NOT approved to drive motors.
-bool imuHeadingReady() { return imuPresentFlag && imuCalibratedFlag; }
+bool imuHeadingReady() { return imuPresentFlag && imuDataPlausibleFlag && imuCalibratedFlag; }
 #endif  // IMU_ENABLE
 
 // ============== Path-following dry-run + guarded execution (Tasks E/F/G) ==============
@@ -2802,19 +3028,65 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
   Serial.print(F(" heading_source="));
   Serial.print(headingSourceModeName());
 #if IMU_ENABLE
-  Serial.print(F(" imu_enabled=true imu_present="));
+  Serial.print(F(" imu_enabled=true imu_type="));
+  Serial.print(imuTypeName());
+  Serial.print(F(" imu_present="));
   Serial.print(imuPresentFlag ? F("true") : F("false"));
   Serial.print(F(" imu_i2c_addr=0x"));
-  if (IMU_CTL_ADDR < 0x10) Serial.print('0');
-  Serial.print(IMU_CTL_ADDR, HEX);
+  if (imuActiveAddr < 0x10) Serial.print('0');
+  Serial.print(imuActiveAddr, HEX);
+  Serial.print(F(" imu_chip_id="));
+  if (imuChipIdOkFlag) {
+    Serial.print(F("0x"));
+    if (imuChipIdValue < 0x10) Serial.print('0');
+    Serial.print(imuChipIdValue, HEX);
+  } else {
+    Serial.print(F("NA"));
+  }
   Serial.print(F(" imu_whoami="));
-  if (imuWhoamiOkFlag) {
+  if (imuType == IMU_TYPE_BMI160) {
+    Serial.print(F("NA_BMI160"));
+  } else if (imuWhoamiOkFlag) {
     Serial.print(F("0x"));
     if (imuWhoamiValue < 0x10) Serial.print('0');
     Serial.print(imuWhoamiValue, HEX);
   } else {
     Serial.print(F("NA"));
   }
+  Serial.print(F(" imu_pmu_status="));
+  if (imuType == IMU_TYPE_BMI160 && imuPmuStatusOkFlag) {
+    Serial.print(F("0x"));
+    if (imuPmuStatusValue < 0x10) Serial.print('0');
+    Serial.print(imuPmuStatusValue, HEX);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" imu_accel_pmu="));
+  if (imuType == IMU_TYPE_BMI160 && imuPmuStatusOkFlag) {
+    Serial.print(bmi160PmuModeName(bmi160AccelPmuBits(imuPmuStatusValue)));
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" imu_gyro_pmu="));
+  if (imuType == IMU_TYPE_BMI160 && imuPmuStatusOkFlag) {
+    Serial.print(bmi160PmuModeName(bmi160GyroPmuBits(imuPmuStatusValue)));
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" imu_pmu_normal="));
+  if (imuType == IMU_TYPE_BMI160) {
+    Serial.print(imuPmuNormalFlag ? F("true") : F("false"));
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" imu_accel_scale_defaulted="));
+  Serial.print(imuAccelRangeDefaultFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_gyro_scale_defaulted="));
+  Serial.print(imuGyroRangeDefaultFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_raw_all_zero="));
+  Serial.print(imuRawAllZeroFlag ? F("true") : F("false"));
+  Serial.print(F(" imu_data_plausible="));
+  Serial.print(imuDataPlausibleFlag ? F("true") : F("false"));
   Serial.print(F(" imu_calibrated="));
   Serial.print(imuCalibratedFlag ? F("true") : F("false"));
   Serial.print(F(" imu_gyro_bias_x="));

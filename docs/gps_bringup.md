@@ -16,6 +16,25 @@ UART link. It is intentionally separate from the integrated rover controller.
 
 ## Current Results
 
+### Authoritative Latest GPS Status (2026-06-06)
+
+- Validated GPS configuration: long-antenna GPS on the OpenRB center 5-pin
+  connector.
+- Firmware UART: `Serial2` at `9600`.
+- Outdoor `firmware/gps_uart_probe` reached stable fix:
+  - `gps_probe_state=STABLE_FIX`
+  - `current_valid_fix=true`
+  - `gps_block_reason=OK`
+  - `sats=6`
+  - `hdop≈3.72`
+  - latitude/longitude present
+- Indoor integrated dry-run can still report `gps_block_reason=NO_LOCATION`.
+  That is expected indoors and should not be treated as a wiring or firmware
+  regression.
+- Older no-byte / D29 static-high / no-location sections below are retained as
+  diagnostic history for the earlier wiring recovery period. They are superseded
+  by the long-antenna outdoor stable-fix result above.
+
 Date: 2026-05-26
 
 Final status:
@@ -330,10 +349,169 @@ Compile-time options:
 
 | Macro | Meaning |
 |---|---|
-| `GPS_PROBE_MODE=3` | `Serial3`, expected OpenRB RX `D13` |
-| `GPS_PROBE_MODE=2` | `Serial2`, board UART candidate |
+| `GPS_PROBE_MODE=2` | `Serial2`, **center 5-pin connector — DEFAULT, known-good GPS wiring** |
+| `GPS_PROBE_MODE=3` | `Serial3`, side expansion RX `D13` / TX `D14` (GPS is NOT wired here) |
 | `GPS_PROBE_MODE=89` | `SoftwareSerial` RX `D8` / TX `D9` candidate |
-| `GPS_PROBE_BAUD=9600` | GPS candidate baudrate |
+| `GPS_PROBE_BAUD=9600` | GPS candidate baudrate (known-good `9600`) |
+
+The probe now defaults to `GPS_PROBE_MODE=2` (Serial2), matching the real GPS
+wiring on the center 5-pin connector. Use the helper scripts for the standard
+run + check:
+
+```bash
+scripts/run_gps_probe_serial2_9600.sh
+scripts/check_gps_probe_log.sh   # WRONG_UART / NO_BYTES / INSUFFICIENT_BYTES_OR_NO_NMEA / BYTES_NO_FIX / FIX_OK
+```
+
+#### A valid GPS UART needs sustained real NMEA, not just any byte
+
+`selected_port=Serial2` alone is not enough, and **any `chars_1s>0` is not
+sufficient**. The checker requires **sustained, real NMEA**:
+
+- `selected_port=Serial2`, AND
+- `total_chars >= 50` (preferably hundreds per second), AND
+- real NMEA: `$GP`/`$GN` seen, or `rmc_preview`/`gga_preview` not `"NA"`.
+
+Verdicts: `WRONG_UART` (port != Serial2), `NO_BYTES` (`total_chars=0`),
+`INSUFFICIENT_BYTES_OR_NO_NMEA` (tiny `total_chars` or no RMC/GGA — e.g.
+`total_chars=2` over ~70 s with `NA` previews), `BYTES_NO_FIX` (sustained NMEA,
+no fix yet), `FIX_OK` (fix valid). The first three are failures.
+
+A `total_chars=2`-over-70 s result is **noise/floating, not real NMEA** — it is a
+**failure**, not a working UART. Run the physical checklist below.
+
+#### No-rewire passive UART/baud sweep (do this before any physical work)
+
+Rewiring/unplugging the GPS RX is costly, so first run the **passive, read-only**
+all-UART/all-baud sweep. It listens on `Serial1`/`Serial2`/`Serial3` at
+`{4800,9600,38400,57600,115200}` and never writes to the GPS UARTs:
+
+```bash
+scripts/run_gps_passive_uart_baud_sweep.sh          # firmware/gps_passive_uart_baud_sweep_probe (read-only)
+scripts/check_gps_passive_uart_baud_sweep_log.sh    # NMEA_FOUND / BYTES_NO_NMEA / NO_UART_BYTES
+```
+
+Interpretation:
+
+- `NMEA_FOUND` on **Serial2@9600** → matches the known-good baseline; the earlier
+  `total_chars=2` run was intermittent — re-run `gps_uart_probe` on Serial2/9600.
+- `NMEA_FOUND` on a **different port or baud** → the old assumption/baud is wrong;
+  use the reported `best_port@best_baud`.
+- `BYTES_NO_NMEA` (bytes but no `$GP`/`$GN`) → wrong baud, a non-GPS device, or a
+  logic-level/framing problem.
+- `NO_UART_BYTES` (nothing on any port/baud) → a physical power/connector/module/
+  level issue — run the checklist below.
+
+The probe is read-only and changes no motor/path-following behaviour; it enables
+no motion.
+
+#### Decisive pin-level activity probe (when the sweep says NO_UART_BYTES)
+
+If the passive sweep reports `NO_UART_BYTES` (no bytes on any UART/baud), prove
+electrically whether the GPS TX signal reaches any OpenRB pin before touching the
+wiring. This passive probe reads raw digital activity on D13/D14/D26/D27/D28/D29
+(INPUT, no pullup, `digitalRead` only — it never writes):
+
+```bash
+scripts/run_gps_pin_activity_probe.sh         # firmware/gps_pin_activity_probe (read-only)
+scripts/check_gps_pin_activity_log.sh         # UART_ACTIVITY_FOUND / STATIC_HIGH / STATIC_LOW / NO_PIN_ACTIVITY
+```
+
+A powered, transmitting UART TX makes MANY transitions on the OpenRB RX pin
+(D29 = Serial2 RX = center 5-pin GPS-TX target). Interpretation:
+
+- `UART_ACTIVITY_FOUND` (transitions on an RX pin) → the signal IS reaching the
+  pin; the problem is UART baud/framing, not the connection.
+- `STATIC_HIGH` (RX idle high, no transitions) → GPS powered-but-silent, or the
+  line is pulled high / TX not driving. A live GPS should emit NMEA ~1 Hz even
+  without a fix.
+- `STATIC_LOW` → GPS likely unpowered / TX tied low / wiring fault (check VCC + GND).
+- `NO_PIN_ACTIVITY` (mixed/floating) → with no pullup a disconnected pin floats;
+  consistent with GPS TX not connected to the OpenRB RX pin.
+
+`STATIC_*` / `NO_PIN_ACTIVITY` on every likely-RX pin =
+`POSSIBLE_POWER_OFF_OR_TX_NOT_CONNECTED`: the GPS TX signal does not reach the
+board (no electrical edges) — a power / connector / TX-wire / dead-module problem.
+This is read-only and changes no motor/path-following behaviour; it enables no
+motion. Then run the physical checklist below.
+
+#### Historical full pin activity sweep: no GPS TX edge on D29 (2026-06-03)
+
+Latest log: `outputs/logs/gps_pin_activity_20260603_150258.log`.
+
+The sweep was run with rover body power ON and showed no UART-like activity on
+any candidate RX pin. The expected GPS input, `Serial2_RX / D29 / PA15`, stayed
+idle-high for the full sampling window:
+
+```text
+pin_label=Serial2_RX arduino_pin=29 high_ratio=1.000 transition_count=0 possible_uart_activity=false pin_state=STATIC_HIGH
+PIN_SWEEP_DONE any_pin_activity=false rx_with_activity=0
+```
+
+Current interpretation:
+
+- This is not a GPS satellite-fix issue.
+- This is not primarily a baud-rate issue.
+- This is not primarily a Serial2-vs-Serial3 firmware selection issue.
+- The current blocker is electrical validation: GPS TX UART edges are not visible
+  at OpenRB `Serial2_RX` / `D29` / `PA15`.
+
+Next checklist:
+
+1. Re-power the rover body and rerun the full pin activity sweep.
+2. Confirm `Serial2_RX(D29)` `transition_count`.
+3. Measure GPS `VCC` to `GND` with rover body power ON.
+4. Measure GPS `TX` to `GND` with rover body power ON.
+5. Measure OpenRB `D29` to `GND` with rover body power ON.
+6. With power OFF, check continuity between GPS `TX` and OpenRB `D29`.
+7. If an independent USB-Serial adapter is available, direct-sniff GPS TX using
+   only `GPS TX -> USB-Serial RX` and `GPS GND -> USB-Serial GND`; do not connect
+   USB-Serial TX to the GPS/OpenRB TX line.
+
+#### No-unplug all-pin activity probe
+
+If the user cannot use a multimeter or does not want to keep unplugging
+individual wires, run the all-pin probe before touching the harness. This probe
+samples OpenRB `D0` through `D29` with `pinMode(pin, INPUT)` and `digitalRead`
+only:
+
+```bash
+scripts/run_gps_all_pin_activity_probe.sh         # firmware/gps_all_pin_activity_probe
+scripts/check_gps_all_pin_activity_log.sh         # highlights activity pins and top transition counts
+```
+
+Purpose and limits:
+
+- It locates where GPS TX electrical activity may be arriving on the OpenRB.
+- It does not write `Serial1`, `Serial2`, or `Serial3`.
+- It does not use motors, RC, HC-12, I2C, GPS parsing, or autonomy.
+- It does not prove NMEA parsing; it only finds electrical edges.
+- If no sampled pin has `possible_uart_activity=true`, GPS TX is not reaching
+  OpenRB or the GPS is not transmitting.
+
+Do **not** swap unknown brown/red wires as a diagnostic step. Those may be
+`VCC`/`GND`, not UART `RX`/`TX`.
+
+#### Physical checklist: GPS on the center 5-pin connector
+
+Do this when the verdict is `NO_BYTES` or `INSUFFICIENT_BYTES_OR_NO_NMEA` (it is a
+wiring/power/connector problem, not code):
+
+1. The GPS is on the OpenRB-150 **center 5-pin connector** (Serial2), not the
+   side Serial3 `D13`/`D14` pins.
+2. Connector is **fully seated** and in the **correct orientation** (not shifted
+   one pin / not reversed); re-seat it.
+3. **GPS TX -> OpenRB Serial2 RX** (data flows GPS->board). Confirm TX/RX are not
+   swapped.
+4. **Power**: GPS VCC at the expected level and **GND common** with the OpenRB.
+   A floating/under-powered GPS gives a few stray bytes (the `total_chars=2`
+   symptom).
+5. **Baud = 9600** (known-good). Re-run with `GPS_PROBE_BAUD` only after wiring is
+   confirmed.
+6. Check the GPS module power/fix LED and give it a clear sky view; cold start can
+   take time, but the UART should still stream `$GP`/`$GN` NMEA even before fix.
+7. Re-run `scripts/run_gps_probe_serial2_9600.sh` and re-check; the target is the
+   known-good baseline (`chars_1s ~500`, readable `$GP...` NMEA, then `fix=true`).
 
 Every report line prints:
 

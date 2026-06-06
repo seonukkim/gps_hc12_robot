@@ -27,8 +27,9 @@ show() { printf '  %-28s %s\n' "$1" "$(v="$(last "$1")"; echo "${v:-MISSING}")";
 echo "log=${LOG}  lines=$(wc -l < "${LOG}" | tr -d ' ')"
 
 echo "--- IMU ---"
-for f in imu_enabled imu_present imu_calibrated imu_relative_yaw_deg imu_yaw_axis \
-         imu_yaw_sign imu_heading_ready imu_heading_block_reason; do show "$f"; done
+for f in imu_enabled imu_type imu_present imu_i2c_addr imu_chip_id imu_whoami \
+         imu_pmu_normal imu_data_plausible imu_calibrated imu_relative_yaw_deg \
+         imu_yaw_axis imu_yaw_sign imu_heading_ready imu_heading_block_reason; do show "$f"; done
 
 echo "--- GPS / heading ---"
 for f in gps_location_valid gps_motion_ready gps_block_reason heading_ready \
@@ -49,17 +50,30 @@ for f in imu_present imu_calibrated gps_motion_ready heading_ready; do
 done
 
 echo "--- STRICT IMU CHECK (imu_present alone is NOT a pass) ---"
+imu_type_last="$(last imu_type)"
 imu_present_last="$(last imu_present)"
+imu_chip_id_last="$(last imu_chip_id)"
 imu_whoami_last="$(last imu_whoami)"
+imu_pmu_normal_last="$(last imu_pmu_normal)"
+imu_data_plausible_last="$(last imu_data_plausible)"
 imu_ok=false
-if grep -q " imu_present=true" "${LOG}" \
+if grep -q " imu_type=BMI160" "${LOG}" \
+   && grep -q " imu_chip_id=0xD1" "${LOG}" \
+   && grep -q " imu_pmu_normal=true" "${LOG}" \
+   && grep -q " imu_data_plausible=true" "${LOG}"; then
+  imu_ok=true
+  echo "  BMI160 validated: chip_id=0xD1, PMU normal, plausible accel/gyro."
+elif grep -q " imu_type=MPU_ICM" "${LOG}" \
+   && grep -q " imu_present=true" "${LOG}" \
    && [ -n "${imu_whoami_last}" ] && [ "${imu_whoami_last}" != "NA" ]; then
   imu_ok=true
-  echo "  IMU present at the configured address with whoami=${imu_whoami_last}."
-  echo "  (Confirm whoami is an MPU/ICM value and imu_calibrated=true before trusting IMU heading.)"
+  echo "  MPU/ICM present at the configured address with whoami=${imu_whoami_last}."
+  echo "  (Confirm whoami is an MPU/ICM value and imu_calibrated=true before trusting relative-yaw diagnostics.)"
 else
-  echo "  IMU NOT validated: imu_present=${imu_present_last:-MISSING} whoami=${imu_whoami_last:-MISSING}"
-  echo "  -> IMU_BLOCKED for heading. A single 0x03/UNKNOWN device is not an IMU."
+  echo "  IMU NOT validated: imu_type=${imu_type_last:-MISSING} imu_present=${imu_present_last:-MISSING}"
+  echo "                     chip_id=${imu_chip_id_last:-MISSING} whoami=${imu_whoami_last:-MISSING}"
+  echo "                     pmu_normal=${imu_pmu_normal_last:-MISSING} data_plausible=${imu_data_plausible_last:-MISSING}"
+  echo "  -> IMU_BLOCKED for heading. For BMI160, require chip_id=0xD1, PMU normal, and plausible accel/gyro."
 fi
 
 echo "--- HEADING VALIDATION (need MPU-class IMU OR GPS course) ---"

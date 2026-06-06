@@ -933,14 +933,21 @@ Do not tune `LEFT_MOTOR_SCALE`, `RIGHT_MOTOR_SCALE`, `LEFT_MOTOR_MIN_CMD`, or
 both-wheel forward/reverse motor pulse tests. Single-wheel logical commands are
 halved at the physical pin level and can still sit near deadband.
 
-## Heading / BMI160 Is Not Integrated
+## Legacy IMU Notes Superseded By BMI160 Integration
 
-The rover likely needs heading from GPS plus an IMU, but BMI160/IMU support is
-not implemented in the current repo and the fixed D11/D12 IMU wiring is not yet
-verified. Do not build waypoint following as if heading is already available.
-The robust default `Wire` D11/D12 scanner currently shows the bus stuck low
-before scanning, so no IMU address is verified. If the IMU remains unavailable,
-continue GPS+RC workflow without IMU-dependent autonomy.
+Older notes said BMI160/IMU support was not integrated and that D11/D12 remained
+unverified. That is now superseded for the current hardware:
+
+- BMI160 is detected on `Wire` at `0x68`.
+- `firmware/imu_bmi160_normal_probe` passed with `chip_id=0xD1`, accel/gyro PMU
+  normal, plausible `accel_mag_g`, and low stationary `gyro_mag_dps`.
+- Integrated no-motion controller reports `imu_type=BMI160`, `imu_present=true`,
+  `imu_chip_id=0xD1`, `imu_pmu_normal=true`, `imu_data_plausible=true`, and
+  `imu_heading_ready=true`.
+
+The legacy `firmware/imu_probe` is MPU/ICM-only and must not be used as the
+BMI160 health check. BMI160 relative-yaw/heading remains diagnostic only; do not
+enable physical path following from IMU data.
 
 ## ROS2 Is Skeleton-Only
 
@@ -973,31 +980,28 @@ STAT,...,MANUAL_CENTER_STOP,...
 That firmware source was not the active repo integrated firmware. Always confirm
 the USB startup marker after upload before debugging behavior.
 
-## IMU Device Identity Unconfirmed (0x69 / WHO_AM_I 0x6F)
+## Legacy MPU/ICM Device Identity Note
 
 Status:
 
-- The breadboard IMU is detected by `firmware/imu_probe` at I2C `0x69` with
-  `whoami=0x6F` and `imu_present=true`.
-- `0x6F` is not a standard InvenSense/ST WHO_AM_I value. The part is MPU
-  register-map compatible (it ACKs at `0x69` and answers register `0x75`), so it
-  is most likely an MPU-6050/6500-class clone or variant.
-- Use the IMU for signal validation / raw motion only. Do NOT use it for
-  yaw/heading until calibration, scale-factor, and drift checks are done.
-- The rover-mounted IMU may be a different or faulty part and must be validated
-  separately with the same probe.
+- This applies only to the old MPU/ICM-style `firmware/imu_probe` result
+  (`0x69` / `WHO_AM_I=0x6F`).
+- The current rover IMU path is BMI160 at `0x68`, `CHIP_ID=0xD1`.
+- Do not use `WHO_AM_I=0x6F` as the current IMU identity.
 
-## GPS and HC-12 Cannot Share Serial2
+## GPS And HC-12 Serial Allocation
 
 Status:
 
-- GPS is confirmed on `Serial2` (central 4-pin connector). The default
-  controller build also assigns HC-12 to `Serial2`, so the two conflict, and
-  every GPS-on-`Serial2` firmware build disables the HC-12 link on purpose.
+- GPS is confirmed on `Serial2` (central connector). The legacy default
+  controller build also assigns HC-12 to `Serial2`, so that legacy build cannot
+  validate GPS + HC-12 together.
+- The integrated no-motion path-following dry-run selects HC-12 on `Serial3`,
+  so GPS (`Serial2`) and HC-12 (`Serial3`) do not conflict in that build.
 - OpenRB-150 has two other hardware UARTs (`Serial1` D26/D27, `Serial3`
-  D14/D13). To run GPS + HC-12 together, wire HC-12 to one of those and select
-  it with `HC12_PROBE_SERIAL_PORT` / `PATH_FOLLOWING_HC12_SERIAL_PORT`. The
-  path-following HC-12 protocol rejects `Serial2` at compile time.
+  D14/D13). The path-following HC-12 protocol rejects `Serial2` at compile time.
+- Current status is `HC12_DEFERRED_RF_LINK`: Serial3 is configured, but RF RX/TX
+  and parse success are not proven yet.
 
 ## Old Circuit Was The Root Cause Of IMU/HC-12 Failures (Resolved 2026-06-03)
 

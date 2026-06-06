@@ -55,10 +55,13 @@ station HC-12 operation.
 - Adhesion concept: magnetic wheels, pending design and validation.
 - Rover controller: OpenRB-150.
 - Manual control: RC receiver with PPM input; RC manual mode has been verified.
-- GPS: fixed on the central OpenRB connector, confirmed as `Serial2` at
-  `9600` baud; GPS FIX has been verified.
-- Radio link: HC-12 UART is the intended station-to-rover link. Station-side
-  HC-12 USB confirmation and current rover-side wiring audit are still pending.
+- GPS: long-antenna GPS on the central OpenRB connector, confirmed as
+  `Serial2 @ 9600`; outdoor GPS probe reached `STABLE_FIX` with lat/lon present.
+- IMU: BMI160 on OpenRB `Wire` (`D11` SDA / `D12` SCL), integrated at I2C `0x68`
+  with `chip_id=0xD1` and plausible accel/gyro data.
+- Radio link: HC-12 UART is the intended station-to-rover link. Integrated
+  no-motion firmware selects `Serial3`, and the Mac CP2104 station adapter has
+  been detected, but RF RX/TX is not yet proven (`HC12_DEFERRED_RF_LINK`).
 - Actuation: ESC/motor outputs are managed by rover firmware. Bench motor tests
   must remain wheel-off-ground.
 - Station/development OS: Ubuntu 24.04. WSL2 Ubuntu 24.04 and Jetson are target
@@ -83,6 +86,17 @@ body frame must be fixed, measured, and modeled.
 
 ## Next Required Validation
 
+- Current no-motion baseline: integrated logs must keep
+  `physical_block_reason=COMPILE_GATE_OFF`, `physical_output_active=false`,
+  `final_left_cmd=0.000`, and `final_right_cmd=0.000`. Do not enable physical
+  path-following gates for sensor/communication validation.
+- Re-run the integrated baseline outdoors with the long-antenna GPS, BMI160, RC
+  transmitter on, and HC-12 on `Serial3`.
+- Hand-carry the rover to validate GPS course / BMI160 heading diagnostics.
+- Recheck RC/manual outdoors with transmitter on; current indoor FAILSAFE can be
+  caused by the transmitter being off.
+- Run HC-12 station/RF checks separately. Current state is
+  `HC12_DEFERRED_RF_LINK`, not a GPS or BMI160 failure.
 - BLOCKER (2026-05-30): physical path following is blocked until the AUTO/MANUAL
   switch channel is stable. A PPM hold test showed receiver CH5 did not hold
   HIGH: only `4` AUTO-like samples out of `68`
@@ -520,10 +534,9 @@ motors and no rover chassis. Full details and exact commands are in
 [`firmware/README.md`](firmware/README.md) ("Breadboard Navigation Development
 Stack"). Summary:
 
-- IMU diagnostics: `firmware/imu_probe` (detected at I2C `0x69`, `whoami=0x6F`).
-  Now does gyro-bias calibration, motion detection, and relative-yaw integration
-  (`IMU_YAW_DIAG=1`, configurable axis/sign). Gyro yaw is relative and drifts; it
-  is diagnostic-only and not a compass heading.
+- IMU diagnostics: use `firmware/imu_bmi160_normal_probe` for the current BMI160
+  (`0x68`, `chip_id=0xD1`). The legacy `firmware/imu_probe` is MPU/ICM-only and
+  is not a BMI160 health check. Gyro yaw remains relative and diagnostic-only.
 - Integrated GPS + IMU + HC-12 dry-run: `firmware/openrb_robot_controller` with
   `-DPATH_FOLLOWING_DRYRUN=1 -DIMU_ENABLE=1 -DIMU_HEADING_DRYRUN=1` (HC-12 on
   Serial3) prints path-following + IMU yaw + a GPS-course-vs-IMU-yaw comparison,
@@ -539,11 +552,11 @@ Stack"). Summary:
   motors disabled.
 
 UART rule: OpenRB-150 has three hardware UARTs (`Serial1` D26/D27, `Serial2`
-D28/D29 = GPS, `Serial3` D14/D13). GPS and HC-12 both default to `Serial2`, so
-they cannot run together on the current rover wiring; for GPS + HC-12 together,
-wire HC-12 to `Serial1`/`Serial3` and select it. Physical path following stays
+D28/D29 = GPS, `Serial3` D14/D13). The current integrated no-motion build uses
+GPS on `Serial2` and HC-12 on `Serial3`, so there is no software UART conflict.
+The HC-12 RF link is still deferred/unproven. Physical path following stays
 blocked (all four motion gates and `PATH_FOLLOWING_MODE_CHANNEL_STABLE` default
-to 0) until the RC/PPM mode channel holds and a heading source is validated.
+to 0) until RC/PPM, heading, GPS, and station safety are validated.
 
 ### Serial3 Loopback Test
 

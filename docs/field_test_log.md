@@ -26,6 +26,44 @@ Artifacts/logs:
 Next action:
 ```
 
+## 2026-06-06: No-Motion Sensor / Communication Baseline
+
+Purpose:
+
+- Finalize the recovered no-motion bring-up state after long-antenna GPS,
+  BMI160, and integrated dry-run validation.
+
+Observed result:
+
+- GPS validated outdoors with long antenna on OpenRB center connector:
+  `Serial2 @ 9600`, `gps_probe_state=STABLE_FIX`, `current_valid_fix=true`,
+  `gps_block_reason=OK`, `sats=6`, `hdop≈3.72`, and lat/lon present.
+- BMI160 normal-mode probe passed at `i2c_addr=0x68` with `chip_id=0xD1`,
+  accel/gyro PMU normal, plausible accel magnitude around 1 g, low stationary
+  gyro magnitude, and `bmi160_normal_probe_pass=true`.
+- Integrated no-motion controller reports BMI160 through the controller path:
+  `imu_type=BMI160`, `imu_present=true`, `imu_i2c_addr=0x68`,
+  `imu_chip_id=0xD1`, `imu_pmu_normal=true`, `imu_data_plausible=true`, and
+  `imu_heading_ready=true`.
+- HC-12 is configured on `Serial3` in the integrated no-motion controller, but
+  RF is not proven yet: `hc12_rx_count=0`, `hc12_tx_count=0`,
+  `hc12_parse_ok=false`, `hc12_last_cmd=NONE`.
+- Indoor integrated run can show `rc_ok=false` / `FAILSAFE` when the transmitter
+  is off, and indoor GPS can show `NO_LOCATION`; neither is a regression.
+
+STOP / motion behavior:
+
+- No physical motion gates were enabled.
+- Integrated no-motion safety remains:
+  `physical_block_reason=COMPILE_GATE_OFF`,
+  `physical_output_active=false`, `final_left_cmd=0.000`,
+  `final_right_cmd=0.000`.
+
+Next action:
+
+- Run the outdoor integrated no-motion baseline with transmitter on, then
+  hand-carry heading/course diagnostics and separate HC-12 RF validation.
+
 ## 2026-05-26: Integrated Firmware Upload And Manual Direction Work
 
 Firmware marker:

@@ -7,6 +7,10 @@
 # physical_block_reason stays COMPILE_GATE_OFF and final_left_cmd/final_right_cmd
 # stay 0.000 in AUTO. RC MANUAL drive is unchanged. No motion is enabled.
 #
+# GPS UART: PATH_FOLLOWING_DRYRUN makes the controller read GPS on Serial2 (the
+# center 5-pin connector, known-good at 9600) — NOT Serial3 D13/D14. HC-12 runs on
+# Serial3 instead, so GPS (Serial2) and HC-12 (Serial3) do not collide.
+#
 # HC-12 is OPTIONAL here: the build sets hc12_enabled=true on Serial3, but the
 # dry-run succeeds with no HC-12 RX (hc12_rx_count may stay 0). Mac-station HC-12
 # RF validation is deferred to the Ubuntu Station (see docs/current_hardware_status.md).
@@ -55,7 +59,7 @@ LOG="outputs/logs/integrated_dryrun_hc12_deferred_${TS}.log"
 echo "port=${PORT}"
 echo "flags=${FLAGS}"
 echo "log=${LOG}"
-echo "motors: DISABLED (compile gate off). HC-12: optional (Serial3)."
+echo "GPS: Serial2 (center 5-pin, 9600). HC-12: optional (Serial3). motors: DISABLED (compile gate off)."
 
 arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_PATH" \
   --build-property "compiler.cpp.extra_flags=${FLAGS}" "$SKETCH"

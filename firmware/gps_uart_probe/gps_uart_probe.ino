@@ -9,18 +9,24 @@
 // initialize motor outputs. It only opens one GPS candidate input and reports
 // raw byte activity, NMEA fix status, and GPS stability over USB Serial.
 //
+// GPS wiring (confirmed by the user and old known-good logs): GPS is on the
+// OpenRB-150 CENTER 5-pin connector = Serial2 at 9600. It is NOT on the side
+// expansion pins Serial3 D13/D14. Default this probe to Serial2 so the bare
+// build matches the real wiring. Do not assume Serial3 unless the GPS is
+// explicitly rewired to D13/D14.
+//
 // Compile-time options:
-//   GPS_PROBE_MODE=3  -> Serial3, expected OpenRB RX D13
-//   GPS_PROBE_MODE=2  -> Serial2, board UART candidate
+//   GPS_PROBE_MODE=2  -> Serial2, center 5-pin connector (DEFAULT, known-good)
+//   GPS_PROBE_MODE=3  -> Serial3, side expansion pins RX D13 / TX D14 (GPS not here)
 //   GPS_PROBE_MODE=89 -> SoftwareSerial RX D8 / TX D9 candidate
-//   GPS_PROBE_BAUD    -> GPS candidate baudrate
+//   GPS_PROBE_BAUD    -> GPS candidate baudrate (known-good 9600)
 
 #define GPS_PROBE_MODE_SERIAL2 2
 #define GPS_PROBE_MODE_SERIAL3 3
 #define GPS_PROBE_MODE_SOFTWARE_SERIAL_8_9 89
 
 #ifndef GPS_PROBE_MODE
-#define GPS_PROBE_MODE GPS_PROBE_MODE_SERIAL3
+#define GPS_PROBE_MODE GPS_PROBE_MODE_SERIAL2
 #endif
 
 #ifndef GPS_PROBE_BAUD
@@ -30,11 +36,13 @@
 #if GPS_PROBE_MODE == GPS_PROBE_MODE_SERIAL3
 #define GPS_PORT Serial3
 constexpr const char *PROBE_PORT_NAME = "Serial3";
-constexpr const char *PROBE_PIN_ASSUMPTION = "OpenRB Serial3 RX D13, TX D14";
+constexpr const char *PROBE_PIN_ASSUMPTION =
+    "OpenRB Serial3 side expansion RX D13, TX D14 (GPS NOT wired here)";
 #elif GPS_PROBE_MODE == GPS_PROBE_MODE_SERIAL2
 #define GPS_PORT Serial2
 constexpr const char *PROBE_PORT_NAME = "Serial2";
-constexpr const char *PROBE_PIN_ASSUMPTION = "OpenRB Serial2 board UART pins";
+constexpr const char *PROBE_PIN_ASSUMPTION =
+    "OpenRB Serial2 center 5-pin connector (known-good GPS wiring)";
 #elif GPS_PROBE_MODE == GPS_PROBE_MODE_SOFTWARE_SERIAL_8_9
 #if __has_include(<SoftwareSerial.h>)
 #include <SoftwareSerial.h>
