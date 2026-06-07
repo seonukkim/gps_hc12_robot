@@ -196,3 +196,96 @@ Interpretation rules:
   only.
 - Real waypoint following requires a separate safety design, heading source,
   GPS validity policy, STOP behavior, and wheel-off-ground validation.
+
+## Side-Mounted Cleaning-Tool Preview
+
+For the side-mounted cleaning-tool rover, use the separate offline preview tool:
+
+```bash
+uv run python tools/side_tool_path_preview.py \
+  --a-x 0 --a-y 1.2 \
+  --b-x 8 --b-y 0 \
+  --step-spacing-m 0.25 \
+  --tool-side left \
+  --tool-lateral-offset-m 0.24 \
+  --tool-width-m 0.30 \
+  --tool-length-m 0.18 \
+  --robot-width-m 0.18 \
+  --robot-length-m 0.18 \
+  --out-dir outputs/side_tool_path_preview/simple_serpentine
+```
+
+The compatibility alias below is also supported and delegates to the same tool:
+
+```bash
+uv run python tools/preview_side_tool_path.py \
+  --workspace-mode ab_diagonal_center \
+  --a-x 0 --a-y 0 \
+  --b-x 8 --b-y 1.2 \
+  --tool-side left \
+  --tool-lateral-offset-m 0.24 \
+  --tool-width-m 0.30 \
+  --lane-spacing-m 0.25 \
+  --row-count auto \
+  --transition-style auto_internal \
+  --out-dir outputs/side_tool_path_preview/ab_diagonal_temporal_left
+```
+
+This planner is for preview only. It is tool-coverage-first: the cleaning-tool
+footprint is the coverage path, and the chassis centerline is only the derived
+support path. Chassis-only travel does not count as cleaning. It outputs:
+
+- chassis centerline poses;
+- cleaning-tool footprint center and edge poses;
+- lane index;
+- chassis heading and motion direction as separate fields;
+- lane travel direction (`forward` / `reverse` relative to chassis heading);
+- internal transition-only segments with `selected_transition_primitive` recorded
+  for each transition.
+
+The side-mounted planner supports `--tool-side left` and `--tool-side right`.
+The default CLI treats A as the top-left tool-center start and B as the
+bottom-right tool-center end. The tool path is generated first from
+`--step-spacing-m`; the chassis path is derived afterward. Legacy diagnostic
+modes such as `ab_diagonal_center`, `ab_centerline_width`, and `diagonal_ab` are
+available only through `--advanced` or the compatibility wrapper. Every emitted
+primitive row must be one of `move_forward`, `move_backward`, `rotate_left`, or
+`rotate_right`.
+It does not generate motor commands, does not open serial ports, does not send
+HC-12 frames, and does not upload firmware.
+
+For A/B tool-centered planning, use
+[docs/side_tool_path_planning.md](side_tool_path_planning.md). The reset planner
+draws the fixed rectangle from the top-left A and bottom-right B tool-center
+points, generates a continuous serpentine tool route from `--step-spacing-m`,
+derives the chassis support path afterward, and writes
+`preview_tool_path_primary.png`, `preview_chassis_derived_from_tool.png`,
+`preview_primitive_sequence.png`, and `preview_tool_coverage_only.png`. Reset
+readiness requires
+`tool_path_starts_at_A=true`, `tool_path_ends_at_B=true`,
+`tool_path_continuous=true`, `tool_connector_count = tool_track_count - 1`,
+`primitive_sequence_valid=true`, and `motor_command_generated=false`.
+Contamination and transition-envelope checks are optional legacy diagnostics,
+not the default planner gate.
+Use `--workspace-mode axis_width` only for the older A->B axis plus width
+interpretation.
+
+To export preview poses as offline target waypoint diagnostics:
+
+```bash
+uv run python tools/preview_side_tool_waypoints.py \
+  --tool-side left \
+  --tool-lateral-offset-m 0.35 \
+  --tool-width-m 0.30 \
+  --lane-spacing-m 0.30 \
+  --row-length-m 8.0 \
+  --row-count 4 \
+  --start-heading-deg 0 \
+  --first-lane-direction forward \
+  --out-dir outputs/side_tool_waypoint_preview/left_tool_example
+```
+
+The waypoint export writes `side_tool_waypoints.csv` and
+`waypoint_summary.md`. It includes target bearings, segment labels, expected
+rover heading, reverse-direction flags, and `motor_command_generated=False` for
+every row. It is not a firmware input and must not be streamed to the rover.

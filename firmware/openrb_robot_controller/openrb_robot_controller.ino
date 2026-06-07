@@ -147,6 +147,18 @@
 #define COURSE_MIN_DISPLACEMENT_M 2.0
 #endif
 
+#ifndef GPS_COURSE_LATCH_DIAG
+#define GPS_COURSE_LATCH_DIAG 1
+#endif
+
+#ifndef GPS_COURSE_LATCH_DIAG_MAX_AGE_MS
+#define GPS_COURSE_LATCH_DIAG_MAX_AGE_MS 5000
+#endif
+
+#ifndef GPS_COURSE_OUTPUT_LATCH_MS
+#define GPS_COURSE_OUTPUT_LATCH_MS GPS_COURSE_LATCH_DIAG_MAX_AGE_MS
+#endif
+
 // 0-based PPM index of the Manual/Auto switch channel. Default 4 = receiver CH5.
 // Override only after firmware/ppm_channel_map_probe proves a stable 2-position
 // switch channel. This does not weaken failsafe or change motion gates.
@@ -329,6 +341,8 @@ constexpr double SINGLE_WAYPOINT_MAX_HDOP = GPS_DRYRUN_MAX_HDOP;
 constexpr uint32_t SINGLE_WAYPOINT_AUTO_TIMEOUT_MS = 15000;
 constexpr double SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M = COURSE_MIN_DISPLACEMENT_M;
 constexpr const char *SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_SOURCE = STRINGIFY_VALUE(COURSE_MIN_DISPLACEMENT_M);
+constexpr bool GPS_COURSE_LATCH_DIAG_ENABLED = GPS_COURSE_LATCH_DIAG != 0;
+constexpr uint32_t GPS_COURSE_OUTPUT_LATCH_MS_VALUE = GPS_COURSE_OUTPUT_LATCH_MS;
 
 constexpr bool     GROUND_CRAWL_ENABLED = GROUND_CRAWL_TEST_MODE != 0;
 constexpr float    GROUND_CRAWL_MAX_CMD_VALUE = GROUND_CRAWL_MAX_CMD;
@@ -2489,6 +2503,26 @@ float pfDesiredLogicalRightCmd = 0.0f;
 float pfDesiredPhysicalACmd = 0.0f;
 float pfDesiredPhysicalBCmd = 0.0f;
 const char *pfBlockReason = "MODE_OFF";
+bool pfGpsCourseReadyCandidateFlag = false;
+const char *pfGpsCourseBlockReason = "NO_ANCHOR";
+const char *pfGpsCourseAnchorResetReason = "BOOT";
+uint32_t pfGpsCourseAnchorResetCount = 0;
+uint32_t pfGpsCourseAnchorMs = 0;
+bool pfGpsCourseLastPositionValid = false;
+double pfGpsCourseLastLat = 0.0;
+double pfGpsCourseLastLon = 0.0;
+double pfGpsCourseTotalDisplacementSinceBootM = 0.0;
+double pfGpsCourseTotalDisplacementSinceLastResetM = 0.0;
+bool pfGpsCourseOutputValid = false;
+double pfGpsCourseOutputDeg = 0.0;
+uint32_t pfGpsCourseOutputMs = 0;
+bool pfGpsCourseCandidateValid = false;
+double pfGpsCourseCandidateDeg = 0.0;
+bool pfGpsCourseLastAcceptedValid = false;
+double pfGpsCourseLastAcceptedDeg = 0.0;
+double pfGpsCourseLastAcceptedDisplacementM = 0.0;
+uint32_t pfGpsCourseLastAcceptedMs = 0;
+uint32_t pfGpsCourseLastAcceptedAnchorResetCount = 0;
 
 const char *headingSourceModeName() {
   switch (HEADING_SOURCE_MODE) {
@@ -2531,6 +2565,11 @@ const char *pfHc12ParseError = "NONE";
 const char *pfHc12LastCmd = "NONE";
 long pfHc12LastSeq = -1;
 String pfHc12RxLine;
+
+void pfMarkCourseAnchorReset(const char *reason, uint32_t now);
+const char *pfCourseNoPositionBlockReason();
+const char *pfCourseOutputBlockReason(uint32_t now);
+bool pfCourseOutputDiagValid(uint32_t now);
 
 bool pfParseDoubleToken(const String &token, double &out) {
   if (token.length() == 0) {
@@ -2582,6 +2621,7 @@ void pfHandleHc12Frame(const String &type, long seq, const String &payload) {
       pfHc12TargetLon = lon;
       pfHc12TargetValid = true;
       pfCourseRefValid = false;  // re-seed heading reference for the new target
+      pfMarkCourseAnchorReset("HC12_TARGET", millis());
       pfHc12SendFrame("ACK", seq, "SET_TARGET");
     } else {
       pfHc12SendFrame("ERR", seq, "SET_TARGET_PAYLOAD");
@@ -2600,6 +2640,7 @@ void pfHandleHc12Frame(const String &type, long seq, const String &payload) {
     pfHc12TargetValid = false;
     pfHc12Estop = false;
     pfCourseRefValid = false;
+    pfMarkCourseAnchorReset("HC12_CLEAR", millis());
     pfHc12SendFrame("ACK", seq, "CLEAR");
   } else {
     pfHc12LastCmd = "UNSUPPORTED";
@@ -2661,6 +2702,76 @@ bool pfResolveCurrentPosition() {
   return false;
 }
 
+void pfMarkCourseAnchorReset(const char *reason, uint32_t now) {
+  pfGpsCourseAnchorResetReason = reason;
+  pfGpsCourseAnchorResetCount++;
+  pfGpsCourseAnchorMs = now;
+  pfGpsCourseTotalDisplacementSinceLastResetM = 0.0;
+}
+
+const char *pfCourseNoPositionBlockReason() {
+  const char *reason = gpsDryrunBlockReason();
+  if (strcmp(reason, "STALE_LOCATION") == 0) {
+    return "GPS_AGE_BLOCK";
+  }
+  if (strcmp(reason, "OK") == 0) {
+    return "NO_POSITION";
+  }
+  return "GPS_QUALITY_BLOCK";
+}
+
+bool pfCourseOutputDiagValid(uint32_t now) {
+  if (!GPS_COURSE_LATCH_DIAG_ENABLED) {
+    return false;
+  }
+  if (!pfGpsCourseLastAcceptedValid) {
+    return false;
+  }
+  if (now - pfGpsCourseLastAcceptedMs > GPS_COURSE_OUTPUT_LATCH_MS_VALUE) {
+    return false;
+  }
+  return gpsDryrunReady();
+}
+
+const char *pfCourseOutputBlockReason(uint32_t now) {
+  if (!GPS_COURSE_LATCH_DIAG_ENABLED) {
+    return "DIAG_LATCH_DISABLED";
+  }
+  if (!pfGpsCourseLastAcceptedValid) {
+    return "NO_ACCEPTED_COURSE_YET";
+  }
+  if (now - pfGpsCourseLastAcceptedMs > GPS_COURSE_OUTPUT_LATCH_MS_VALUE) {
+    return "ACCEPTED_COURSE_EXPIRED";
+  }
+  if (!gpsDryrunReady()) {
+    const char *reason = gpsDryrunBlockReason();
+    if (strcmp(reason, "STALE_LOCATION") == 0) {
+      return "GPS_AGE_BLOCK";
+    }
+    return "GPS_QUALITY_BLOCK";
+  }
+  return "OK";
+}
+
+void pfUpdateCourseDistanceDiagnostics() {
+  if (!pfPositionValidFlag || strcmp(pfPositionSource, "gps") != 0) {
+    pfGpsCourseLastPositionValid = false;
+    return;
+  }
+
+  if (pfGpsCourseLastPositionValid) {
+    double stepM = dryrunDistanceMeters(
+        pfGpsCourseLastLat, pfGpsCourseLastLon, pfCurrentLat, pfCurrentLon);
+    if (stepM >= 0.0 && stepM < 100.0) {
+      pfGpsCourseTotalDisplacementSinceBootM += stepM;
+      pfGpsCourseTotalDisplacementSinceLastResetM += stepM;
+    }
+  }
+  pfGpsCourseLastLat = pfCurrentLat;
+  pfGpsCourseLastLon = pfCurrentLon;
+  pfGpsCourseLastPositionValid = true;
+}
+
 void pfResolveActiveTarget(double &lat, double &lon) {
   if (pfHc12TargetValid) {
     lat = pfHc12TargetLat;
@@ -2691,6 +2802,7 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
                     (normRcCentered(throttleUs, THROTTLE_CENTER_US) == 0.0f);
 
   pfPositionValidFlag = pfResolveCurrentPosition();
+  pfUpdateCourseDistanceDiagnostics();
   double targetLat = 0.0;
   double targetLon = 0.0;
   pfResolveActiveTarget(targetLat, targetLon);
@@ -2698,8 +2810,14 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
   pfArrivedFlag = false;
   pfTargetDistanceM = 0.0;
   pfTargetBearingDeg = 0.0;
+  pfGpsCourseCandidateValid = false;
 
   if (!pfPositionValidFlag) {
+    if (pfCourseRefValid) {
+      pfMarkCourseAnchorReset("NO_POSITION", now);
+    }
+    pfGpsCourseReadyCandidateFlag = false;
+    pfGpsCourseBlockReason = pfCourseNoPositionBlockReason();
     pfCourseRefValid = false;
     pfHeadingSource = "NONE";
     pfResetSteeringOutputs("NO_POSITION");
@@ -2710,6 +2828,11 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
 
     if (strcmp(pfPositionSource, "gps") != 0) {
       // Mock/static position cannot yield a course-over-ground heading.
+      if (pfCourseRefValid) {
+        pfMarkCourseAnchorReset("MOCK_POSITION", now);
+      }
+      pfGpsCourseReadyCandidateFlag = false;
+      pfGpsCourseBlockReason = "MOCK_POSITION";
       pfCourseRefValid = false;
       pfHeadingSource = "NONE_MOCK_NO_COURSE";
       pfResetSteeringOutputs("NO_HEADING");
@@ -2717,19 +2840,37 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
       pfCourseRefLat = pfCurrentLat;
       pfCourseRefLon = pfCurrentLon;
       pfCourseRefValid = true;
+      pfMarkCourseAnchorReset("ANCHOR_SEEDED", now);
+      pfGpsCourseReadyCandidateFlag = false;
+      pfGpsCourseBlockReason = "ANCHOR_SEEDED";
       pfHeadingSource = "GPS_COURSE";
       pfResetSteeringOutputs("NO_HEADING");
     } else {
       pfCourseDisplacementM =
           dryrunDistanceMeters(pfCourseRefLat, pfCourseRefLon, pfCurrentLat, pfCurrentLon);
+      pfGpsCourseReadyCandidateFlag = pfCourseDisplacementM >= SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M;
       if (pfCourseDisplacementM < SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M) {
+        pfGpsCourseBlockReason = "BELOW_MIN_DISPLACEMENT";
         pfHeadingSource = "GPS_COURSE";
         pfResetSteeringOutputs("NO_HEADING");
       } else {
+        double acceptedDisplacementM = pfCourseDisplacementM;
         pfEstimatedCourseDeg =
             dryrunBearingDegrees(pfCourseRefLat, pfCourseRefLon, pfCurrentLat, pfCurrentLon);
+        pfGpsCourseCandidateValid = true;
+        pfGpsCourseCandidateDeg = pfEstimatedCourseDeg;
         pfCourseRefLat = pfCurrentLat;
         pfCourseRefLon = pfCurrentLon;
+        pfMarkCourseAnchorReset("COURSE_ACCEPTED_RESEED", now);
+        pfGpsCourseBlockReason = "OK";
+        pfGpsCourseOutputValid = true;
+        pfGpsCourseOutputDeg = pfEstimatedCourseDeg;
+        pfGpsCourseOutputMs = now;
+        pfGpsCourseLastAcceptedValid = true;
+        pfGpsCourseLastAcceptedDeg = pfEstimatedCourseDeg;
+        pfGpsCourseLastAcceptedDisplacementM = acceptedDisplacementM;
+        pfGpsCourseLastAcceptedMs = now;
+        pfGpsCourseLastAcceptedAnchorResetCount = pfGpsCourseAnchorResetCount;
         pfHeadingReadyFlag = true;
         pfHeadingSource = "GPS_COURSE";
         pfBearingErrorDeg = normalizeBearingErrorDegrees(pfTargetBearingDeg - pfEstimatedCourseDeg);
@@ -2756,6 +2897,7 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
     if (pfArrivedFlag && !pfHc12TargetValid && (pfActiveIndex + 1 < pfWaypointCount)) {
       pfActiveIndex++;
       pfCourseRefValid = false;
+      pfMarkCourseAnchorReset("WAYPOINT_ADVANCE", now);
     }
   }
 
@@ -2763,21 +2905,26 @@ void updatePathFollowingDryrun(bool rcValid, bool autoSwitchOn, bool rcManualAct
   // GPS-course vs IMU-yaw seeded delta comparison (diagnostic only; never drives
   // motors). IMU yaw is relative, so we compare CHANGE in GPS course against
   // CHANGE in IMU yaw since the first moment both were available.
-  if (pfHeadingReadyFlag && imuHeadingReady()) {
+  bool gpsCourseForAgreementValid = pfHeadingReadyFlag || pfCourseOutputDiagValid(now);
+  double gpsCourseForAgreementDeg = pfHeadingReadyFlag ? pfEstimatedCourseDeg : pfGpsCourseLastAcceptedDeg;
+  if (gpsCourseForAgreementValid && imuHeadingReady()) {
     if (!pfHeadingSeedValid) {
       pfHeadingSeedValid = true;
-      pfHeadingSeedGpsCourse = pfEstimatedCourseDeg;
+      pfHeadingSeedGpsCourse = gpsCourseForAgreementDeg;
       pfHeadingSeedImuYaw = imuRelativeYawDeg;
       pfHeadingAgreementErrorDeg = 0.0;
-      pfHeadingAgreementDiag = "SEEDED";
+      pfHeadingAgreementDiag = pfHeadingReadyFlag ? "SEEDED" : "GPS_COURSE_LATCH_AVAILABLE";
     } else {
-      double gpsDelta = normalizeBearingErrorDegrees(pfEstimatedCourseDeg - pfHeadingSeedGpsCourse);
+      double gpsDelta = normalizeBearingErrorDegrees(gpsCourseForAgreementDeg - pfHeadingSeedGpsCourse);
       double imuDelta = normalizeBearingErrorDegrees(imuRelativeYawDeg - pfHeadingSeedImuYaw);
       pfHeadingAgreementErrorDeg = normalizeBearingErrorDegrees(gpsDelta - imuDelta);
-      pfHeadingAgreementDiag = "SEEDED_DELTA_COMPARE";
+      pfHeadingAgreementDiag = "HEADING_AGREEMENT_READY";
     }
   } else if (!imuHeadingReady()) {
     pfHeadingAgreementDiag = "IMU_NOT_READY";
+  } else if (pfGpsCourseLastAcceptedValid &&
+             now - pfGpsCourseLastAcceptedMs > GPS_COURSE_OUTPUT_LATCH_MS_VALUE) {
+    pfHeadingAgreementDiag = "GPS_COURSE_EXPIRED";
   } else {
     pfHeadingAgreementDiag = "WAITING_GPS_COURSE";
   }
@@ -2942,6 +3089,97 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
   Serial.print(pfHeadingSource);
   Serial.print(F(" course_displacement_m="));
   Serial.print(pfCourseDisplacementM, 2);
+  bool gpsCourseOutputDiagValid = pfCourseOutputDiagValid(now);
+  Serial.print(F(" gps_course_ready_candidate="));
+  Serial.print(pfGpsCourseReadyCandidateFlag ? F("true") : F("false"));
+  Serial.print(F(" gps_course_block_reason="));
+  Serial.print(pfGpsCourseBlockReason);
+  Serial.print(F(" gps_course_min_displacement_m="));
+  Serial.print(SINGLE_WAYPOINT_COURSE_MIN_DISPLACEMENT_M, 1);
+  Serial.print(F(" gps_course_anchor_reset_reason="));
+  Serial.print(pfGpsCourseAnchorResetReason);
+  Serial.print(F(" gps_course_anchor_reset_count="));
+  Serial.print(pfGpsCourseAnchorResetCount);
+  Serial.print(F(" gps_course_anchor_age_ms="));
+  if (pfCourseRefValid && pfGpsCourseAnchorMs > 0) {
+    Serial.print(now - pfGpsCourseAnchorMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_segment_displacement_m="));
+  Serial.print(pfCourseDisplacementM, 2);
+  Serial.print(F(" gps_course_total_displacement_m_since_boot="));
+  Serial.print(pfGpsCourseTotalDisplacementSinceBootM, 2);
+  Serial.print(F(" gps_course_total_displacement_m_since_last_reset="));
+  Serial.print(pfGpsCourseTotalDisplacementSinceLastResetM, 2);
+  Serial.print(F(" gps_course_latch_diag="));
+  Serial.print(GPS_COURSE_LATCH_DIAG_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" gps_course_output_latch_ms="));
+  Serial.print(GPS_COURSE_OUTPUT_LATCH_MS_VALUE);
+  Serial.print(F(" gps_course_candidate_deg="));
+  if (pfGpsCourseCandidateValid) {
+    Serial.print(pfGpsCourseCandidateDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_last_accepted_valid="));
+  Serial.print(pfGpsCourseLastAcceptedValid ? F("true") : F("false"));
+  Serial.print(F(" gps_course_last_accepted_deg="));
+  if (pfGpsCourseLastAcceptedValid) {
+    Serial.print(pfGpsCourseLastAcceptedDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_last_accepted_age_ms="));
+  if (pfGpsCourseLastAcceptedValid) {
+    Serial.print(now - pfGpsCourseLastAcceptedMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_last_accepted_displacement_m="));
+  if (pfGpsCourseLastAcceptedValid) {
+    Serial.print(pfGpsCourseLastAcceptedDisplacementM, 2);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_last_accepted_anchor_reset_count="));
+  if (pfGpsCourseLastAcceptedValid) {
+    Serial.print(pfGpsCourseLastAcceptedAnchorResetCount);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_output_valid="));
+  Serial.print(gpsCourseOutputDiagValid ? F("true") : F("false"));
+  Serial.print(F(" gps_course_estimated_deg="));
+  if (pfGpsCourseOutputValid) {
+    Serial.print(pfGpsCourseOutputDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_output_deg="));
+  if (gpsCourseOutputDiagValid) {
+    Serial.print(pfGpsCourseLastAcceptedDeg, 1);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_output_block_reason="));
+  Serial.print(pfCourseOutputBlockReason(now));
+  Serial.print(F(" gps_course_output_age_ms="));
+  if (gpsCourseOutputDiagValid) {
+    Serial.print(now - pfGpsCourseLastAcceptedMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_age_ms="));
+  if (pfGpsCourseOutputValid) {
+    Serial.print(now - pfGpsCourseOutputMs);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_course_hdop_ok="));
+  Serial.print(gpsMotionHdopOk() ? F("true") : F("false"));
+  Serial.print(F(" gps_course_sats_ok="));
+  Serial.print(gpsMotionSatsOk() ? F("true") : F("false"));
   Serial.print(F(" estimated_course_deg="));
   Serial.print(pfEstimatedCourseDeg, 1);
   Serial.print(F(" bearing_error_deg="));
@@ -3118,8 +3356,8 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
   Serial.print(F(" imu_heading_block_reason="));
   Serial.print(imuHeadingBlockReason);
   Serial.print(F(" gps_course_deg="));
-  if (pfHeadingReadyFlag) {
-    Serial.print(pfEstimatedCourseDeg, 1);
+  if (gpsCourseOutputDiagValid) {
+    Serial.print(pfGpsCourseLastAcceptedDeg, 1);
   } else {
     Serial.print(F("NA"));
   }

@@ -68,7 +68,8 @@ station HC-12 operation.
   station environments.
 
 See [docs/current_hardware_status.md](docs/current_hardware_status.md),
-[docs/wiring.md](docs/wiring.md), and [firmware/README.md](firmware/README.md).
+[docs/wiring.md](docs/wiring.md), [docs/outdoor_no_motion_validation.md](docs/outdoor_no_motion_validation.md),
+and [firmware/README.md](firmware/README.md).
 
 ## GPS Antenna Frame Vs Rover Body Frame
 
@@ -547,6 +548,37 @@ Stack"). Summary:
   status even with no indoor fix).
 - Path-planning preview: `tools/path_planning_preview.py` (preview-only CSV +
   markdown + optional PNG from manual coordinates).
+- Side-mounted cleaning-tool preview: `tools/side_tool_path_preview.py`
+  now defaults to a small, tool-centered serpentine CLI. A is the top-left
+  tool/paint-tank center start and B is the bottom-right tool/paint-tank center
+  end. The normal inputs are only A, B, `--step-spacing-m`, robot dimensions,
+  tool dimensions/offset, and `--tool-side`. The tool center path is generated
+  first; the rover chassis path is derived afterward. Sweep tracks are active by
+  default, while connectors and rotations are tool-inactive by default. It emits
+  only `move_forward`, `move_backward`, `rotate_left`, and `rotate_right`
+  preview primitives and produces no rover motor commands. The simple preview
+  writes `tool_path.csv`, `primitive_sequence.csv`, `summary.md`,
+  `preview_route_sequence.md`, `preview_tool_path_primary.png`,
+  `preview_chassis_derived_from_tool.png`, `preview_primitive_sequence.png`, and
+  `preview_tool_coverage_only.png`. Legacy/debug planner options are available
+  only with `--advanced`; `tools/preview_side_tool_path.py` is a compatibility
+  alias that opts into advanced mode.
+- Tool-centered A/B side-tool preview is documented in
+  [docs/side_tool_path_planning.md](docs/side_tool_path_planning.md). The reset
+  readiness gate is intentionally narrow: the tool path must start at A, end at
+  B, remain continuous, have one connector between adjacent tracks, derive the
+  chassis path from tool-space geometry, emit only the four preview primitives
+  (`move_forward`, `move_backward`, `rotate_left`, `rotate_right`), and keep
+  `motor_command_generated=False`. Boundary, swept-volume, and contamination
+  checks remain optional diagnostic layers rather than default route-shaping
+  constraints for `tool_serpentine_ab`.
+- Side-tool tracking simulation: `tools/simulate_side_tool_tracking.py` consumes
+  `side_tool_path.csv` and writes offline `virtual_*` tracking diagnostics only.
+  See [docs/feedback_tracking_design.md](docs/feedback_tracking_design.md).
+- Side-tool waypoint preview: `tools/preview_side_tool_waypoints.py` exports
+  the same preview geometry as offline target waypoints with bearings, segment
+  labels, expected headings, reverse-direction flags, and
+  `motor_command_generated=False`. It is not a rover command file.
 - Firmware path-following dry-run: `-DPATH_FOLLOWING_DRYRUN=1` computes
   distance/bearing/heading/steering and runs the HC-12 waypoint protocol with
   motors disabled.
