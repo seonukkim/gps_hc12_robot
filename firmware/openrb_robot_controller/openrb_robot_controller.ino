@@ -127,6 +127,118 @@
 #define GROUND_CRAWL_TEST_MODE 0
 #endif
 
+#ifndef STAGE15_GUARDED_CRAWL_TEST
+#define STAGE15_GUARDED_CRAWL_TEST 0
+#endif
+
+#ifndef STAGE15_MAX_CMD
+#define STAGE15_MAX_CMD 0.06
+#endif
+
+#ifndef STAGE15_PULSE_MS
+#define STAGE15_PULSE_MS 200
+#endif
+
+#ifndef STAGE15_INTER_PULSE_MS
+#define STAGE15_INTER_PULSE_MS 2000
+#endif
+
+#ifndef STAGE15_REQUIRE_RC_NEUTRAL
+#define STAGE15_REQUIRE_RC_NEUTRAL 0
+#endif
+
+#ifndef STAGE16_USB_GUARDED_CRAWL
+#define STAGE16_USB_GUARDED_CRAWL 0
+#endif
+
+#ifndef STAGE16_MAX_CMD
+#define STAGE16_MAX_CMD 0.04
+#endif
+
+#ifndef STAGE16_MAX_MS
+#define STAGE16_MAX_MS 150
+#endif
+
+#ifndef STAGE17_FIRST_PRIMITIVE_CRAWL
+#define STAGE17_FIRST_PRIMITIVE_CRAWL 0
+#endif
+
+#ifndef STAGE17_MAX_CMD
+#define STAGE17_MAX_CMD 0.06
+#endif
+
+#ifndef STAGE17_MAX_MS
+#define STAGE17_MAX_MS 500
+#endif
+
+#ifndef STAGE18_MOTOR_MAPPING_PROBE
+#define STAGE18_MOTOR_MAPPING_PROBE 0
+#endif
+
+#ifndef STAGE18_MAX_CMD
+#define STAGE18_MAX_CMD 0.08
+#endif
+
+#ifndef STAGE18_MAX_MS
+#define STAGE18_MAX_MS 800
+#endif
+
+#ifndef STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+#define STAGE20_PHYSICAL_AB_GUARDED_CRAWL 0
+#endif
+
+#ifndef STAGE20_MAX_ABS_A
+#define STAGE20_MAX_ABS_A 0.25
+#endif
+
+#ifndef STAGE20_MAX_ABS_B
+#define STAGE20_MAX_ABS_B 0.25
+#endif
+
+#ifndef STAGE20_MAX_MS
+#define STAGE20_MAX_MS 300
+#endif
+
+#if STAGE15_GUARDED_CRAWL_TEST && \
+    (PHYSICAL_PATH_FOLLOWING_ENABLE != 0 || PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0 || \
+     PATH_FOLLOWING_DRYRUN != 0 || GROUND_CRAWL_TEST_MODE != 0 || AUTO_MOTION_ARMED != 0 || \
+     STAGE16_USB_GUARDED_CRAWL != 0 || STAGE17_FIRST_PRIMITIVE_CRAWL != 0 || \
+     STAGE18_MOTOR_MAPPING_PROBE != 0 || STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0)
+#error "Stage 15 guarded crawl must not enable path following, autonomous motion, or path motor-output gates."
+#endif
+
+#if STAGE16_USB_GUARDED_CRAWL && \
+    (PHYSICAL_PATH_FOLLOWING_ENABLE != 0 || PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0 || \
+     PATH_FOLLOWING_DRYRUN != 0 || GROUND_CRAWL_TEST_MODE != 0 || AUTO_MOTION_ARMED != 0 || \
+     STAGE15_GUARDED_CRAWL_TEST != 0 || STAGE17_FIRST_PRIMITIVE_CRAWL != 0 || \
+     STAGE18_MOTOR_MAPPING_PROBE != 0 || STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0)
+#error "Stage 16 guarded crawl must not enable path following, autonomous motion, Stage 15, or path motor-output gates."
+#endif
+
+#if STAGE17_FIRST_PRIMITIVE_CRAWL && \
+    (PHYSICAL_PATH_FOLLOWING_ENABLE != 0 || PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0 || \
+     PATH_FOLLOWING_DRYRUN != 0 || GROUND_CRAWL_TEST_MODE != 0 || AUTO_MOTION_ARMED != 0 || \
+     STAGE15_GUARDED_CRAWL_TEST != 0 || STAGE16_USB_GUARDED_CRAWL != 0 || \
+     STAGE18_MOTOR_MAPPING_PROBE != 0 || STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0)
+#error "Stage 17 first-primitive crawl must not enable path following, autonomous motion, Stage 15, Stage 16, or path motor-output gates."
+#endif
+
+#if STAGE18_MOTOR_MAPPING_PROBE && \
+    (PHYSICAL_PATH_FOLLOWING_ENABLE != 0 || PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0 || \
+     PATH_FOLLOWING_DRYRUN != 0 || GROUND_CRAWL_TEST_MODE != 0 || AUTO_MOTION_ARMED != 0 || \
+     STAGE15_GUARDED_CRAWL_TEST != 0 || STAGE16_USB_GUARDED_CRAWL != 0 || \
+     STAGE17_FIRST_PRIMITIVE_CRAWL != 0 || STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0)
+#error "Stage 18 motor mapping probe must not enable path following, autonomous motion, Stage 15, Stage 16, Stage 17, or path motor-output gates."
+#endif
+
+#if STAGE20_PHYSICAL_AB_GUARDED_CRAWL && \
+    (PHYSICAL_PATH_FOLLOWING_ENABLE != 0 || PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0 || \
+     PATH_FOLLOWING_DRYRUN != 0 || GROUND_CRAWL_TEST_MODE != 0 || AUTO_MOTION_ARMED != 0 || \
+     STAGE15_GUARDED_CRAWL_TEST != 0 || STAGE16_USB_GUARDED_CRAWL != 0 || \
+     STAGE17_FIRST_PRIMITIVE_CRAWL != 0 || STAGE18_MOTOR_MAPPING_PROBE != 0)
+#error "Stage 20 physical A/B guarded crawl must not enable path following, autonomous motion, Stage 15, Stage 16, Stage 17, Stage 18, or path motor-output gates."
+#endif
+
 #ifndef GROUND_CRAWL_MAX_CMD
 #define GROUND_CRAWL_MAX_CMD 0.08
 #endif
@@ -258,7 +370,8 @@
 #define ENABLE_GPS_TELEMETRY 1
 #if MOTOR_PULSE_TEST_MODE || FIXED_WIRING_GPS_SERIAL2_DIAG || \
     FIXED_WIRING_GPS_SERIAL2_RC_AUTONOMY_DRYRUN || \
-    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT || PATH_FOLLOWING_DRYRUN
+    FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT || PATH_FOLLOWING_DRYRUN || \
+    STAGE15_GUARDED_CRAWL_TEST || STAGE16_USB_GUARDED_CRAWL
 // GPS owns Serial2 here. The legacy station HC-12 command stack (which can drive
 // motors via CMD,MANUAL/CMD,AUTO) stays disabled. Path-following mode runs its
 // own motor-free HC-12 waypoint protocol on a separate UART (Serial1/Serial3).
@@ -302,6 +415,35 @@ constexpr float RIGHT_MOTOR_MIN_CMD_VALUE = RIGHT_MOTOR_MIN_CMD;
 constexpr bool MOTOR_OUTPUT_SWAP_LR_ENABLED = MOTOR_OUTPUT_SWAP_LR != 0;
 constexpr float MANUAL_FORWARD_SIGN_VALUE = MANUAL_FORWARD_SIGN;
 constexpr float MANUAL_TURN_SIGN_VALUE = MANUAL_TURN_SIGN;
+constexpr bool STAGE15_GUARDED_CRAWL_ENABLED = STAGE15_GUARDED_CRAWL_TEST != 0;
+constexpr float STAGE15_MAX_CMD_VALUE = STAGE15_MAX_CMD;
+constexpr uint32_t STAGE15_PULSE_MS_VALUE = STAGE15_PULSE_MS;
+constexpr uint32_t STAGE15_INTER_PULSE_MS_VALUE = STAGE15_INTER_PULSE_MS;
+constexpr bool STAGE15_REQUIRE_RC_NEUTRAL_VALUE = STAGE15_REQUIRE_RC_NEUTRAL != 0;
+constexpr bool STAGE16_USB_GUARDED_CRAWL_ENABLED = STAGE16_USB_GUARDED_CRAWL != 0;
+constexpr float STAGE16_MAX_CMD_VALUE = STAGE16_MAX_CMD;
+constexpr uint32_t STAGE16_MAX_MS_VALUE = STAGE16_MAX_MS;
+constexpr bool STAGE17_FIRST_PRIMITIVE_CRAWL_ENABLED = STAGE17_FIRST_PRIMITIVE_CRAWL != 0;
+constexpr float STAGE17_MAX_CMD_VALUE = STAGE17_MAX_CMD;
+constexpr uint32_t STAGE17_MAX_MS_VALUE = STAGE17_MAX_MS;
+constexpr bool STAGE18_MOTOR_MAPPING_PROBE_ENABLED = STAGE18_MOTOR_MAPPING_PROBE != 0;
+constexpr float STAGE18_MAX_CMD_VALUE = STAGE18_MAX_CMD;
+constexpr uint32_t STAGE18_MAX_MS_VALUE = STAGE18_MAX_MS;
+constexpr bool STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED = STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0;
+constexpr float STAGE20_MAX_ABS_A_VALUE = STAGE20_MAX_ABS_A;
+constexpr float STAGE20_MAX_ABS_B_VALUE = STAGE20_MAX_ABS_B;
+constexpr uint32_t STAGE20_MAX_MS_VALUE = STAGE20_MAX_MS;
+constexpr bool STAGE_USB_GUARDED_CRAWL_ENABLED =
+    STAGE16_USB_GUARDED_CRAWL != 0 || STAGE17_FIRST_PRIMITIVE_CRAWL != 0 ||
+    STAGE18_MOTOR_MAPPING_PROBE != 0 || STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0;
+constexpr float STAGE_USB_GUARDED_MAX_CMD_VALUE =
+    STAGE20_PHYSICAL_AB_GUARDED_CRAWL ? STAGE20_MAX_ABS_A :
+    (STAGE18_MOTOR_MAPPING_PROBE ? STAGE18_MAX_CMD : (STAGE17_FIRST_PRIMITIVE_CRAWL ? STAGE17_MAX_CMD : STAGE16_MAX_CMD));
+constexpr float STAGE_USB_GUARDED_MAX_B_VALUE =
+    STAGE20_PHYSICAL_AB_GUARDED_CRAWL ? STAGE20_MAX_ABS_B : STAGE_USB_GUARDED_MAX_CMD_VALUE;
+constexpr uint32_t STAGE_USB_GUARDED_MAX_MS_VALUE =
+    STAGE20_PHYSICAL_AB_GUARDED_CRAWL ? STAGE20_MAX_MS :
+    (STAGE18_MOTOR_MAPPING_PROBE ? STAGE18_MAX_MS : (STAGE17_FIRST_PRIMITIVE_CRAWL ? STAGE17_MAX_MS : STAGE16_MAX_MS));
 constexpr bool DRYRUN_TARGET_AVAILABLE = true;
 constexpr double DRYRUN_TARGET_LAT = 35.571120;
 constexpr double DRYRUN_TARGET_LON = 129.186050;
@@ -485,6 +627,37 @@ uint32_t motorPulseElapsedMs = 0;
 bool motorPulseLatchedStopFlag = false;
 bool motorPulseReadyFlag = false;
 const char *motorPulseBlockReason = "MODE_OFF";
+#endif
+
+#if STAGE15_GUARDED_CRAWL_TEST
+String stage15UsbLine;
+bool stage15PulseActiveFlag = false;
+uint32_t stage15PulseStartMs = 0;
+uint32_t stage15LastStopMs = 0;
+uint32_t stage15PulseElapsedMs = 0;
+const char *stage15PulseType = "test_stop";
+float stage15PulseLeftCmd = 0.0f;
+float stage15PulseRightCmd = 0.0f;
+const char *stage15BlockReason = "WAITING_FOR_TRIGGER";
+bool stage15FailsafeSeenFlag = false;
+uint32_t stage15PulseSequence = 0;
+#endif
+
+#if STAGE16_USB_GUARDED_CRAWL || STAGE17_FIRST_PRIMITIVE_CRAWL || STAGE18_MOTOR_MAPPING_PROBE || STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+String stage16UsbLine;
+bool stage16PulseActiveFlag = false;
+uint32_t stage16PulseStartMs = 0;
+uint32_t stage16PulseElapsedMs = 0;
+int32_t stage16CmdSeq = -1;
+float stage16LeftCmd = 0.0f;
+float stage16RightCmd = 0.0f;
+uint32_t stage16CmdMs = 0;
+const char *stage16CmdState = "IDLE";
+const char *stage16RejectReason = "NONE";
+bool stage16LatchedStopFlag = false;
+bool stage16ArmedFlag = false;
+uint32_t stage16LastCmdMs = 0;
+uint32_t stage16LastHeartbeatMs = 0;
 #endif
 
 void ppmISR() {
@@ -1074,6 +1247,23 @@ void applyMotorPulseDirectWheelCommand(float logicalLeft, float logicalRight) {
   applyDriveCommandInternal(logicalLeft, logicalRight, true);
 }
 
+void applyPhysicalABManualEquivalentCommand(float physicalACmd, float physicalBCmd) {
+  float a = clampUnit(physicalACmd);
+  float b = clampUnit(physicalBCmd);
+  float logicalLeft = clampUnit(a - b);
+  float logicalRight = clampUnit(a + b);
+  lastLogicalLeftCmd = logicalLeft;
+  lastLogicalRightCmd = logicalRight;
+  lastRawLeftCmd = logicalLeft;
+  lastRawRightCmd = logicalRight;
+  lastCalibratedLeftCmd = logicalLeft;
+  lastCalibratedRightCmd = logicalRight;
+  lastLeftOutputCmd = logicalLeft;
+  lastRightOutputCmd = logicalRight;
+  lastMixerBypassedForMotorPulse = true;
+  writeEscOutputPins(a, b);
+}
+
 void applyAutoCommand(float left, float right) {
   // Wheel-off-ground only for ESC validation.
   applyDriveCommand(left, right);
@@ -1220,6 +1410,504 @@ bool rcAutoSwitchOn() {
   readRcChannels(steering, throttle, mode);
   return rcAutoSwitchOn(mode);
 }
+
+#if STAGE15_GUARDED_CRAWL_TEST
+bool stage15NeutralOk(uint16_t steeringUs, uint16_t throttleUs) {
+  return normRcCentered(steeringUs, STEERING_CENTER_US) == 0.0f &&
+         normRcCentered(throttleUs, THROTTLE_CENTER_US) == 0.0f;
+}
+
+void stage15PrintEvent(const char *event, bool rcValid, bool neutralOk, const char *reason) {
+  Serial.print(F("STAGE15 stage15_guarded_crawl=true event="));
+  Serial.print(event);
+  Serial.print(F(" path_following_enable=false"));
+  Serial.print(F(" physical_path_following_enable=false"));
+  Serial.print(F(" allow_motor_output=false"));
+  Serial.print(F(" path_package_used=false"));
+  Serial.print(F(" virtual_controller_used=false"));
+  Serial.print(F(" autonomous_mode=false"));
+  Serial.print(F(" pulse_sequence="));
+  Serial.print(stage15PulseSequence);
+  Serial.print(F(" pulse_type="));
+  Serial.print(stage15PulseType);
+  Serial.print(F(" pulse_cmd_left="));
+  Serial.print(stage15PulseLeftCmd, 3);
+  Serial.print(F(" pulse_cmd_right="));
+  Serial.print(stage15PulseRightCmd, 3);
+  Serial.print(F(" pulse_ms="));
+  Serial.print(STAGE15_PULSE_MS_VALUE);
+  Serial.print(F(" pulse_elapsed_ms="));
+  Serial.print(stage15PulseElapsedMs);
+  Serial.print(F(" max_cmd="));
+  Serial.print(STAGE15_MAX_CMD_VALUE, 3);
+  Serial.print(F(" physical_output_active="));
+  Serial.print(stage15PulseActiveFlag ? F("true") : F("false"));
+  Serial.print(F(" stop_confirmed="));
+  Serial.print(stage15PulseActiveFlag ? F("false") : F("true"));
+  Serial.print(F(" rc_ok="));
+  Serial.print(rcValid ? F("true") : F("false"));
+  Serial.print(F(" neutral_ok="));
+  Serial.print(neutralOk ? F("true") : F("false"));
+  Serial.print(F(" failsafe_seen="));
+  Serial.print(stage15FailsafeSeenFlag ? F("true") : F("false"));
+  Serial.print(F(" final_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" final_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" block_reason="));
+  Serial.print(reason);
+  Serial.println();
+}
+
+void stage15Stop(bool rcValid, bool neutralOk, const char *reason) {
+  stage15PulseActiveFlag = false;
+  stage15PulseLeftCmd = 0.0f;
+  stage15PulseRightCmd = 0.0f;
+  stage15PulseType = "test_stop";
+  stage15BlockReason = reason;
+  stage15LastStopMs = millis();
+  motorStop();
+  stage15PrintEvent("pulse_stop", rcValid, neutralOk, reason);
+}
+
+bool stage15StartPulse(const char *pulseType, float leftCmd, float rightCmd,
+                       bool rcValid, bool neutralOk, uint32_t now) {
+  if (stage15PulseActiveFlag) {
+    stage15PrintEvent("pulse_rejected", rcValid, neutralOk, "PULSE_ALREADY_ACTIVE");
+    return false;
+  }
+  if (STAGE15_REQUIRE_RC_NEUTRAL_VALUE && (!rcValid || !neutralOk)) {
+    stage15PrintEvent("pulse_rejected", rcValid, neutralOk, rcValid ? "RC_NOT_NEUTRAL" : "RC_INVALID");
+    return false;
+  }
+  if (stage15LastStopMs != 0 && now - stage15LastStopMs < STAGE15_INTER_PULSE_MS_VALUE) {
+    stage15PrintEvent("pulse_rejected", rcValid, neutralOk, "INTER_PULSE_WAIT");
+    return false;
+  }
+
+  float maxCmd = absFloat(STAGE15_MAX_CMD_VALUE);
+  if (maxCmd > 0.10f) {
+    maxCmd = 0.10f;
+  }
+  stage15PulseLeftCmd = clampUnit(leftCmd > maxCmd ? maxCmd : (leftCmd < -maxCmd ? -maxCmd : leftCmd));
+  stage15PulseRightCmd = clampUnit(rightCmd > maxCmd ? maxCmd : (rightCmd < -maxCmd ? -maxCmd : rightCmd));
+  stage15PulseType = pulseType;
+  stage15PulseStartMs = now;
+  stage15PulseElapsedMs = 0;
+  stage15PulseActiveFlag = true;
+  stage15PulseSequence++;
+  stage15BlockReason = "OK";
+  applyMotorPulseDirectWheelCommand(stage15PulseLeftCmd, stage15PulseRightCmd);
+  stage15PrintEvent("pulse_start", rcValid, neutralOk, "OK");
+  return true;
+}
+
+void stage15HandleCommand(const String &line, bool rcValid, bool neutralOk, uint32_t now) {
+  if (line == "test_stop" || line == "STOP" || line == "stop") {
+    stage15Stop(rcValid, neutralOk, "USB_STOP");
+  } else if (line == "test_forward_pulse") {
+    stage15StartPulse("test_forward_pulse", STAGE15_MAX_CMD_VALUE, STAGE15_MAX_CMD_VALUE, rcValid, neutralOk, now);
+  } else if (line == "test_backward_pulse") {
+    stage15StartPulse("test_backward_pulse", -STAGE15_MAX_CMD_VALUE, -STAGE15_MAX_CMD_VALUE, rcValid, neutralOk, now);
+  } else if (line == "test_rotate_left_pulse") {
+    stage15StartPulse("test_rotate_left_pulse", -STAGE15_MAX_CMD_VALUE, STAGE15_MAX_CMD_VALUE, rcValid, neutralOk, now);
+  } else if (line == "test_rotate_right_pulse") {
+    stage15StartPulse("test_rotate_right_pulse", STAGE15_MAX_CMD_VALUE, -STAGE15_MAX_CMD_VALUE, rcValid, neutralOk, now);
+  } else if (line.length() > 0) {
+    stage15PrintEvent("command_ignored", rcValid, neutralOk, "UNKNOWN_COMMAND");
+  }
+}
+
+void stage15ReadUsbCommands(bool rcValid, bool neutralOk, uint32_t now) {
+  while (Serial.available() > 0) {
+    char c = static_cast<char>(Serial.read());
+    if (c == '\n') {
+      stage15UsbLine.trim();
+      stage15HandleCommand(stage15UsbLine, rcValid, neutralOk, now);
+      stage15UsbLine = "";
+    } else if (c != '\r') {
+      stage15UsbLine += c;
+      if (stage15UsbLine.length() > 80) {
+        stage15UsbLine = "";
+      }
+    }
+  }
+}
+
+void stage15UpdatePulse(bool rcValid, bool neutralOk, uint32_t now) {
+  stage15FailsafeSeenFlag = stage15FailsafeSeenFlag || !rcValid;
+  if (!stage15PulseActiveFlag) {
+    motorStop();
+    return;
+  }
+  stage15PulseElapsedMs = now - stage15PulseStartMs;
+  if (stage15PulseElapsedMs >= STAGE15_PULSE_MS_VALUE || STAGE15_PULSE_MS_VALUE > 300) {
+    stage15Stop(rcValid, neutralOk, "PULSE_COMPLETE");
+    return;
+  }
+  applyMotorPulseDirectWheelCommand(stage15PulseLeftCmd, stage15PulseRightCmd);
+}
+#endif
+
+#if STAGE16_USB_GUARDED_CRAWL || STAGE17_FIRST_PRIMITIVE_CRAWL || STAGE18_MOTOR_MAPPING_PROBE || STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+bool stage16NeutralOk(uint16_t steeringUs, uint16_t throttleUs) {
+  return normRcCentered(steeringUs, STEERING_CENTER_US) == 0.0f &&
+         normRcCentered(throttleUs, THROTTLE_CENTER_US) == 0.0f;
+}
+
+bool stage16ExtractToken(const String &line, const char *key, String &out) {
+  String prefix = String(key) + "=";
+  int start = line.indexOf(prefix);
+  if (start < 0) {
+    return false;
+  }
+  start += prefix.length();
+  int end = line.indexOf(' ', start);
+  if (end < 0) {
+    end = line.length();
+  }
+  out = line.substring(start, end);
+  return out.length() > 0;
+}
+
+bool stage16ParseFloatToken(const String &line, const char *key, float &out) {
+  String token;
+  if (!stage16ExtractToken(line, key, token)) {
+    return false;
+  }
+  char *endPtr = nullptr;
+  out = strtof(token.c_str(), &endPtr);
+  return endPtr != token.c_str() && *endPtr == '\0';
+}
+
+bool stage16ParseIntToken(const String &line, const char *key, int32_t &out) {
+  String token;
+  if (!stage16ExtractToken(line, key, token)) {
+    return false;
+  }
+  char *endPtr = nullptr;
+  long parsed = strtol(token.c_str(), &endPtr, 10);
+  if (endPtr == token.c_str() || *endPtr != '\0') {
+    return false;
+  }
+  out = parsed;
+  return true;
+}
+
+void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
+  uint32_t now = millis();
+#if STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+  Serial.print(F("STAGE20 stage20_physical_ab_guarded_crawl=true stage18_motor_mapping_probe=false stage17_first_primitive_crawl=false stage16_guarded_crawl=false event="));
+#elif STAGE18_MOTOR_MAPPING_PROBE
+  Serial.print(F("STAGE18 stage18_motor_mapping_probe=true stage17_first_primitive_crawl=false stage16_guarded_crawl=false event="));
+#elif STAGE17_FIRST_PRIMITIVE_CRAWL
+  Serial.print(F("STAGE17 stage17_first_primitive_crawl=true stage16_guarded_crawl=false event="));
+#else
+  Serial.print(F("STAGE16 stage16_guarded_crawl=true stage17_first_primitive_crawl=false event="));
+#endif
+  Serial.print(event);
+  Serial.print(F(" stage16_firmware_ready=true stage17_firmware_ready="));
+  Serial.print(STAGE17_FIRST_PRIMITIVE_CRAWL_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" stage18_firmware_ready="));
+  Serial.print(STAGE18_MOTOR_MAPPING_PROBE_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" stage20_firmware_ready="));
+  Serial.print(STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" stage20_cmd_state="));
+  Serial.print(stage16CmdState);
+  Serial.print(F(" stage20_armed="));
+  Serial.print(stage16ArmedFlag ? F("true") : F("false"));
+  Serial.print(F(" stage16_cmd_seq="));
+  Serial.print(stage16CmdSeq < 0 ? 0 : stage16CmdSeq);
+  Serial.print(F(" stage16_cmd_state="));
+  Serial.print(stage16CmdState);
+  Serial.print(F(" stage16_last_cmd_age_ms="));
+  if (stage16LastCmdMs == 0) {
+    Serial.print(F("NA"));
+  } else {
+    Serial.print(now - stage16LastCmdMs);
+  }
+  Serial.print(F(" stage16_left_cmd="));
+  Serial.print(stage16LeftCmd, 3);
+  Serial.print(F(" stage16_right_cmd="));
+  Serial.print(stage16RightCmd, 3);
+  Serial.print(F(" stage16_ms="));
+  Serial.print(stage16CmdMs);
+  Serial.print(F(" requested_left_cmd="));
+  Serial.print(stage16LeftCmd, 3);
+  Serial.print(F(" requested_right_cmd="));
+  Serial.print(stage16RightCmd, 3);
+  Serial.print(F(" requested_a_cmd="));
+  Serial.print(stage16LeftCmd, 3);
+  Serial.print(F(" requested_b_cmd="));
+  Serial.print(stage16RightCmd, 3);
+  Serial.print(F(" manual_equivalent_forward_cmd="));
+  Serial.print(stage16LeftCmd, 3);
+  Serial.print(F(" manual_equivalent_turn_cmd="));
+  Serial.print(stage16RightCmd, 3);
+  Serial.print(F(" stage16_reject_reason="));
+  Serial.print(stage16RejectReason);
+  Serial.print(F(" stage16_physical_output_active="));
+  Serial.print(stage16PulseActiveFlag ? F("true") : F("false"));
+  Serial.print(F(" physical_output_active="));
+  Serial.print(stage16PulseActiveFlag ? F("true") : F("false"));
+  Serial.print(F(" final_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" final_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" logical_left_cmd="));
+  Serial.print(lastLogicalLeftCmd, 3);
+  Serial.print(F(" logical_right_cmd="));
+  Serial.print(lastLogicalRightCmd, 3);
+  Serial.print(F(" raw_left_cmd="));
+  Serial.print(lastRawLeftCmd, 3);
+  Serial.print(F(" raw_right_cmd="));
+  Serial.print(lastRawRightCmd, 3);
+  Serial.print(F(" calibrated_left_cmd="));
+  Serial.print(lastCalibratedLeftCmd, 3);
+  Serial.print(F(" calibrated_right_cmd="));
+  Serial.print(lastCalibratedRightCmd, 3);
+  Serial.print(F(" physical_a_cmd="));
+  Serial.print(lastOutputLeftPinCmd, 3);
+  Serial.print(F(" physical_b_cmd="));
+  Serial.print(lastOutputRightPinCmd, 3);
+  Serial.print(F(" motor_write_called="));
+  Serial.print(stage16PulseActiveFlag ? F("true") : F("false"));
+  Serial.print(F(" motor_backend=servo_pwm"));
+  Serial.print(F(" motor_enable_state=attached"));
+  Serial.print(F(" pwm_or_dynamixel_write_status=OK"));
+  Serial.print(F(" physical_a_role=throttle physical_b_role=turn"));
+  Serial.print(F(" wheel_to_physical_mapping="));
+  Serial.print(STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED ? F("physical_ab_manual_equivalent") : F("diff_to_throttle_turn"));
+  Serial.print(F(" rc_ok="));
+  Serial.print(rcValid ? F("true") : F("false"));
+  Serial.print(F(" neutral_ok="));
+  Serial.print(neutralOk ? F("true") : F("false"));
+  Serial.print(F(" latched_stop="));
+  Serial.print(stage16LatchedStopFlag ? F("true") : F("false"));
+  Serial.print(F(" stage16_armed="));
+  Serial.print(stage16ArmedFlag ? F("true") : F("false"));
+  Serial.print(F(" motor_command_source="));
+  Serial.print(stage16PulseActiveFlag ? (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED ? F("STAGE20_PHYSICAL_AB_GUARDED_CRAWL") : (STAGE18_MOTOR_MAPPING_PROBE_ENABLED ? F("STAGE18_MOTOR_MAPPING_PROBE") : (STAGE17_FIRST_PRIMITIVE_CRAWL_ENABLED ? F("STAGE17_FIRST_PRIMITIVE_CRAWL") : F("STAGE16_USB_GUARDED_CRAWL")))) : F("NONE"));
+  Serial.print(F(" active_target_source="));
+  Serial.print(stage16PulseActiveFlag ? (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED ? F("station_physical_ab_guarded") : (STAGE18_MOTOR_MAPPING_PROBE_ENABLED ? F("station_motor_mapping_probe") : (STAGE17_FIRST_PRIMITIVE_CRAWL_ENABLED ? F("station_first_primitive_guarded") : F("station_path_package_guarded")))) : F("NONE"));
+  Serial.print(F(" physical_path_following_enable=false allow_motor_output=false path_package_used=false hc12_used=false"));
+  Serial.print(F(" gps_block_reason="));
+  Serial.print(gpsDryrunBlockReason());
+  Serial.print(F(" position_source="));
+  bool gpsPositionReady = gpsDryrunReady() && gps.location.isValid();
+  Serial.print(gpsPositionReady ? F("gps") : F("NA"));
+  Serial.print(F(" current_lat="));
+  if (gpsPositionReady) {
+    Serial.print(gps.location.lat(), 7);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" current_lon="));
+  if (gpsPositionReady) {
+    Serial.print(gps.location.lng(), 7);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_sats="));
+  if (gps.satellites.isValid()) {
+    Serial.print(gps.satellites.value());
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" gps_hdop="));
+  if (gps.hdop.isValid()) {
+    Serial.print(gps.hdop.hdop(), 2);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.println();
+}
+
+void stage16Stop(bool rcValid, bool neutralOk, const char *reason) {
+  stage16PulseActiveFlag = false;
+  stage16ArmedFlag = false;
+  stage16LatchedStopFlag = true;
+  stage16LeftCmd = 0.0f;
+  stage16RightCmd = 0.0f;
+  stage16CmdMs = 0;
+  stage16CmdState = "STOPPED";
+  stage16RejectReason = reason;
+  motorStop();
+  stage16PrintStatus("STOP", rcValid, neutralOk);
+}
+
+void stage16Reject(bool rcValid, bool neutralOk, const char *reason) {
+  stage16CmdState = "REJECTED";
+  stage16RejectReason = reason;
+  stage16PulseActiveFlag = false;
+  stage16ArmedFlag = false;
+  stage16LatchedStopFlag = true;
+  motorStop();
+  stage16PrintStatus("REJECT", rcValid, neutralOk);
+}
+
+void stage16Arm(bool rcValid, bool neutralOk, uint32_t now, const String &line) {
+  int32_t seq = 0;
+  if (stage16ParseIntToken(line, "seq", seq)) {
+    stage16CmdSeq = seq;
+  }
+  stage16LastCmdMs = now;
+  if (!rcValid) {
+    stage16Reject(rcValid, neutralOk, "ARM_RC_NOT_OK");
+    return;
+  }
+  if (!neutralOk) {
+    stage16Reject(rcValid, neutralOk, "ARM_NEUTRAL_NOT_OK");
+    return;
+  }
+  if (stage16PulseActiveFlag || absFloat(lastLeftOutputCmd) > 0.0001f || absFloat(lastRightOutputCmd) > 0.0001f) {
+    stage16Reject(rcValid, neutralOk, "ARM_OUTPUT_ACTIVE");
+    return;
+  }
+  stage16LatchedStopFlag = false;
+  stage16ArmedFlag = true;
+  stage16CmdState = "ARMED";
+  stage16RejectReason = "NONE";
+  motorStop();
+  stage16PrintStatus("ARM", rcValid, neutralOk);
+}
+
+void stage16HandleCommand(const String &line, bool rcValid, bool neutralOk, uint32_t now) {
+  if (line.startsWith("STAGE16_STOP") || line.startsWith("STAGE17_STOP") || line.startsWith("STAGE18_STOP") || line.startsWith("STAGE20_STOP")) {
+    int32_t seq = 0;
+    if (stage16ParseIntToken(line, "seq", seq)) {
+      stage16CmdSeq = seq;
+    }
+    stage16LastCmdMs = now;
+    stage16Stop(rcValid, neutralOk, "USB_STOP");
+    return;
+  }
+  if (line.startsWith("STAGE16_ARM") || line.startsWith("STAGE17_ARM") || line.startsWith("STAGE18_ARM") || line.startsWith("STAGE20_ARM")) {
+    stage16Arm(rcValid, neutralOk, now, line);
+    return;
+  }
+  if (!line.startsWith("STAGE16_CMD") && !line.startsWith("STAGE17_CMD") && !line.startsWith("STAGE18_CMD") && !line.startsWith("STAGE20_CMD")) {
+    stage16Reject(rcValid, neutralOk, "UNKNOWN_COMMAND");
+    return;
+  }
+
+  int32_t seq = 0;
+  float left = 0.0f;
+  float right = 0.0f;
+  int32_t ms = 0;
+  bool parsedMotion = false;
+  if (line.startsWith("STAGE20_CMD")) {
+    parsedMotion = stage16ParseIntToken(line, "seq", seq) &&
+                   stage16ParseFloatToken(line, "a", left) &&
+                   stage16ParseFloatToken(line, "b", right) &&
+                   stage16ParseIntToken(line, "ms", ms);
+  } else {
+    parsedMotion = stage16ParseIntToken(line, "seq", seq) &&
+                   stage16ParseFloatToken(line, "left", left) &&
+                   stage16ParseFloatToken(line, "right", right) &&
+                   stage16ParseIntToken(line, "ms", ms);
+  }
+  if (!parsedMotion) {
+    stage16Reject(rcValid, neutralOk, "PARSE_ERROR");
+    return;
+  }
+  stage16CmdSeq = seq;
+  stage16LastCmdMs = now;
+  if (!rcValid) {
+    stage16Reject(rcValid, neutralOk, "RC_INVALID");
+    return;
+  }
+  if (stage16LatchedStopFlag) {
+    stage16Reject(rcValid, neutralOk, "LATCHED_STOP");
+    return;
+  }
+  if (!stage16ArmedFlag) {
+    stage16Reject(rcValid, neutralOk, "NOT_ARMED");
+    return;
+  }
+  if (stage16PulseActiveFlag) {
+    stage16Reject(rcValid, neutralOk, "PULSE_ALREADY_ACTIVE");
+    return;
+  }
+  if (absFloat(left) > STAGE_USB_GUARDED_MAX_CMD_VALUE || absFloat(right) > STAGE_USB_GUARDED_MAX_B_VALUE) {
+    stage16Reject(rcValid, neutralOk, "COMMAND_EXCEEDS_MAX_CMD");
+    return;
+  }
+  if (ms < 1 || static_cast<uint32_t>(ms) > STAGE_USB_GUARDED_MAX_MS_VALUE) {
+    stage16Reject(rcValid, neutralOk, "COMMAND_EXCEEDS_MAX_MS");
+    return;
+  }
+
+  stage16LeftCmd = left;
+  stage16RightCmd = right;
+  stage16CmdMs = static_cast<uint32_t>(ms);
+  stage16PulseStartMs = now;
+  stage16PulseElapsedMs = 0;
+  stage16PulseActiveFlag = true;
+  stage16ArmedFlag = false;
+  stage16CmdState = "ACTIVE";
+  stage16RejectReason = "NONE";
+  if (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED) {
+    applyPhysicalABManualEquivalentCommand(stage16LeftCmd, stage16RightCmd);
+  } else {
+    applyMotorPulseDirectWheelCommand(stage16LeftCmd, stage16RightCmd);
+  }
+  stage16PrintStatus("ACK", rcValid, neutralOk);
+}
+
+void stage16ReadUsbCommands(bool rcValid, bool neutralOk, uint32_t now) {
+  while (Serial.available() > 0) {
+    char c = static_cast<char>(Serial.read());
+    if (c == '\n') {
+      stage16UsbLine.trim();
+      if (stage16UsbLine.length() > 0) {
+        stage16HandleCommand(stage16UsbLine, rcValid, neutralOk, now);
+      }
+      stage16UsbLine = "";
+    } else if (c != '\r') {
+      stage16UsbLine += c;
+      if (stage16UsbLine.length() > 120) {
+        stage16UsbLine = "";
+      }
+    }
+  }
+}
+
+void stage16UpdatePulse(bool rcValid, bool neutralOk, uint32_t now) {
+  if (!rcValid) {
+    stage16LatchedStopFlag = true;
+    stage16ArmedFlag = false;
+    if (stage16PulseActiveFlag) {
+      stage16Stop(rcValid, neutralOk, "RC_INVALID");
+    } else {
+      motorStop();
+    }
+    return;
+  }
+  if (!stage16PulseActiveFlag) {
+    motorStop();
+    return;
+  }
+  stage16PulseElapsedMs = now - stage16PulseStartMs;
+  if (stage16PulseElapsedMs >= stage16CmdMs || stage16CmdMs > STAGE_USB_GUARDED_MAX_MS_VALUE) {
+    stage16Stop(rcValid, neutralOk, "PULSE_COMPLETE");
+    return;
+  }
+  if (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED) {
+    applyPhysicalABManualEquivalentCommand(stage16LeftCmd, stage16RightCmd);
+  } else {
+    applyMotorPulseDirectWheelCommand(stage16LeftCmd, stage16RightCmd);
+  }
+}
+
+void stage16Heartbeat(bool rcValid, bool neutralOk, uint32_t now) {
+  if (now - stage16LastHeartbeatMs < 500) {
+    return;
+  }
+  stage16LastHeartbeatMs = now;
+  stage16PrintStatus("HEARTBEAT", rcValid, neutralOk);
+}
+#endif
 
 void applyManualOverride(uint16_t steeringUs, uint16_t throttleUs) {
   float rawSteering = normRcCentered(steeringUs, STEERING_CENTER_US);
@@ -3381,7 +4069,7 @@ void setup() {
 #if HC12_LINK_ENABLED
   HC12_SERIAL.begin(HC12_BAUD);
 #endif
-#if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE
+#if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE && !STAGE15_GUARDED_CRAWL_TEST
   GPS_SERIAL.begin(GPS_BAUD);
 #endif
 
@@ -3413,6 +4101,57 @@ void setup() {
   Serial.println(MOTOR_PULSE_MS_VALUE);
   Serial.print("MOTOR_OUTPUT_SWAP_LR=");
   Serial.println(MOTOR_OUTPUT_SWAP_LR_ENABLED ? "true" : "false");
+#elif STAGE15_GUARDED_CRAWL_TEST
+  Serial.println("STAGE15_GUARDED_CRAWL_TEST enabled.");
+  Serial.println("Stage 15 is bounded motor sanity only: no path following, no path package, no HC-12 target commands.");
+  Serial.println("USB commands accepted: test_forward_pulse, test_backward_pulse, test_rotate_left_pulse, test_rotate_right_pulse, test_stop.");
+  Serial.print("STAGE15_MAX_CMD=");
+  Serial.println(STAGE15_MAX_CMD_VALUE, 3);
+  Serial.print("STAGE15_PULSE_MS=");
+  Serial.println(STAGE15_PULSE_MS_VALUE);
+  Serial.print("STAGE15_INTER_PULSE_MS=");
+  Serial.println(STAGE15_INTER_PULSE_MS_VALUE);
+  Serial.print("STAGE15_REQUIRE_RC_NEUTRAL=");
+  Serial.println(STAGE15_REQUIRE_RC_NEUTRAL_VALUE ? "true" : "false");
+  Serial.println("PHYSICAL_PATH_FOLLOWING_ENABLE=0 PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 required by compile guard.");
+#elif STAGE16_USB_GUARDED_CRAWL || STAGE17_FIRST_PRIMITIVE_CRAWL || STAGE18_MOTOR_MAPPING_PROBE || STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+#if STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+  Serial.println("STAGE20_PHYSICAL_AB_GUARDED_CRAWL enabled.");
+  Serial.println("Stage 20 is direct physical A/B manual-equivalent guarded crawl only.");
+  Serial.println("USB commands accepted: STAGE20_ARM seq=<n>, STAGE20_CMD seq=<n> a=<throttle> b=<turn> ms=<ms>, STAGE20_STOP seq=<n>.");
+  Serial.print("STAGE20_MAX_ABS_A=");
+  Serial.println(STAGE20_MAX_ABS_A_VALUE, 3);
+  Serial.print("STAGE20_MAX_ABS_B=");
+  Serial.println(STAGE20_MAX_ABS_B_VALUE, 3);
+  Serial.print("STAGE20_MAX_MS=");
+  Serial.println(STAGE20_MAX_MS_VALUE);
+#elif STAGE18_MOTOR_MAPPING_PROBE
+  Serial.println("STAGE18_MOTOR_MAPPING_PROBE enabled.");
+  Serial.println("Stage 18 is bounded motor mapping and power diagnostics only.");
+  Serial.println("USB commands accepted: STAGE18_ARM seq=<n>, STAGE18_CMD seq=<n> left=<cmd> right=<cmd> ms=<ms>, STAGE18_STOP seq=<n>.");
+  Serial.print("STAGE18_MAX_CMD=");
+  Serial.println(STAGE18_MAX_CMD_VALUE, 3);
+  Serial.print("STAGE18_MAX_MS=");
+  Serial.println(STAGE18_MAX_MS_VALUE);
+#elif STAGE17_FIRST_PRIMITIVE_CRAWL
+  Serial.println("STAGE17_FIRST_PRIMITIVE_CRAWL enabled.");
+  Serial.println("Stage 17 is USB-tethered station-supervised first-primitive crawl only.");
+  Serial.println("USB commands accepted: STAGE17_ARM seq=<n>, STAGE17_CMD seq=<n> left=<cmd> right=<cmd> ms=<ms>, STAGE17_STOP seq=<n>.");
+  Serial.print("STAGE17_MAX_CMD=");
+  Serial.println(STAGE17_MAX_CMD_VALUE, 3);
+  Serial.print("STAGE17_MAX_MS=");
+  Serial.println(STAGE17_MAX_MS_VALUE);
+#else
+  Serial.println("STAGE16_USB_GUARDED_CRAWL enabled.");
+  Serial.println("Stage 16 is USB-tethered station-supervised bounded crawl only.");
+  Serial.println("USB commands accepted: STAGE16_ARM seq=<n>, STAGE16_CMD seq=<n> left=<cmd> right=<cmd> ms=<ms>, STAGE16_STOP seq=<n>.");
+  Serial.print("STAGE16_MAX_CMD=");
+  Serial.println(STAGE16_MAX_CMD_VALUE, 3);
+  Serial.print("STAGE16_MAX_MS=");
+  Serial.println(STAGE16_MAX_MS_VALUE);
+#endif
+  Serial.println("OpenRB does not read path packages and does not run compile-time waypoint following.");
+  Serial.println("PHYSICAL_PATH_FOLLOWING_ENABLE=0 PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 required by compile guard.");
 #elif FIXED_WIRING_GPS_SERIAL2_DIAG
   Serial.println("FIXED_WIRING_GPS_SERIAL2_DIAG enabled.");
   Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
@@ -3468,7 +4207,7 @@ void setup() {
 }
 
 void loop() {
-#if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE
+#if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE && !STAGE15_GUARDED_CRAWL_TEST
   while (GPS_SERIAL.available() > 0) {
     processGpsChar(static_cast<char>(GPS_SERIAL.read()));
   }
@@ -3500,6 +4239,29 @@ void loop() {
   bool stationManualFresh = stationManualValid();
   bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;
   bool rcManualActive = rcValid && !autoSwitchOn;
+
+#if STAGE15_GUARDED_CRAWL_TEST
+  clearAutoCommand();
+  clearStationManualCommand();
+  bool neutralOk = stage15NeutralOk(steeringUs, throttleUs);
+  stage15ReadUsbCommands(rcValid, neutralOk, now);
+  stage15UpdatePulse(rcValid, neutralOk, now);
+  currentControlSource = stage15PulseActiveFlag ? CONTROL_SOURCE_AUTO : CONTROL_SOURCE_STOP;
+  currentMode = rcValid ? (stage15PulseActiveFlag ? AUTO_RUNNING : AUTO_READY) : FAILSAFE;
+  return;
+#endif
+
+#if STAGE16_USB_GUARDED_CRAWL || STAGE17_FIRST_PRIMITIVE_CRAWL || STAGE18_MOTOR_MAPPING_PROBE || STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+  clearAutoCommand();
+  clearStationManualCommand();
+  bool neutralOk = stage16NeutralOk(steeringUs, throttleUs);
+  stage16ReadUsbCommands(rcValid, neutralOk, now);
+  stage16UpdatePulse(rcValid, neutralOk, now);
+  stage16Heartbeat(rcValid, neutralOk, now);
+  currentControlSource = stage16PulseActiveFlag ? CONTROL_SOURCE_AUTO : CONTROL_SOURCE_STOP;
+  currentMode = rcValid ? (stage16PulseActiveFlag ? AUTO_RUNNING : AUTO_READY) : FAILSAFE;
+  return;
+#endif
 
 #if MOTOR_PULSE_TEST_MODE
   clearAutoCommand();

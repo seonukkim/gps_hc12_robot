@@ -49,6 +49,8 @@ PRIMITIVE_FIELDS = (
     "motor_command_generated",
 )
 
+METERS_PER_DEG_LAT = 111_320.0
+
 
 def _normalize_deg(angle_deg: float) -> float:
     return ((angle_deg + 180.0) % 360.0) - 180.0
@@ -92,6 +94,46 @@ def _load_field_points(path: Path) -> tuple[float, float, float, float]:
         float(points["B"]["x_m"]),
         float(points["B"]["y_m"]),
     )
+
+
+def _meters_per_deg_lon(latitude_deg: float) -> float:
+    return METERS_PER_DEG_LAT * math.cos(math.radians(latitude_deg))
+
+
+def _load_georef_points(path: Path) -> tuple[tuple[float, float, float, float], dict[str, object]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    points = data["points"]
+    a_lat = float(points["A"]["lat"])
+    a_lon = float(points["A"]["lon"])
+    b_lat = float(points["B"]["lat"])
+    b_lon = float(points["B"]["lon"])
+    mean_lat = (a_lat + b_lat) / 2.0
+    meters_per_deg_lon = _meters_per_deg_lon(mean_lat)
+    raw_a = (0.0, 0.0)
+    raw_b = (
+        (b_lon - a_lon) * meters_per_deg_lon,
+        (b_lat - a_lat) * METERS_PER_DEG_LAT,
+    )
+    georef = {
+        "georeference_available": True,
+        "raw_A_lat": a_lat,
+        "raw_A_lon": a_lon,
+        "raw_B_lat": b_lat,
+        "raw_B_lon": b_lon,
+        "origin_lat": a_lat,
+        "origin_lon": a_lon,
+        "local_frame_type": "equirectangular_enu",
+        "x_axis_source": "normalized_rectangle",
+        "x_axis_bearing_deg": 90.0,
+        "meters_per_deg_lat": METERS_PER_DEG_LAT,
+        "meters_per_deg_lon": meters_per_deg_lon,
+        "meters_per_lat": METERS_PER_DEG_LAT,
+        "meters_per_lon": meters_per_deg_lon,
+        "raw_A_local": {"x_m": raw_a[0], "y_m": raw_a[1]},
+        "raw_B_local": {"x_m": raw_b[0], "y_m": raw_b[1]},
+        "motor_command_generated": False,
+    }
+    return (raw_a[0], raw_a[1], raw_b[0], raw_b[1]), georef
 
 
 def _rotation_row(
@@ -217,6 +259,11 @@ def _write_summary(path: Path, package: dict[str, object]) -> None:
         "ready_for_outdoor_no_motion_validation",
     ):
         lines.append(f"- {key}: `{summary[key]}`")
+    if package.get("georeference"):
+        georef = package["georeference"]  # type: ignore[index]
+        lines.append(f"- georeference_available: `{georef['georeference_available']}`")
+        lines.append(f"- origin_lat: `{georef['origin_lat']}`")
+        lines.append(f"- origin_lon: `{georef['origin_lon']}`")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -336,6 +383,7 @@ def build_path_package(
     tool_length_m: float,
     robot_width_m: float,
     robot_length_m: float,
+    georeference: dict[str, object] | None = None,
 ) -> dict[str, object]:
     workspace = normalize_field_ab(a_x=raw_a[0], a_y=raw_a[1], b_x=raw_b[0], b_y=raw_b[1])
     a_prime = workspace["A_prime_top_left"]  # type: ignore[index]
@@ -396,8 +444,9 @@ def build_path_package(
         "motor_command_generated": False,
         "physical_output_active": False,
         "ready_for_outdoor_no_motion_validation": primitive_sequence_valid,
+        "georeference_available": georeference is not None,
     }
-    return {
+    package = {
         "generated_at_utc": dt.datetime.now(tz=dt.UTC).isoformat(),
         "normalized_workspace": workspace,
         "approach_to_A_prime": approach,
@@ -410,6 +459,27 @@ def build_path_package(
         "motor_command_generated": False,
         "physical_output_active": False,
     }
+    if georeference is not None:
+        package["georeference"] = georeference
+        package["normalized_workspace"]["georeference_available"] = True  # type: ignore[index]
+        package["summary"]["georeference_available"] = True  # type: ignore[index]
+        for key in (
+            "raw_A_lat",
+            "raw_A_lon",
+            "raw_B_lat",
+            "raw_B_lon",
+            "origin_lat",
+            "origin_lon",
+            "local_frame_type",
+            "x_axis_source",
+            "x_axis_bearing_deg",
+            "meters_per_deg_lat",
+            "meters_per_deg_lon",
+            "meters_per_lat",
+            "meters_per_lon",
+        ):
+            package["summary"][key] = georeference[key]  # type: ignore[index]
+    return package
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -417,6 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Convert captured field A/B points into a no-motion serpentine path package."
     )
     parser.add_argument("--field-points-json")
+    parser.add_argument("--field-points-georef-json")
     parser.add_argument("--a-x", type=float)
     parser.add_argument("--a-y", type=float)
     parser.add_argument("--b-x", type=float)
@@ -435,9 +506,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_points(args: argparse.Namespace) -> tuple[float, float, float, float]:
+def _resolve_points(args: argparse.Namespace) -> tuple[tuple[float, float, float, float], dict[str, object] | None]:
+    if args.field_points_georef_json:
+        return _load_georef_points(Path(args.field_points_georef_json))
     if args.field_points_json:
-        return _load_field_points(Path(args.field_points_json))
+        return _load_field_points(Path(args.field_points_json)), None
     missing = [
         name
         for name in ("a_x", "a_y", "b_x", "b_y")
@@ -445,12 +518,12 @@ def _resolve_points(args: argparse.Namespace) -> tuple[float, float, float, floa
     ]
     if missing:
         raise ValueError("--field-points-json or all manual --a-x/--a-y/--b-x/--b-y values are required")
-    return float(args.a_x), float(args.a_y), float(args.b_x), float(args.b_y)
+    return (float(args.a_x), float(args.a_y), float(args.b_x), float(args.b_y)), None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    raw = _resolve_points(args)
+    raw, georeference = _resolve_points(args)
     current_pose = None
     if args.current_x is not None and args.current_y is not None:
         current_pose = (float(args.current_x), float(args.current_y), float(args.current_heading_deg))
@@ -465,6 +538,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         tool_length_m=args.tool_length_m,
         robot_width_m=args.robot_width_m,
         robot_length_m=args.robot_length_m,
+        georeference=georeference,
     )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
