@@ -61,9 +61,9 @@ def test_b_command_clamped_to_plus_minus_0_08() -> None:
         segment=seg, x=0.5, y=-10.0, target_heading_deg=90.0, yaw=0.0, start_yaw_deg=90.0
     )
     assert pos["heading_error_deg"] == pytest.approx(90.0)
-    assert pos["b_heading_component"] == pytest.approx(0.08)
-    assert pos["b_cte_component"] == pytest.approx(0.04)
-    assert pos["b_cmd"] == pytest.approx(0.08)  # 0.08 + 0.04 clamped back to 0.08
+    assert pos["b_heading_component"] == pytest.approx(0.54)
+    assert pos["b_cte_component"] == pytest.approx(2.0)
+    assert pos["b_cmd"] == pytest.approx(0.08)  # raw correction clamped back to 0.08
 
     neg = controller.pulse_correction(
         segment=seg, x=0.5, y=10.0, target_heading_deg=90.0, yaw=0.0, start_yaw_deg=-90.0
@@ -88,6 +88,48 @@ def test_connector_b_command_bypasses_correction() -> None:
     assert corr["b_cmd"] == 0.26
     assert corr["b_heading_component"] == 0.0
     assert corr["b_cte_component"] == 0.0
+
+
+def test_gps_imu_closed_loop_computes_heading_and_cross_track_correction() -> None:
+    seg = _east_lane()
+    corr = controller.pulse_correction(
+        segment=seg,
+        x=0.5,
+        y=-0.2,
+        target_heading_deg=90.0,
+        yaw=0.0,
+        start_yaw_deg=-10.0,
+        path_control_mode="gps_imu_closed_loop",
+        k_heading=0.006,
+        k_cross_track=0.20,
+        max_correction_b=0.08,
+    )
+    assert corr["heading_error_deg"] == pytest.approx(-10.0)
+    assert corr["cross_track_error_m"] > 0
+    assert corr["b_heading_component"] == pytest.approx(-0.06)
+    assert corr["b_cte_component"] == pytest.approx(0.04)
+    assert corr["b_cmd"] == pytest.approx(-0.02)
+    assert corr["correction_source"] == "gps_imu"
+
+
+def test_open_loop_chunks_does_not_apply_correction() -> None:
+    seg = _east_lane()
+    corr = controller.pulse_correction(
+        segment=seg,
+        x=0.5,
+        y=-0.2,
+        target_heading_deg=90.0,
+        yaw=0.0,
+        start_yaw_deg=-10.0,
+        path_control_mode="open_loop_chunks",
+        base_b_cmd=0.01,
+    )
+    assert corr["heading_error_deg"] == 0.0
+    assert corr["cross_track_error_m"] == 0.0
+    assert corr["b_heading_component"] == 0.0
+    assert corr["b_cte_component"] == 0.0
+    assert corr["b_cmd"] == pytest.approx(0.01)
+    assert corr["correction_source"] == "open_loop"
 
 
 # --- 3. GPS-degraded dead-reckon ---------------------------------------------
@@ -376,6 +418,11 @@ def test_run_controller_splits_live_drive_segments_under_max_duration(monkeypatc
     assert len(rows) == 3
     assert all(row["valid_pulse"] is True for row in rows)
     assert any(abs(float(row["b_heading_component"])) > 0.0 for row in rows)
+    assert rows[0]["path_control_mode"] == "gps_imu_closed_loop"
+    assert "current_x_m" in rows[0]
+    assert "remaining_distance_m" in rows[0]
+    assert "b_cross_track_correction" in rows[0]
+    assert "correction_source" in rows[0]
     summary = controller.build_controller_summary(
         rows,
         start_lat=35.0,
@@ -464,6 +511,69 @@ def test_run_controller_continues_when_gps_degraded_policy_continue() -> None:
     assert rows[0]["gps_degraded"] is True
 
 
+def test_run_controller_reanchors_pose_when_gps_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_send_live_drive(
+        handle,
+        *,
+        seq,
+        duration_s,
+        update_hz,
+        ttl_ms,
+        command_fn,
+        raw_lines,
+        event_timeout_s,
+        verbose_raw=True,
+    ):
+        command_fn(None)
+        return controller.telemetry.parse_usbdbg_rows(
+            "USB_DRIVE_LIVE event=ACTIVE\n"
+            "USB_DRIVE_LIVE event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+        )
+
+    monkeypatch.setattr(controller.executor, "send_live_drive", fake_send_live_drive)
+    handle = FakeSerial(
+        [
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, gps_block_reason="BAD_HDOP"),
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, gps_block_reason="BAD_HDOP"),
+            _heartbeat(35.0000010, 129.0, usb_ignore_rc=True, gps_block_reason="OK"),
+            _heartbeat(35.0000010, 129.0, usb_ignore_rc=True, gps_block_reason="OK"),
+        ]
+    )
+    cal = dict(geometry.FALLBACK_RESOLVED_CALIBRATION)
+    cal["forward"] = {"a": 0.30, "b": 0.0, "ms": 2, "source": "approved_test"}
+    rows, _raw_lines, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=cal,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=-90.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        gps_degradation_policy="continue",
+        straight_motion_mode="continuous",
+        live_chunk_ms=1,
+        live_max_ms=1,
+        max_segment_chunks=2,
+    )
+    assert abort_reason == "NONE"
+    assert rows[0]["gps_degraded"] is True
+    assert rows[-1]["gps_reanchored"] is True
+    summary = controller.build_controller_summary(
+        rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        goal_distance_m=1.0,
+        fallback_to_repeated_pulses=False,
+        abort_reason=abort_reason,
+    )
+    assert summary["gps_reanchor_count"] >= 1
+
+
 def test_run_controller_splits_approved_connector_turn_under_max_duration() -> None:
     connector = {
         "segment_index": 2,
@@ -498,7 +608,7 @@ def test_run_controller_splits_approved_connector_turn_under_max_duration() -> N
         resolved_calibration=cal,
         start_lat=35.0,
         start_lon=129.0,
-        start_yaw_deg=0.0,
+        start_yaw_deg=-90.0,
         goal_lat=35.0000100,
         goal_lon=129.0,
         event_timeout_s=0.1,

@@ -32,7 +32,7 @@ from urllib.parse import unquote
 from pathlib import Path
 from typing import Sequence
 
-from tools.physical_path_planning import calibration, checks, controller, executor, preview, safety, telemetry, tuning
+from tools.physical_path_planning import calibration, checks, controller, executor, geometry, preview, safety, telemetry, tuning
 
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
@@ -1407,7 +1407,7 @@ def resolve_start_for_preview(args: argparse.Namespace) -> tuple[dict[str, objec
 
 def resolve_plan(args: argparse.Namespace, calibration_dict: dict[str, object]) -> dict[str, object]:
     """Build the no-motion plan (segments + goal) shared by preview and run."""
-    return preview.build_preview(
+    plan = preview.build_preview(
         start_lat=args.start_lat,
         start_lon=args.start_lon,
         goal_mode=args.goal_mode,
@@ -1427,6 +1427,107 @@ def resolve_plan(args: argparse.Namespace, calibration_dict: dict[str, object]) 
         nominal_forward_pulse_m=args.nominal_forward_pulse_m,
         calibration=calibration_dict,
     )
+    validate_resolved_field_config(args, plan)
+    plan["field_config"] = build_resolved_field_config(args, plan)
+    return plan
+
+
+def build_resolved_field_config(args: argparse.Namespace, plan: dict[str, object]) -> dict[str, object]:
+    """Resolved A/B field geometry shown to the operator before preview/run."""
+    goal_x, goal_y = geometry.goal_to_local(
+        float(plan["start_lat"]),
+        float(plan["start_lon"]),
+        float(plan["goal_lat"]),
+        float(plan["goal_lon"]),
+    )
+    goal_input = plan.get("goal_input", {})
+    if not isinstance(goal_input, dict):
+        goal_input = {}
+    if str(plan.get("goal_mode", getattr(args, "goal_mode", ""))) == "relative_enu":
+        if goal_input.get("goal_east_m") is not None:
+            goal_x = float(goal_input["goal_east_m"])
+        if goal_input.get("goal_north_m") is not None:
+            goal_y = float(goal_input["goal_north_m"])
+    return {
+        "start_mode": getattr(args, "start_mode", "explicit"),
+        "start_source": str(plan.get("start_source", "explicit")),
+        "start_lat": float(plan["start_lat"]),
+        "start_lon": float(plan["start_lon"]),
+        "start_x_m": 0.0,
+        "start_y_m": 0.0,
+        "coordinate_mode": str(plan.get("goal_mode", getattr(args, "goal_mode", "unknown"))),
+        "goal_mode": str(plan.get("goal_mode", getattr(args, "goal_mode", "unknown"))),
+        "goal_east_m": goal_input.get("goal_east_m", getattr(args, "goal_east_m", None)),
+        "goal_north_m": goal_input.get("goal_north_m", getattr(args, "goal_north_m", None)),
+        "goal_lat": float(plan["goal_lat"]),
+        "goal_lon": float(plan["goal_lon"]),
+        "resolved_goal_x_m": goal_x,
+        "resolved_goal_y_m": goal_y,
+        "workspace_width_m": plan.get("workspace_width_m"),
+        "workspace_length_m": plan.get("workspace_length_m"),
+        "step_spacing_m": plan.get("step_spacing_m", getattr(args, "step_spacing_m", None)),
+        "path_shape": str(plan.get("path_shape", getattr(args, "path_shape", "unknown"))),
+        "diagonal_orientation": getattr(args, "diagonal_orientation", "A_top_left_to_B_bottom_right"),
+        "expected_goal_distance_m": float(plan["goal_distance_m"]),
+        "expected_lane_count": int(plan.get("lane_count", 0)),
+        "expected_segment_count": int(plan.get("segment_count", 0)),
+        "relative_enu_note": (
+            "A is local (0,0); B is (goal_east_m, goal_north_m); workspace width is perpendicular to the A-B diagonal."
+            if str(plan.get("goal_mode")) == "relative_enu"
+            else "NA"
+        ),
+        "ready_for_full_path_following": False,
+    }
+
+
+def validate_resolved_field_config(args: argparse.Namespace, plan: dict[str, object]) -> None:
+    distance = float(plan.get("goal_distance_m", 0.0))
+    if distance <= 0.0:
+        raise ValueError("goal distance must be > 0")
+    step_spacing = float(plan.get("step_spacing_m") or getattr(args, "step_spacing_m", 0.0))
+    if step_spacing <= 0.0:
+        raise ValueError("step_spacing_m must be > 0")
+    if str(plan.get("path_shape")) != "direct_line":
+        width = plan.get("workspace_width_m")
+        if width is None or float(width) <= 0.0:
+            raise ValueError("workspace_width_m must be > 0")
+        max_ratio = float(getattr(args, "max_width_to_goal_ratio", 0.95))
+        allow_wide = telemetry._parse_bool(getattr(args, "allow_wide_field", "false"), default=False)
+        if not allow_wide and float(width) > distance * max_ratio:
+            raise ValueError(
+                "workspace_width_m is too large for the A-B diagonal; pass --allow-wide-field true only after verifying the field geometry"
+            )
+
+
+def format_field_config(config: dict[str, object]) -> str:
+    ordered_keys = [
+        "start_mode",
+        "start_source",
+        "start_lat",
+        "start_lon",
+        "start_x_m",
+        "start_y_m",
+        "goal_mode",
+        "goal_east_m",
+        "goal_north_m",
+        "goal_lat",
+        "goal_lon",
+        "resolved_goal_x_m",
+        "resolved_goal_y_m",
+        "workspace_width_m",
+        "step_spacing_m",
+        "path_shape",
+        "diagonal_orientation",
+        "expected_goal_distance_m",
+        "expected_lane_count",
+        "expected_segment_count",
+    ]
+    lines = ["Field configuration:"]
+    for key in ordered_keys:
+        lines.append(f"  {key}={config.get(key, 'NA')}")
+    if config.get("relative_enu_note") not in (None, "NA"):
+        lines.append(f"  note={config['relative_enu_note']}")
+    return "\n".join(lines)
 
 
 def load_rows_from_log(path: Path) -> list[dict[str, str]]:
@@ -1649,8 +1750,23 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "next_recommended_action": f"Inspect {out_dir / 'summary.md'} and preview outputs before execute-plan or run.",
         "ready_for_full_path_following": False,
     }
+    field_config = dict(plan.get("field_config", {}))
+    field_config.update(
+        {
+            "start_mode": getattr(args, "start_mode", "live_gps"),
+            "start_source": start["start_source"],
+        }
+    )
+    summary["field_config"] = field_config
+    _write_json(out_dir / "field_config_resolved.json", field_config)
     _write_json(out_dir / "preview_summary.json", summary)
     write_summary_files(out_dir, summary, title="Physical Path Planner Preview")
+    if telemetry._parse_bool(getattr(args, "print_field_config", "false"), default=False):
+        print(format_field_config(field_config))
+    _write_json(out_dir / "plan.json", plan)
+    _write_rows_csv(out_dir / "planned_segments.csv", plan.get("segments", []))  # type: ignore[arg-type]
+    _write_rows_csv(out_dir / "planned_primitives.csv", plan.get("primitives", []))  # type: ignore[arg-type]
+    _write_rows_csv(out_dir / "planned_path_local.csv", plan.get("path_points", []))  # type: ignore[arg-type]
     if args.png:
         png = preview.write_preview_png(
             out_dir / "preview.png",
@@ -3592,6 +3708,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
     plan_dir_used = bool(getattr(args, "plan_dir", None))
     gps_cache_for_run = load_cached_start(float(getattr(args, "max_cached_start_age_s", 600.0)))
+    field_config_for_run: dict[str, object] | None = None
     if getattr(args, "plan_dir", None):
         plan_dir = Path(args.plan_dir)
         candidates = [plan_dir / "preview_summary.json", plan_dir / "plan.json"]
@@ -3603,6 +3720,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 message=f"--plan-dir must contain preview_summary.json or plan.json: {plan_dir}",
             )
         plan = json.loads(plan_path.read_text())
+        field_config_path = plan_dir / "field_config_resolved.json"
+        if field_config_path.exists():
+            loaded_field_config = json.loads(field_config_path.read_text())
+            if isinstance(loaded_field_config, dict):
+                field_config_for_run = loaded_field_config
+                plan["field_config"] = field_config_for_run
     else:
         if args.start_lat is None or args.start_lon is None:
             start, raw_start_lines = resolve_start_for_preview(args)
@@ -3657,8 +3780,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                     **dict(start.get("gps_wait_snapshot", {})),
                 }
             )
+        field_config_for_run = dict(plan.get("field_config", {}))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if field_config_for_run is None:
+        field_config_for_run = dict(plan.get("field_config", {}))
+    if field_config_for_run:
+        field_config_for_run.update(
+            {
+                "start_mode": plan.get("start_mode", getattr(args, "start_mode", "explicit")),
+                "start_source": "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit")),
+            }
+        )
+        _write_json(out_dir / "field_config_resolved.json", field_config_for_run)
+        if telemetry._parse_bool(getattr(args, "print_field_config", "false"), default=False):
+            print(format_field_config(field_config_for_run))
     if args.print_plan:
         _write_json(out_dir / "plan.json", plan)
         start_source = "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit"))
@@ -3689,13 +3825,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             "imu_present": plan.get("imu_present", "NA"),
             "imu_relative_yaw_deg": plan.get("imu_relative_yaw_deg", "NA"),
             "motion_calibration_loaded": motion_calibration_loaded(cal),
+            "field_config": field_config_for_run,
             "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
             "continuous_drive_used": args.straight_motion_mode == "continuous",
+            "path_control_mode": args.path_control_mode,
             "live_chunk_ms": args.live_chunk_ms,
             "max_segment_chunks": args.max_segment_chunks,
             "max_ms": args.max_ms,
             "imu_heading_hold": telemetry._parse_bool(args.imu_heading_hold, default=True),
             "cross_track_correction": telemetry._parse_bool(args.cross_track_correction, default=True),
+            "gps_reanchor": telemetry._parse_bool(args.gps_reanchor, default=True),
+            "k_heading": args.k_heading,
+            "k_cross_track": args.k_cross_track,
+            "max_correction_b": args.max_correction_b,
             "gps_cache_used": bool(plan.get("gps_cached_used") or gps_cache_for_run is not None),
             "rc_ignored_for_usb_supervised": True,
             "gps_degraded_count": 0,
@@ -3741,6 +3883,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             live_max_ms=args.max_ms,
             imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
             cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
+            path_control_mode=args.path_control_mode,
+            k_heading=args.k_heading,
+            k_cross_track=args.k_cross_track,
+            max_correction_b=args.max_correction_b,
+            gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
         )
     finally:
         handle.close()
@@ -3782,13 +3929,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         "imu_present": plan.get("imu_present", "NA"),
         "imu_relative_yaw_deg": plan.get("imu_relative_yaw_deg", "NA"),
         "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "field_config": field_config_for_run,
         "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "continuous_drive_used": summary.get("continuous_drive_used", args.straight_motion_mode == "continuous"),
+        "path_control_mode": summary.get("path_control_mode", args.path_control_mode),
+        "closed_loop_correction_enabled": summary.get("closed_loop_correction_enabled", False),
         "live_chunk_ms": args.live_chunk_ms,
         "max_segment_chunks": args.max_segment_chunks,
         "max_ms": summary.get("max_ms", args.max_ms),
         "imu_heading_hold": telemetry._parse_bool(args.imu_heading_hold, default=True),
         "cross_track_correction": telemetry._parse_bool(args.cross_track_correction, default=True),
+        "gps_reanchor": telemetry._parse_bool(args.gps_reanchor, default=True),
+        "k_heading": args.k_heading,
+        "k_cross_track": args.k_cross_track,
+        "max_correction_b": args.max_correction_b,
         "gps_cache_used": bool(plan.get("gps_cached_used") or gps_cache_for_run is not None),
         "rc_ignored_for_usb_supervised": True,
         "rc_warning": (
@@ -3806,7 +3960,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     _write_json(out_dir / "run_summary.json", summary)
     write_summary_files(out_dir, summary, title="Physical Path Planner Run")
     _write_rows_csv(out_dir / "run_rows.csv", rows)
+    _write_rows_csv(out_dir / "closed_loop_trace.csv", rows)
+    planned_vs_actual = [
+        {
+            "segment_index": row.get("segment_index"),
+            "chunk_index": row.get("chunk_index"),
+            "path_control_mode": row.get("path_control_mode"),
+            "target_x_m": row.get("target_x_m"),
+            "target_y_m": row.get("target_y_m"),
+            "current_x_m": row.get("current_x_m"),
+            "current_y_m": row.get("current_y_m"),
+            "target_heading_deg": row.get("target_heading_deg"),
+            "heading_error_deg": row.get("heading_error_deg"),
+            "cross_track_error_m": row.get("cross_track_error_m"),
+            "along_track_progress_m": row.get("along_track_progress_m"),
+            "remaining_distance_m": row.get("remaining_distance_m"),
+            "final_a_cmd": row.get("final_a_cmd"),
+            "final_b_cmd": row.get("final_b_cmd"),
+            "valid_pulse": row.get("valid_pulse"),
+            "invalid_reason": row.get("invalid_reason"),
+        }
+        for row in rows
+    ]
+    _write_rows_csv(out_dir / "planned_vs_actual.csv", planned_vs_actual)
     _write_raw_log(out_dir / "run_serial.log", raw_lines)
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
     print(
         f"run: abort_reason={abort_reason}, pulses={summary['pulse_count']}, "
         f"valid={summary['valid_pulse_count']} -> {out_dir}"
@@ -3947,6 +4125,9 @@ def build_parser() -> argparse.ArgumentParser:
     preview_p.add_argument("--from-log", default=None, help="parse saved telemetry for start GPS instead of opening serial")
     preview_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
     preview_p.add_argument("--out-dir", default="outputs/physical_path_planning/preview")
+    preview_p.add_argument("--print-field-config", choices=["true", "false"], default="false")
+    preview_p.add_argument("--allow-wide-field", choices=["true", "false"], default="false")
+    preview_p.add_argument("--max-width-to-goal-ratio", type=float, default=0.95)
     preview_p.add_argument("--png", dest="png", action="store_true", default=True)
     preview_p.add_argument("--no-png", dest="png", action="store_false")
     preview_p.set_defaults(handler=cmd_preview)
@@ -4225,6 +4406,11 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--left-fixed-pulses", type=int, default=12)
         run_p.add_argument("--right-fixed-pulses", type=int, default=12)
         run_p.add_argument("--straight-motion-mode", choices=["continuous", "pulse"], default="continuous")
+        run_p.add_argument(
+            "--path-control-mode",
+            choices=["open_loop_chunks", "imu_heading", "gps_imu_closed_loop"],
+            default="gps_imu_closed_loop",
+        )
         run_p.add_argument("--live-update-hz", type=float, default=8.0)
         run_p.add_argument("--live-ttl-ms", type=int, default=350)
         run_p.add_argument("--live-chunk-ms", type=int, default=700)
@@ -4232,7 +4418,14 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--max-ms", type=int, default=1000)
         run_p.add_argument("--imu-heading-hold", choices=["true", "false"], default="true")
         run_p.add_argument("--cross-track-correction", choices=["true", "false"], default="true")
+        run_p.add_argument("--gps-reanchor", choices=["true", "false"], default="true")
+        run_p.add_argument("--k-heading", type=float, default=0.006)
+        run_p.add_argument("--k-cross-track", type=float, default=0.20)
+        run_p.add_argument("--max-correction-b", type=float, default=0.08)
         run_p.add_argument("--out-dir", default="outputs/physical_path_planning/run")
+        run_p.add_argument("--print-field-config", choices=["true", "false"], default="false")
+        run_p.add_argument("--allow-wide-field", choices=["true", "false"], default="false")
+        run_p.add_argument("--max-width-to-goal-ratio", type=float, default=0.95)
         run_p.add_argument(
             "--print-plan",
             action="store_true",

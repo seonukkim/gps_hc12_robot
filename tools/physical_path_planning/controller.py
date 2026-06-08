@@ -46,6 +46,8 @@ DEFAULT_RC_NEUTRAL_WAIT_S = 5.0
 DEFAULT_GPS_DEGRADATION_POLICY = "continue"
 DEFAULT_MANUAL_OVERRIDE_MODE = "abort"
 _ZERO_TOLERANCE = 1e-9
+DEFAULT_PATH_CONTROL_MODE = "gps_imu_closed_loop"
+PATH_CONTROL_MODES = {"open_loop_chunks", "imu_heading", "gps_imu_closed_loop"}
 
 
 # --- Pure decision helpers (no serial; directly unit-testable) ----------------
@@ -116,6 +118,10 @@ def pulse_correction(
     connector_b_cmd: float = 0.0,
     imu_heading_hold: bool = True,
     cross_track_correction: bool = True,
+    path_control_mode: str = DEFAULT_PATH_CONTROL_MODE,
+    k_heading: float = 0.006,
+    k_cross_track: float = 0.20,
+    max_correction_b: float = 0.08,
 ) -> dict[str, float]:
     """Compute the per-pulse steering correction (B axis only).
 
@@ -124,30 +130,48 @@ def pulse_correction(
     B command is the calibrated turn value and the correction components are zero
     (a connector is a deliberate turn, not a steering nudge).
     """
-    heading = current_heading_deg(target_heading_deg, yaw if imu_heading_hold else None, start_yaw_deg)
+    if path_control_mode not in PATH_CONTROL_MODES:
+        path_control_mode = DEFAULT_PATH_CONTROL_MODE
+    heading_enabled = imu_heading_hold and path_control_mode in {"imu_heading", "gps_imu_closed_loop"}
+    cte_enabled = cross_track_correction and path_control_mode == "gps_imu_closed_loop"
+    heading = current_heading_deg(target_heading_deg, yaw if heading_enabled else None, start_yaw_deg)
     heading_error = geometry.wrap_deg(target_heading_deg - heading)
     along, signed_cte, _ = geometry.projection_metrics(segment, x, y)
-    if not imu_heading_hold:
+    if not heading_enabled:
         heading_error = 0.0
-    if not cross_track_correction:
+    if not cte_enabled:
         signed_cte = 0.0
-    b_cmd, b_heading, b_cte = geometry.compute_b_correction(
-        heading_error_deg=heading_error, cross_track_error_m=signed_cte
-    )
+    b_heading = float(k_heading) * heading_error
+    b_cte = float(k_cross_track) * signed_cte
+    correction = geometry.clamp(b_heading + b_cte, -abs(max_correction_b), abs(max_correction_b))
     if is_connector:
         b_cmd = float(connector_b_cmd)
         b_heading = 0.0
         b_cte = 0.0
     else:
-        b_cmd = geometry.clamp(float(base_b_cmd) + b_cmd, -0.08, 0.08)
+        b_cmd = geometry.clamp(
+            float(base_b_cmd) + correction,
+            -abs(max_correction_b),
+            abs(max_correction_b),
+        )
+    if is_connector:
+        correction_source = "connector_calibration"
+    elif path_control_mode == "open_loop_chunks":
+        correction_source = "open_loop"
+    elif path_control_mode == "imu_heading":
+        correction_source = "imu_heading"
+    else:
+        correction_source = "gps_imu"
     return {
         "current_heading_deg": heading,
         "heading_error_deg": heading_error,
         "cross_track_error_m": signed_cte,
         "along_track_progress_m": along,
+        "remaining_distance_m": max(0.0, float(segment.get("length_m", 0.0)) - along),
         "b_cmd": b_cmd,
         "b_heading_component": b_heading,
         "b_cte_component": b_cte,
+        "correction_source": correction_source,
     }
 
 
@@ -271,6 +295,99 @@ def live_drive_block_reason(rows: Sequence[dict[str, str]]) -> str | None:
     return None
 
 
+def _last_row_value(rows: Sequence[dict[str, str]], key: str) -> str | None:
+    for row in reversed(rows):
+        value = row.get(key)
+        if value not in (None, "", "NA"):
+            return value
+    return None
+
+
+def _final_zero(rows: Sequence[dict[str, str]]) -> bool:
+    left = telemetry._optional_float(_last_row_value(rows, "final_left_cmd"))
+    right = telemetry._optional_float(_last_row_value(rows, "final_right_cmd"))
+    if left is None and right is None:
+        return False
+    return abs(left or 0.0) <= 1e-3 and abs(right or 0.0) <= 1e-3
+
+
+def _segment_point(segment: dict[str, object], along_m: float) -> tuple[float, float]:
+    sx = float(segment["start_x_m"])
+    sy = float(segment["start_y_m"])
+    ex = float(segment["end_x_m"])
+    ey = float(segment["end_y_m"])
+    length = math.hypot(ex - sx, ey - sy)
+    if length <= 1e-9:
+        return sx, sy
+    t = geometry.clamp(along_m / length, 0.0, 1.0)
+    return sx + (ex - sx) * t, sy + (ey - sy) * t
+
+
+def _dead_reckon_pose_along_segment(
+    *,
+    segment: dict[str, object],
+    x_m: float,
+    y_m: float,
+    advance_m: float,
+) -> tuple[float, float]:
+    along, signed_cte, _ = geometry.projection_metrics(segment, x_m, y_m)
+    new_along = min(float(segment.get("length_m", 0.0)), along + max(0.0, advance_m))
+    px, py = _segment_point(segment, new_along)
+    sx = float(segment["start_x_m"])
+    sy = float(segment["start_y_m"])
+    ex = float(segment["end_x_m"])
+    ey = float(segment["end_y_m"])
+    length = math.hypot(ex - sx, ey - sy)
+    if length <= 1e-9:
+        return px, py
+    # Signed cross-track uses the left-normal convention from projection_metrics.
+    nx = -(ey - sy) / length
+    ny = (ex - sx) / length
+    return px + nx * signed_cte, py + ny * signed_cte
+
+
+def _pose_from_gps_or_dead_reckon(
+    *,
+    row: dict[str, str] | None,
+    gps: dict[str, object],
+    pose_state: dict[str, object],
+    segment: dict[str, object],
+    start_lat: float,
+    start_lon: float,
+    advance_m: float = 0.0,
+    gps_reanchor: bool = True,
+) -> dict[str, object]:
+    lat = gps.get("lat")
+    lon = gps.get("lon")
+    gps_valid = bool(lat is not None and lon is not None and not gps.get("gps_degraded"))
+    gps_reanchored = False
+    if gps_valid and gps_reanchor:
+        x, y = geometry.goal_to_local(start_lat, start_lon, float(lat), float(lon))
+        gps_reanchored = bool(pose_state.get("gps_degraded") or pose_state.get("source") != "gps")
+        pose_state.update({"x": x, "y": y, "source": "gps", "gps_degraded": False})
+    elif gps_valid and pose_state.get("x") is None:
+        x, y = geometry.goal_to_local(start_lat, start_lon, float(lat), float(lon))
+        pose_state.update({"x": x, "y": y, "source": "gps", "gps_degraded": False})
+    else:
+        x = float(pose_state.get("x", float(segment.get("start_x_m", 0.0))) or 0.0)
+        y = float(pose_state.get("y", float(segment.get("start_y_m", 0.0))) or 0.0)
+        if advance_m > 0.0:
+            x, y = _dead_reckon_pose_along_segment(
+                segment=segment,
+                x_m=x,
+                y_m=y,
+                advance_m=advance_m,
+            )
+        pose_state.update({"x": x, "y": y, "source": "dead_reckoning", "gps_degraded": True})
+    return {
+        "x": float(pose_state.get("x", 0.0)),
+        "y": float(pose_state.get("y", 0.0)),
+        "gps_valid": gps_valid,
+        "gps_reanchored": gps_reanchored,
+        "source": pose_state.get("source", "dead_reckoning"),
+    }
+
+
 def planned_pulse(
     *, seq: int, a_cmd: float, b_cmd: float, pulse_ms: int
 ) -> dict[str, object]:
@@ -337,6 +454,10 @@ def build_execution_row(
     chunk_index: int | None = None,
     live_chunk_ms: int | None = None,
     max_ms: int | None = None,
+    path_control_mode: str = DEFAULT_PATH_CONTROL_MODE,
+    pose: dict[str, object] | None = None,
+    base_a_cmd: float | None = None,
+    b_trim: float = 0.0,
 ) -> dict[str, object]:
     if drive_mode == "continuous":
         block_reason = block_reason_override
@@ -349,10 +470,17 @@ def build_execution_row(
     if invalid_reason == "USB_DRIVE_LIVE_DURATION_EXCEEDS_MAX":
         invalid_reason = "HOST_SENT_DURATION_OVER_MAX"
         offending_duration_ms = int(pulse_ms)
+    pose = pose or {}
+    current_x = float(pose.get("x", 0.0))
+    current_y = float(pose.get("y", 0.0))
+    target_x = float(segment.get("end_x_m", 0.0))
+    target_y = float(segment.get("end_y_m", 0.0))
     return {
         "row_type": "pulse",
         "segment_index": segment["segment_index"],
         "primitive_index": primitive_index,
+        "chunk_index": chunk_index if chunk_index is not None else primitive_index,
+        "path_control_mode": path_control_mode,
         "segment_type": segment["segment_type"],
         "start_lat": f"{start_lat:.7f}",
         "start_lon": f"{start_lon:.7f}",
@@ -362,31 +490,47 @@ def build_execution_row(
         "current_lon": telemetry._fmt(gps["lon"], 7) if gps["lon"] is not None else "NA",
         "gps_block_reason": (after_row or {}).get("gps_block_reason", "NA"),
         "firmware_profile": (after_row or {}).get("firmware_profile", "NA"),
+        "gps_valid": bool(pose.get("gps_valid", False)),
         "gps_degraded": gps["gps_degraded"],
+        "gps_reanchored": bool(pose.get("gps_reanchored", False)),
         "gps_cached_used": gps["gps_cached_used"],
         "imu_relative_yaw_deg": telemetry._fmt(yaw),
+        "imu_yaw_deg": telemetry._fmt(yaw),
+        "current_x_m": telemetry._fmt(current_x),
+        "current_y_m": telemetry._fmt(current_y),
+        "target_x_m": telemetry._fmt(target_x),
+        "target_y_m": telemetry._fmt(target_y),
         "current_heading_deg": telemetry._fmt(correction["current_heading_deg"]),
         "target_heading_deg": telemetry._fmt(target_heading_deg),
         "heading_error_deg": telemetry._fmt(correction["heading_error_deg"]),
         "cross_track_error_m": telemetry._fmt(correction["cross_track_error_m"]),
         "along_track_progress_m": telemetry._fmt(correction["along_track_progress_m"]),
+        "remaining_distance_m": telemetry._fmt(correction["remaining_distance_m"]),
         "a_cmd": f"{a_cmd:.3f}",
         "b_cmd": f"{correction['b_cmd']:.3f}",
+        "base_a_cmd": f"{(base_a_cmd if base_a_cmd is not None else a_cmd):.3f}",
+        "b_trim": f"{b_trim:.3f}",
         "b_heading_component": f"{correction['b_heading_component']:.3f}",
         "b_cte_component": f"{correction['b_cte_component']:.3f}",
+        "b_heading_correction": f"{correction['b_heading_component']:.3f}",
+        "b_cross_track_correction": f"{correction['b_cte_component']:.3f}",
+        "final_a_cmd": f"{a_cmd:.3f}",
+        "final_b_cmd": f"{correction['b_cmd']:.3f}",
         "pulse_ms": int(pulse_ms),
-        "chunk_index": chunk_index if chunk_index is not None else primitive_index,
         "live_chunk_ms": live_chunk_ms if live_chunk_ms is not None else "NA",
         "max_ms": max_ms if max_ms is not None else "NA",
         "offending_duration_ms": offending_duration_ms,
         "ack_seen": any(telemetry.event(r) == "ACK" for r in pulse_rows),
+        "active_seen": any(telemetry.event(r) == "ACTIVE" for r in pulse_rows),
         "stop_seen": any(telemetry.event(r) in safety.STOP_EVENTS for r in pulse_rows),
+        "final_zero": _final_zero(pulse_rows),
         "manual_override_detected": False if rc_ignored else manual_override_detected(after_row),
         "rc_ignored_for_usb_supervised": rc_ignored,
         "rc_warning": rc_warning_for_usb_supervised(after_row),
         "calibration_source": calibration_source,
         "connector_mode": connector_mode,
         "drive_mode": drive_mode,
+        "correction_source": str(correction.get("correction_source", "unknown")),
         "valid_pulse": block_reason is None,
         "invalid_reason": invalid_reason,
         "ready_for_full_path_following": False,
@@ -429,8 +573,48 @@ def build_controller_summary(
         for r in pulse_rows
         if str(r.get("max_ms", "NA")) not in {"", "NA"}
     ]
+    heading_errors = [
+        abs(float(r["heading_error_deg"]))
+        for r in pulse_rows
+        if str(r.get("heading_error_deg", "NA")) not in {"", "NA"}
+    ]
+    cross_track_errors = [
+        abs(float(r["cross_track_error_m"]))
+        for r in pulse_rows
+        if str(r.get("cross_track_error_m", "NA")) not in {"", "NA"}
+    ]
+    completed_segment_count = len(
+        {
+            r.get("segment_index")
+            for r in pulse_rows
+            if r.get("valid_pulse") is True
+        }
+    )
+    path_control_modes = [
+        str(r.get("path_control_mode"))
+        for r in pulse_rows
+        if r.get("path_control_mode") not in (None, "", "NA")
+    ]
+    path_control_mode = path_control_modes[-1] if path_control_modes else DEFAULT_PATH_CONTROL_MODE
+    correction_enabled = any(
+        abs(float(r.get("b_heading_component") or 0.0)) > _ZERO_TOLERANCE
+        or abs(float(r.get("b_cte_component") or 0.0)) > _ZERO_TOLERANCE
+        for r in pulse_rows
+    )
+    final_remaining = [
+        float(r["remaining_distance_m"])
+        for r in pulse_rows
+        if str(r.get("remaining_distance_m", "NA")) not in {"", "NA"}
+    ]
     summary = {
         "controller_mode": "continuous_motion",
+        "path_control_mode": path_control_mode,
+        "closed_loop_correction_enabled": correction_enabled,
+        "closed_loop_correction_disabled_reason": (
+            "OPEN_LOOP_CHUNKS"
+            if path_control_mode == "open_loop_chunks"
+            else ("NO_NONZERO_HEADING_OR_CROSS_TRACK_ERROR" if not correction_enabled else "NONE")
+        ),
         "start_lat": start_lat,
         "start_lon": start_lon,
         "goal_lat": goal_lat,
@@ -442,11 +626,24 @@ def build_controller_summary(
         "segment_count": len({r.get("segment_index") for r in pulse_rows}),
         "chunk_count": len(pulse_rows),
         "valid_chunk_count": valid,
+        "completed_segment_count": completed_segment_count,
+        "completed_chunk_count": valid,
+        "gps_chunk_count": sum(1 for r in pulse_rows if r.get("gps_valid") is True),
         "gps_degraded_count": sum(1 for r in pulse_rows if r.get("gps_degraded") is True),
+        "gps_reanchor_count": sum(1 for r in pulse_rows if r.get("gps_reanchored") is True),
         "continuous_drive_used": continuous_drive_count > 0,
         "continuous_drive_count": continuous_drive_count,
         "imu_heading_used_count": imu_heading_used_count,
         "cross_track_correction_used_count": cross_track_correction_used_count,
+        "average_abs_heading_error_deg": (
+            sum(heading_errors) / len(heading_errors) if heading_errors else "NA"
+        ),
+        "max_abs_heading_error_deg": max(heading_errors) if heading_errors else "NA",
+        "average_abs_cross_track_error_m": (
+            sum(cross_track_errors) / len(cross_track_errors) if cross_track_errors else "NA"
+        ),
+        "max_abs_cross_track_error_m": max(cross_track_errors) if cross_track_errors else "NA",
+        "final_distance_to_goal_m": final_remaining[-1] if final_remaining else "NA",
         "rc_ignored_for_usb_supervised": any(r.get("rc_ignored_for_usb_supervised") is True for r in pulse_rows),
         "rc_warning_count": rc_warning_count,
         "offending_duration_ms": offending_durations[-1] if offending_durations else "NA",
@@ -505,6 +702,11 @@ def run_controller(
     live_max_ms: int = 1000,
     imu_heading_hold: bool = True,
     cross_track_correction: bool = True,
+    path_control_mode: str = DEFAULT_PATH_CONTROL_MODE,
+    k_heading: float = 0.006,
+    k_cross_track: float = 0.20,
+    max_correction_b: float = 0.08,
+    gps_reanchor: bool = True,
 ) -> tuple[list[dict[str, object]], list[str], str]:
     """Run the supervised pulse loop over ``segments``; return (rows, raw_lines, abort_reason).
 
@@ -520,6 +722,14 @@ def run_controller(
     effective_live_max_ms = max(1, int(live_max_ms))
     effective_live_chunk_ms = max(1, min(int(live_chunk_ms), effective_live_max_ms))
     effective_max_segment_chunks = max(1, int(max_segment_chunks))
+    if path_control_mode not in PATH_CONTROL_MODES:
+        path_control_mode = DEFAULT_PATH_CONTROL_MODE
+    pose_state: dict[str, object] = {"x": 0.0, "y": 0.0, "source": "plan_start", "gps_degraded": False}
+    if path_control_mode == "open_loop_chunks":
+        imu_heading_hold = False
+        cross_track_correction = False
+    elif path_control_mode == "imu_heading":
+        cross_track_correction = False
 
     for segment in segments:
         budget, is_connector, direction = _segment_pulse_budget(
@@ -554,6 +764,7 @@ def run_controller(
             chunk_count = max(1, math.ceil(total_duration_ms / bounded_chunk_ms))
             chunk_count = min(chunk_count, effective_max_segment_chunks)
             remaining_ms = total_duration_ms
+            chunk_progress_m = float(segment.get("length_m", 0.0)) / max(1, chunk_count)
             for chunk_index in range(1, chunk_count + 1):
                 primitive_index += 1
                 chunk_ms = min(bounded_chunk_ms, remaining_ms)
@@ -583,20 +794,38 @@ def run_controller(
                         break
                     if gps_action == "pause":
                         continue
+                    pose_before = _pose_from_gps_or_dead_reckon(
+                        row=heartbeat,
+                        gps=gps,
+                        pose_state=pose_state,
+                        segment=segment,
+                        start_lat=start_lat,
+                        start_lon=start_lon,
+                        gps_reanchor=gps_reanchor,
+                    )
                     latest_correction: dict[str, float] | None = None
+                    latest_pose: dict[str, object] | None = pose_before
+                    chunk_gps_reanchored = bool(pose_before.get("gps_reanchored"))
 
                     def command_from_row(row: dict[str, str] | None) -> tuple[float, float]:
-                        nonlocal latest_correction
+                        nonlocal latest_correction, latest_pose, chunk_gps_reanchored
                         source = row or heartbeat
                         local_gps = dead_reckon_gps(source, gps_cache)
-                        lat = float(local_gps["lat"]) if local_gps["lat"] is not None else start_lat
-                        lon = float(local_gps["lon"]) if local_gps["lon"] is not None else start_lon
-                        x, y = geometry.goal_to_local(start_lat, start_lon, lat, lon)
+                        latest_pose = _pose_from_gps_or_dead_reckon(
+                            row=source,
+                            gps=local_gps,
+                            pose_state=pose_state,
+                            segment=segment,
+                            start_lat=start_lat,
+                            start_lon=start_lon,
+                            gps_reanchor=gps_reanchor,
+                        )
+                        chunk_gps_reanchored = chunk_gps_reanchored or bool(latest_pose.get("gps_reanchored"))
                         yaw = telemetry.imu_relative_yaw_deg(source)
                         latest_correction = pulse_correction(
                             segment=segment,
-                            x=x,
-                            y=y,
+                            x=float(latest_pose["x"]),
+                            y=float(latest_pose["y"]),
                             target_heading_deg=target_heading,
                             yaw=yaw,
                             start_yaw_deg=start_yaw_deg,
@@ -604,6 +833,10 @@ def run_controller(
                             base_b_cmd=base_b,
                             imu_heading_hold=imu_heading_hold,
                             cross_track_correction=cross_track_correction,
+                            path_control_mode=path_control_mode,
+                            k_heading=k_heading,
+                            k_cross_track=k_cross_track,
+                            max_correction_b=max_correction_b,
                         )
                         return a_cmd, float(latest_correction["b_cmd"])
 
@@ -624,14 +857,23 @@ def run_controller(
                     break
 
                 gps_after = dead_reckon_gps(after, gps_cache)
+                pose_after = _pose_from_gps_or_dead_reckon(
+                    row=after,
+                    gps=gps_after,
+                    pose_state=pose_state,
+                    segment=segment,
+                    start_lat=start_lat,
+                    start_lon=start_lon,
+                    advance_m=0.0 if not gps_after["gps_degraded"] else chunk_progress_m,
+                    gps_reanchor=gps_reanchor,
+                )
+                chunk_gps_reanchored = chunk_gps_reanchored or bool(pose_after.get("gps_reanchored"))
+                pose_after["gps_reanchored"] = chunk_gps_reanchored
                 if latest_correction is None:
-                    lat = float(gps_after["lat"]) if gps_after["lat"] is not None else start_lat
-                    lon = float(gps_after["lon"]) if gps_after["lon"] is not None else start_lon
-                    x, y = geometry.goal_to_local(start_lat, start_lon, lat, lon)
                     latest_correction = pulse_correction(
                         segment=segment,
-                        x=x,
-                        y=y,
+                        x=float(pose_after["x"]),
+                        y=float(pose_after["y"]),
                         target_heading_deg=target_heading,
                         yaw=telemetry.imu_relative_yaw_deg(after),
                         start_yaw_deg=start_yaw_deg,
@@ -639,7 +881,16 @@ def run_controller(
                         base_b_cmd=base_b,
                         imu_heading_hold=imu_heading_hold,
                         cross_track_correction=cross_track_correction,
+                        path_control_mode=path_control_mode,
+                        k_heading=k_heading,
+                        k_cross_track=k_cross_track,
+                        max_correction_b=max_correction_b,
                     )
+                    latest_pose = pose_after
+                else:
+                    # The command callback computed the command from the latest active
+                    # telemetry; rows should report the post-chunk pose when available.
+                    latest_pose = pose_after
                 row = build_execution_row(
                     segment=segment,
                     primitive_index=primitive_index,
@@ -662,10 +913,32 @@ def run_controller(
                     chunk_index=chunk_index,
                     live_chunk_ms=bounded_chunk_ms,
                     max_ms=effective_live_max_ms,
+                    path_control_mode=path_control_mode,
+                    pose=latest_pose,
+                    base_a_cmd=a_cmd,
+                    b_trim=base_b,
                 )
                 rows.append(row)
+                print(
+                    "seg={segment} chunk={chunk} gps={gps} imu={imu} "
+                    "heading_err={heading} cte={cte} progress={progress} "
+                    "A={a_cmd:.3f} B={b_cmd:.3f}".format(
+                        segment=row["segment_index"],
+                        chunk=row["chunk_index"],
+                        gps="DEGRADED" if row["gps_degraded"] else "OK",
+                        imu="OK" if row["imu_relative_yaw_deg"] != "NA" else "NA",
+                        heading=row["heading_error_deg"],
+                        cte=row["cross_track_error_m"],
+                        progress=row["along_track_progress_m"],
+                        a_cmd=a_cmd,
+                        b_cmd=float(latest_correction["b_cmd"]),
+                    )
+                )
                 if row["valid_pulse"] is not True:
                     abort_reason = str(row["invalid_reason"])
+                    break
+                remaining = telemetry._optional_float(row.get("remaining_distance_m")) or 0.0
+                if remaining <= max(0.05, chunk_progress_m * 0.5):
                     break
             if abort_reason != "NONE":
                 break
@@ -729,6 +1002,10 @@ def run_controller(
                     connector_b_cmd=connector_b,
                     imu_heading_hold=imu_heading_hold,
                     cross_track_correction=cross_track_correction,
+                    path_control_mode=path_control_mode,
+                    k_heading=k_heading,
+                    k_cross_track=k_cross_track,
+                    max_correction_b=max_correction_b,
                 )
                 planned = planned_pulse(
                     seq=primitive_index,
@@ -767,10 +1044,28 @@ def run_controller(
                 connector_mode=connector_mode,
                 chunk_index=chunk_index,
                 max_ms=effective_live_max_ms,
+                path_control_mode=path_control_mode,
+                pose={
+                    "x": x,
+                    "y": y,
+                    "gps_valid": not bool(gps_after["gps_degraded"]),
+                    "gps_reanchored": False,
+                },
+                base_a_cmd=a_cmd,
+                b_trim=base_b,
             )
             rows.append(row)
             if row["valid_pulse"] is not True:
                 abort_reason = str(row["invalid_reason"])
+                break
+            heading_error_after = telemetry._optional_float(row.get("heading_error_deg"))
+            if (
+                is_connector
+                and connector_mode != "repeated_pulses"
+                and row.get("imu_relative_yaw_deg") not in (None, "", "NA")
+                and heading_error_after is not None
+                and abs(heading_error_after) <= 10.0
+            ):
                 break
             progress = telemetry._optional_float(row.get("along_track_progress_m")) or 0.0
             if str(segment["segment_type"]).endswith("_lane") and progress >= float(

@@ -194,6 +194,13 @@ def write_preview_png(
         boundary_y = [float(a["y_m"]), float(c["y_m"]), float(b["y_m"]), float(d["y_m"]), float(a["y_m"])]  # type: ignore[index]
         ax.plot(boundary_x, boundary_y, color="black", linewidth=1.5, label="workspace boundary")
         ax.plot([float(a["x_m"]), float(b["x_m"])], [float(a["y_m"]), float(b["y_m"])], color="tab:orange", linestyle="--", label="A-B diagonal")  # type: ignore[index]
+        ax.annotate("A/start", (float(a["x_m"]), float(a["y_m"])), textcoords="offset points", xytext=(8, 8), color="green")  # type: ignore[index]
+        ax.annotate("B/goal", (float(b["x_m"]), float(b["y_m"])), textcoords="offset points", xytext=(8, -14), color="red")  # type: ignore[index]
+        ax.annotate(
+            f"width={float(workspace['workspace_width_m']):.2f}m",  # type: ignore[index]
+            ((float(a["x_m"]) + float(d["x_m"])) / 2.0, (float(a["y_m"]) + float(d["y_m"])) / 2.0),  # type: ignore[index]
+            color="tab:purple",
+        )
     for segment in segments:
         xs = [float(segment["start_x_m"]), float(segment["end_x_m"])]
         ys = [float(segment["start_y_m"]), float(segment["end_y_m"])]
@@ -205,6 +212,13 @@ def write_preview_png(
     ax.scatter([0], [0], c="green", s=80, label="current/start")
     goal_x, goal_y = geometry.goal_to_local(start_lat, start_lon, goal_lat, goal_lon)
     ax.scatter([goal_x], [goal_y], c="red", s=80, label="goal")
+    ax.annotate("A/start", (0, 0), textcoords="offset points", xytext=(8, 8), color="green")
+    ax.annotate("B/goal", (goal_x, goal_y), textcoords="offset points", xytext=(8, -14), color="red")
+    ax.arrow(0, 0, 1.0, 0, color="tab:blue", head_width=0.08, length_includes_head=True)
+    ax.arrow(0, 0, 0, 1.0, color="tab:cyan", head_width=0.08, length_includes_head=True)
+    ax.text(1.05, 0, "East +X", color="tab:blue")
+    ax.text(0, 1.05, "North +Y", color="tab:cyan")
+    ax.text(0.01, 0.95, "lane direction: solid lines\nconnectors: dashed", transform=ax.transAxes, fontsize=8, va="top")
     ax.set_title("Physical Path Planning Rectangle Coverage Preview")
     ax.set_xlabel("East from start (m)")
     ax.set_ylabel("North from start (m)")

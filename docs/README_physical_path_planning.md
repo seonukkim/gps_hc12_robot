@@ -65,10 +65,12 @@ bash scripts/run_physical_path_planner.sh calibrate-turn \
 bash scripts/run_physical_path_planner.sh preview \
   --goal-mode relative_enu --goal-east-m 4.0 --goal-north-m -1.2 \
   --workspace-width-m 1.2 --step-spacing-m 0.25 \
+  --print-field-config true \
   --out-dir outputs/physical_path_planning/preview_relative_enu
 
 bash scripts/run_physical_path_planner.sh execute-plan \
   --plan-dir outputs/physical_path_planning/preview_relative_enu \
+  --path-control-mode gps_imu_closed_loop \
   --out-dir outputs/physical_path_planning/execute_preview_relative_enu
 ```
 
@@ -97,6 +99,58 @@ start coordinates.
 
 Use `--path-shape direct_line` only when a literal straight A-B plan is explicitly
 wanted.
+
+Every `preview` and `run` resolves the field geometry before planning. Add
+`--print-field-config true` to print the exact resolved configuration, and inspect:
+
+```text
+<out-dir>/field_config_resolved.json
+```
+
+For `--goal-mode relative_enu`, A is always local `(0, 0)` and B is exactly
+`(goal_east_m, goal_north_m)`. The workspace width is perpendicular to the A-B
+diagonal. The resolved field config records start source, start/goal lat/lon,
+resolved local goal coordinates, width, step spacing, path shape, lane count,
+and segment count. `execute-plan --plan-dir ...` loads the same
+`field_config_resolved.json` that preview wrote.
+
+## Execution Control Modes
+
+`execute-plan` and `run` default to closed-loop correction:
+
+```bash
+bash scripts/run_physical_path_planner.sh execute-plan \
+  --plan-dir outputs/physical_path_planning/preview_relative_enu \
+  --path-control-mode gps_imu_closed_loop \
+  --live-chunk-ms 700 --max-segment-chunks 20 \
+  --gps-degradation-policy continue --gps-reanchor true \
+  --imu-heading-hold true --cross-track-correction true \
+  --k-heading 0.006 --k-cross-track 0.20 --max-correction-b 0.08 \
+  --out-dir outputs/physical_path_planning/execute_gps_imu_closed_loop
+```
+
+Control modes:
+
+- `gps_imu_closed_loop` — GPS reanchors position when valid, IMU holds heading,
+  and B correction uses heading plus cross-track error.
+- `imu_heading` — IMU heading hold only; GPS is not used for cross-track
+  correction.
+- `open_loop_chunks` — bounded calibrated chunks with no correction, useful only
+  as a baseline comparison.
+
+Execution writes:
+
+```text
+closed_loop_trace.csv
+planned_vs_actual.csv
+raw_usbdbg.log
+summary.md
+summary.json
+```
+
+The summary reports whether closed-loop correction was actually enabled, GPS
+degradation/reanchor counts, IMU heading usage, cross-track correction usage,
+and heading/cross-track error statistics.
 
 ## Safety Posture
 
