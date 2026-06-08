@@ -225,10 +225,13 @@ class FakeSerial:
         return self._responses.pop(0) if self._responses else b""
 
 
-def _heartbeat(lat: float, lon: float) -> bytes:
+def _heartbeat(lat: float, lon: float, *, rc_ok: bool = True, neutral_ok: bool = True, usb_ignore_rc: bool = False) -> bytes:
     return (
-        f"USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true rc_ok=true "
-        f"neutral_ok=true physical_output_active=false gps_block_reason=OK "
+        f"USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true "
+        f"usb_pulse_test_ignore_rc_input={str(usb_ignore_rc).lower()} "
+        f"usb_drive_live_mode={str(usb_ignore_rc).lower()} "
+        f"rc_ok={str(rc_ok).lower()} neutral_ok={str(neutral_ok).lower()} "
+        f"physical_output_active=false gps_block_reason=OK "
         f"gps_lat={lat:.7f} gps_lon={lon:.7f} imu_relative_yaw_deg=0.0\n"
     ).encode("ascii")
 
@@ -268,6 +271,36 @@ def test_run_controller_completes_one_clean_lane_pulse() -> None:
     assert handle.writes[0].startswith("USB_PULSE_TEST_ARM")
     assert handle.writes[1].startswith("USB_PULSE_TEST_CMD") and "a=0.300" in handle.writes[1]
     assert handle.writes[2].startswith("USB_PULSE_TEST_STOP")
+
+
+def test_run_controller_ignores_rc_not_ok_for_usb_supervised_continuous_drive() -> None:
+    handle = FakeSerial(
+        [
+            _heartbeat(35.0, 129.0, rc_ok=False, neutral_ok=False, usb_ignore_rc=True),
+            b"USB_DRIVE_LIVE event=ACTIVE\n",
+            b"USB_DRIVE_LIVE event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            _heartbeat(35.0000050, 129.0, rc_ok=False, neutral_ok=False, usb_ignore_rc=True),
+        ]
+    )
+    rows, _raw_lines, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=geometry.FALLBACK_RESOLVED_CALIBRATION,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=0.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.2,
+        heartbeat_timeout_s=0.2,
+        straight_motion_mode="continuous",
+        live_update_hz=100.0,
+    )
+    assert abort_reason == "NONE"
+    assert rows and rows[0]["valid_pulse"] is True
+    assert rows[0]["rc_ignored_for_usb_supervised"] is True
+    assert rows[0]["rc_warning"] == "RC_NOT_OK_IGNORED_FOR_MAC_USB_SUPERVISED_MODE"
+    assert handle.writes[0].startswith("USB_DRIVE_LIVE_SET")
 
 
 def test_run_controller_aborts_on_rc_invalid_during_pulse() -> None:

@@ -307,6 +307,7 @@ flash_guarded_crawl_firmware() {
   # USB pulse-test firmware. Limits are widened to admit the calibrated
   # forward (a=0.30) and turn (b=0.26) primitives.
   local flags="-DUSB_PULSE_TEST_GUARDED=1 \
+-DMAC_PHYSICAL_SUPERVISED=1 \
 -DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 \
 -DUSB_PULSE_TEST_MAX_ABS_A=${MAX_ABS_A} \
 -DUSB_PULSE_TEST_MAX_ABS_B=${MAX_ABS_B} \
@@ -322,6 +323,7 @@ flash_guarded_crawl_firmware() {
 -DPHYSICAL_PATH_FOLLOWING_ENABLE=0 \
 -DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 \
 -DPATH_FOLLOWING_DRYRUN=0 \
+-DPATH_FOLLOWING_HC12_ENABLED=0 \
 -DGROUND_CRAWL_TEST_MODE=0 \
 -DAUTO_MOTION_ARMED=0"
 

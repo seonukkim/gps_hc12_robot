@@ -223,6 +223,10 @@
 #define USB_PULSE_TEST_IGNORE_RC_INPUT 0
 #endif
 
+#ifndef MAC_PHYSICAL_SUPERVISED
+#define MAC_PHYSICAL_SUPERVISED 0
+#endif
+
 #ifndef USB_PULSE_TEST_MAX_ABS_A
 #define USB_PULSE_TEST_MAX_ABS_A 0.35
 #endif
@@ -1875,12 +1879,18 @@ bool stage16RcInputRequiredForStationPulse() {
   return !STATION_MANUAL_IGNORE_RC_INPUT_ENABLED;
 }
 
+void printImuDiagFields();
+
 void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
   uint32_t now = millis();
   bool guardedOutputActive = stage16PulseActiveFlag || usbDriveLiveActiveFlag;
   if (USB_PULSE_TEST_GUARDED_ENABLED || STATION_DRIVE_GUARDED_ENABLED || USB_DRIVE_LIVE_ENABLED) {
     Serial.print(F("USB_PULSE_TEST usb_pulse_test_mode=true event="));
     Serial.print(event);
+    Serial.print(F(" firmware_profile="));
+    Serial.print(MAC_PHYSICAL_SUPERVISED ? F("MAC_PHYSICAL_SUPERVISED") : F("USB_SUPERVISED"));
+    Serial.print(F(" mac_physical_supervised="));
+    Serial.print(MAC_PHYSICAL_SUPERVISED ? F("true") : F("false"));
     Serial.print(F(" usb_pulse_test_ready=true"));
     Serial.print(F(" usb_pulse_test_ignore_rc_input="));
     Serial.print(STATION_MANUAL_IGNORE_RC_INPUT_ENABLED ? F("true") : F("false"));
@@ -1938,6 +1948,81 @@ void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
     Serial.print(neutralOk ? F("true") : F("false"));
     Serial.print(F(" latched_stop="));
     Serial.print(stage16LatchedStopFlag ? F("true") : F("false"));
+    Serial.print(F(" gps_chars="));
+    Serial.print(gps.charsProcessed());
+    Serial.print(F(" gps_solution_valid="));
+    Serial.print(gpsSolutionValid() ? F("true") : F("false"));
+    Serial.print(F(" gps_ready="));
+    Serial.print(gpsReady() ? F("true") : F("false"));
+    Serial.print(F(" gps_block_reason="));
+    Serial.print(gpsBlockReason());
+    Serial.print(F(" current_lat="));
+    if (gpsLocationValid()) {
+      Serial.print(gps.location.lat(), 7);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" current_lon="));
+    if (gpsLocationValid()) {
+      Serial.print(gps.location.lng(), 7);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_lat="));
+    if (gpsReady()) {
+      Serial.print(gps.location.lat(), 6);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_lon="));
+    if (gpsReady()) {
+      Serial.print(gps.location.lng(), 6);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_cached_lat="));
+    if (gpsLocationValid()) {
+      Serial.print(gps.location.lat(), 6);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_cached_lon="));
+    if (gpsLocationValid()) {
+      Serial.print(gps.location.lng(), 6);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_cached_age_ms="));
+    if (gpsLocationValid()) {
+      Serial.print(gps.location.age());
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_sats="));
+    if (gps.satellites.isValid()) {
+      Serial.print(gps.satellites.value());
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" gps_hdop="));
+    if (gps.hdop.isValid()) {
+      Serial.print(gps.hdop.hdop(), 2);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" last_rmc_status="));
+    if (lastRmcStatus != '\0') {
+      Serial.print(lastRmcStatus);
+    } else {
+      Serial.print(F("NA"));
+    }
+    Serial.print(F(" last_gga_fix_quality="));
+    if (lastGgaFixQuality >= 0) {
+      Serial.print(lastGgaFixQuality);
+    } else {
+      Serial.print(F("NA"));
+    }
+    printImuDiagFields();
     Serial.print(F(" physical_path_following_enable=false allow_motor_output=false path_package_used=false hc12_used=false"));
     Serial.print(F(" ready_for_full_path_following=false"));
     Serial.println();

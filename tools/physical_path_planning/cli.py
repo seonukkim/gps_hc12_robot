@@ -44,6 +44,7 @@ DEFAULT_TURN_CALIBRATION_OUT = (
     "outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json"
 )
 DEFAULT_GPS_CACHE = Path("outputs/physical_path_planning/gps_cache/latest_start.json")
+MAC_PHYSICAL_SUPERVISED_PROFILE = "MAC_PHYSICAL_SUPERVISED"
 RC_INPUT_ABSENT_ACTION = (
     "Check RC receiver power; check receiver signal wire to OpenRB RC input; "
     "check whether receiver output mode is PPM/SBUS/PWM and firmware input mode matches; "
@@ -108,6 +109,38 @@ def guarded_pulse_imu_flags(*, max_abs_a: float = 0.35, max_abs_b: float = 0.35,
     )
 
 
+def mac_physical_supervised_firmware_flags(
+    *,
+    max_abs_a: float = 0.35,
+    max_abs_b: float = 0.35,
+    max_ms: int = 1000,
+    max_duration_ms: int = 3000,
+    update_timeout_ms: int = 350,
+) -> str:
+    return (
+        "-DMAC_PHYSICAL_SUPERVISED=1 "
+        "-DUSB_PULSE_TEST_GUARDED=1 "
+        "-DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 "
+        f"-DUSB_PULSE_TEST_MAX_ABS_A={max_abs_a} "
+        f"-DUSB_PULSE_TEST_MAX_ABS_B={max_abs_b} "
+        f"-DUSB_PULSE_TEST_MAX_MS={max_ms} "
+        "-DUSB_DRIVE_LIVE_ENABLE=1 "
+        "-DUSB_DRIVE_LIVE_IGNORE_RC_INPUT=1 "
+        f"-DUSB_DRIVE_LIVE_MAX_ABS_A={max_abs_a} "
+        f"-DUSB_DRIVE_LIVE_MAX_ABS_B={max_abs_b} "
+        f"-DUSB_DRIVE_LIVE_MAX_DURATION_MS={max_duration_ms} "
+        f"-DUSB_DRIVE_LIVE_UPDATE_TIMEOUT_MS={update_timeout_ms} "
+        "-DIMU_ENABLE=1 "
+        "-DIMU_YAW_DIAG=1 "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+
+
 def guarded_pulse_firmware_flags(
     *,
     max_abs_a: float = 0.35,
@@ -127,18 +160,10 @@ def usb_pulse_test_firmware_flags(
     max_abs_b: float = 0.35,
     max_ms: int = 1000,
 ) -> str:
-    return (
-        "-DUSB_PULSE_TEST_GUARDED=1 "
-        "-DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 "
-        f"-DUSB_PULSE_TEST_MAX_ABS_A={max_abs_a} "
-        f"-DUSB_PULSE_TEST_MAX_ABS_B={max_abs_b} "
-        f"-DUSB_PULSE_TEST_MAX_MS={max_ms} "
-        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
-        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
-        "-DPATH_FOLLOWING_DRYRUN=0 "
-        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
-        "-DGROUND_CRAWL_TEST_MODE=0 "
-        "-DAUTO_MOTION_ARMED=0"
+    return mac_physical_supervised_firmware_flags(
+        max_abs_a=max_abs_a,
+        max_abs_b=max_abs_b,
+        max_ms=max_ms,
     )
 
 
@@ -149,21 +174,11 @@ def usb_drive_live_firmware_flags(
     max_duration_ms: int = 3000,
     update_timeout_ms: int = 350,
 ) -> str:
-    return (
-        "-DUSB_DRIVE_LIVE_ENABLE=1 "
-        "-DUSB_DRIVE_LIVE_IGNORE_RC_INPUT=1 "
-        f"-DUSB_DRIVE_LIVE_MAX_ABS_A={max_abs_a} "
-        f"-DUSB_DRIVE_LIVE_MAX_ABS_B={max_abs_b} "
-        f"-DUSB_DRIVE_LIVE_MAX_DURATION_MS={max_duration_ms} "
-        f"-DUSB_DRIVE_LIVE_UPDATE_TIMEOUT_MS={update_timeout_ms} "
-        "-DIMU_ENABLE=1 "
-        "-DIMU_YAW_DIAG=1 "
-        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
-        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
-        "-DPATH_FOLLOWING_DRYRUN=0 "
-        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
-        "-DGROUND_CRAWL_TEST_MODE=0 "
-        "-DAUTO_MOTION_ARMED=0"
+    return mac_physical_supervised_firmware_flags(
+        max_abs_a=max_abs_a,
+        max_abs_b=max_abs_b,
+        max_duration_ms=max_duration_ms,
+        update_timeout_ms=update_timeout_ms,
     )
 
 
@@ -1063,6 +1078,7 @@ def gps_snapshot(rows: Sequence[dict[str, str]], *, min_sats: float = 5.0, max_h
     hdop = telemetry._optional_float(last.get("gps_hdop"))
     gps_ready = best_ready_row is not None
     return {
+        "firmware_profile": last.get("firmware_profile", MAC_PHYSICAL_SUPERVISED_PROFILE),
         "gps_ready": gps_ready,
         "gps_solution_valid": telemetry._parse_bool(last.get("gps_solution_valid")),
         "gps_chars": last.get("gps_chars", "NA"),
@@ -1086,6 +1102,7 @@ def gps_snapshot(rows: Sequence[dict[str, str]], *, min_sats: float = 5.0, max_h
 def _gps_status_line(elapsed_s: float, snapshot: dict[str, object]) -> str:
     return (
         f"elapsed_s={elapsed_s:.0f} "
+        f"firmware_profile={snapshot['firmware_profile']} "
         f"gps_chars={snapshot['gps_chars']} "
         f"gps_ready={str(snapshot['gps_ready']).lower()} "
         f"gps_solution_valid={str(snapshot['gps_solution_valid']).lower()} "
@@ -1119,6 +1136,7 @@ def write_gps_cache(snapshot: dict[str, object]) -> None:
             "gps_sats": snapshot.get("best_sats"),
             "gps_hdop": snapshot.get("best_hdop"),
             "source": "gps-wait",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
             "ready_for_full_path_following": False,
         },
     )
@@ -1147,6 +1165,7 @@ def load_cached_start(max_age_s: float) -> dict[str, object] | None:
         "start_gps_hdop": data.get("gps_hdop", "NA"),
         "gps_cached_used": True,
         "gps_wait_snapshot": {
+            "firmware_profile": data.get("firmware_profile", MAC_PHYSICAL_SUPERVISED_PROFILE),
             "gps_ready": True,
             "gps_solution_valid": True,
             "current_lat": lat,
@@ -1253,6 +1272,16 @@ def resolve_start_for_preview(args: argparse.Namespace) -> tuple[dict[str, objec
 
     if not ensure_port(args):
         return None, []
+    if getattr(args, "upload", "auto") in {"true", "auto"}:
+        uploaded = _upload_mac_physical_supervised_firmware(
+            args,
+            Path(args.out_dir),
+            title="Mac Physical Supervised",
+            mode=getattr(args, "mode", "preview"),
+            build_path="/private/tmp/openrb-mac-physical-supervised",
+        )
+        if uploaded != 0:
+            return None, []
     import serial
 
     if not telemetry._parse_bool(getattr(args, "wait_gps", "true"), default=True):
@@ -1489,6 +1518,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
             "mode": "preview",
             "success": False,
             "reason": "NO_USABLE_START_GPS",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
             "message": NO_USABLE_START_GPS_ACTION,
             "next_recommended_action": NO_USABLE_START_GPS_ACTION,
             "start_mode": getattr(args, "start_mode", "live_gps"),
@@ -1518,6 +1548,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "mode": "preview",
         "success": True,
         "reason": "OK",
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
         "start_mode": getattr(args, "start_mode", "live_gps"),
         "start_source": start["start_source"],
         "current_lat": start["start_lat"],
@@ -1573,6 +1604,7 @@ def _gps_wait_summary(
             "mode": mode,
             "success": success,
             "reason": "GPS_READY" if success else "GPS_WAIT_TIMEOUT",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
             "gps_wait_enabled": True,
             "gps_wait_timeout_s": timeout_s,
             "gps_wait_elapsed_s": elapsed_s,
@@ -1588,12 +1620,42 @@ def _gps_wait_summary(
     return checks.assert_not_ready_for_full_path_following(summary)
 
 
+def gps_telemetry_parse_mismatch(raw_lines: Sequence[str], rows: Sequence[dict[str, str]]) -> bool:
+    if not raw_lines:
+        return False
+    gps_keys = {
+        "gps_chars",
+        "gps_ready",
+        "gps_solution_valid",
+        "current_lat",
+        "current_lon",
+        "gps_lat",
+        "gps_lon",
+        "gps_sats",
+        "gps_hdop",
+        "last_rmc_status",
+        "last_gga_fix_quality",
+    }
+    imu_keys = {"imu_present", "imu_relative_yaw_deg", "imu_enabled", "imu_type"}
+    return (
+        not rows
+        or not any(gps_keys.intersection(row.keys()) for row in rows)
+        or not any(imu_keys.intersection(row.keys()) for row in rows)
+    )
+
+
+def write_raw_gps_samples(out_dir: Path, raw_lines: Sequence[str]) -> None:
+    samples = [line for line in raw_lines if line][:20]
+    (out_dir / "raw_gps_samples.txt").write_text("\n".join(samples) + ("\n" if samples else ""), encoding="utf-8")
+
+
 def cmd_gps_wait(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_lines: list[str] = []
     rows: list[dict[str, str]] = []
     start = time.monotonic()
+    user_aborted = False
     if getattr(args, "from_log", None):
         raw_lines = Path(args.from_log).read_text(encoding="utf-8").splitlines()
         rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
@@ -1601,26 +1663,64 @@ def cmd_gps_wait(args: argparse.Namespace) -> int:
     else:
         if not ensure_port(args):
             return 2
+        if args.upload in {"true", "auto"}:
+            uploaded = _upload_mac_physical_supervised_firmware(
+                args,
+                out_dir,
+                title="GPS Wait",
+                mode="gps-wait",
+                build_path="/private/tmp/openrb-mac-physical-supervised",
+            )
+            if uploaded != 0:
+                return uploaded
         import serial
+        try:
+            serial_errors = (OSError, serial.serialutil.SerialException)
+        except AttributeError:
+            serial_errors = (OSError,)
 
         deadline = start + float(args.timeout_s)
         next_status = start
-        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
-            while time.monotonic() < deadline:
-                raw = handle.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="replace").strip()
-                raw_lines.append(line)
-                parsed = telemetry.parse_usbdbg_rows(line)
-                if parsed:
-                    rows.extend(parsed)
-                snapshot = gps_snapshot(rows, min_sats=args.min_sats, max_hdop=args.max_hdop)
-                if time.monotonic() >= next_status:
-                    print(_gps_status_line(time.monotonic() - start, snapshot))
-                    next_status = time.monotonic() + float(args.status_interval_s)
-                if snapshot["gps_ready"]:
-                    break
+        try:
+            with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+                while time.monotonic() < deadline:
+                    raw = handle.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    raw_lines.append(line)
+                    parsed = telemetry.parse_usbdbg_rows(line)
+                    if parsed:
+                        rows.extend(parsed)
+                    snapshot = gps_snapshot(rows, min_sats=args.min_sats, max_hdop=args.max_hdop)
+                    if time.monotonic() >= next_status:
+                        print(_gps_status_line(time.monotonic() - start, snapshot))
+                        next_status = time.monotonic() + float(args.status_interval_s)
+                    if snapshot["gps_ready"]:
+                        break
+        except KeyboardInterrupt:
+            user_aborted = True
+            print("gps-wait: user aborted; writing summaries.")
+        except serial_errors:
+            elapsed_s = time.monotonic() - start
+            summary = {
+                **_gps_wait_summary(
+                    rows,
+                    mode="gps-wait",
+                    elapsed_s=elapsed_s,
+                    timeout_s=float(args.timeout_s),
+                    min_sats=float(args.min_sats),
+                    max_hdop=float(args.max_hdop),
+                ),
+                "success": False,
+                "reason": "SERIAL_DISCONNECT",
+                "next_recommended_action": "Reconnect OpenRB and rerun gps-wait.",
+                "ready_for_full_path_following": False,
+            }
+            _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+            _write_rows_csv(out_dir / "gps_wait.csv", rows)
+            write_summary_files(out_dir, summary, title="GPS Wait")
+            return 2
         elapsed_s = time.monotonic() - start
     summary = _gps_wait_summary(
         rows,
@@ -1630,6 +1730,26 @@ def cmd_gps_wait(args: argparse.Namespace) -> int:
         min_sats=float(args.min_sats),
         max_hdop=float(args.max_hdop),
     )
+    if gps_telemetry_parse_mismatch(raw_lines, rows):
+        write_raw_gps_samples(out_dir, raw_lines)
+        summary = {
+            **summary,
+            "success": False,
+            "reason": "WRONG_FIRMWARE_PROFILE_OR_TELEMETRY_PARSE_MISMATCH",
+            "raw_gps_samples": "raw_gps_samples.txt",
+            "next_recommended_action": "Telemetry arrived, but GPS/IMU fields for MAC_PHYSICAL_SUPERVISED were not recognized. Inspect raw_gps_samples.txt and verify the firmware profile/parser.",
+            "ready_for_full_path_following": False,
+        }
+    if user_aborted:
+        summary = {
+            **summary,
+            "success": False,
+            "reason": "USER_ABORTED",
+            "user_aborted": True,
+            "next_recommended_action": "Rerun gps-wait when ready to continue waiting for GPS.",
+            "ready_for_full_path_following": False,
+        }
+        summary = checks.assert_not_ready_for_full_path_following(summary)
     _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
     _write_rows_csv(out_dir / "gps_wait.csv", rows)
     write_summary_files(out_dir, summary, title="GPS Wait")
@@ -1639,6 +1759,8 @@ def cmd_gps_wait(args: argparse.Namespace) -> int:
         f"gps-wait: reason={summary['reason']} "
         f"best_sats={summary['best_sats']} best_hdop={summary['best_hdop']} -> {out_dir}"
     )
+    if user_aborted:
+        return 130
     return 0 if summary["success"] is True else 2
 
 
@@ -2730,6 +2852,7 @@ def tune_motion_summary(
         "mode": "tune-motion",
         "success": approved,
         "reason": reason,
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
         "primitive": primitive,
         "trial_count": len(rows),
         "actual_pulse_count": sum(1 for row in rows if row.get("valid_pulse") in {True, False}),
@@ -2756,9 +2879,26 @@ def tune_motion_summary(
     return checks.assert_not_ready_for_full_path_following(summary)
 
 
-def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, title: str) -> int:
-    flags = usb_pulse_test_firmware_flags(max_abs_a=args.max_abs_a, max_abs_b=args.max_abs_b, max_ms=args.max_ms)
-    build_path = "/private/tmp/openrb-tune-motion" if title == "Tune Motion" else "/private/tmp/openrb-usb-pulse-test"
+def _upload_mac_physical_supervised_firmware(
+    args: argparse.Namespace,
+    out_dir: Path,
+    *,
+    title: str,
+    mode: str,
+    build_path: str,
+) -> int:
+    max_abs_a = float(getattr(args, "max_abs_a", 0.35))
+    max_abs_b = float(getattr(args, "max_abs_b", 0.35))
+    max_ms = int(getattr(args, "max_ms", 1000))
+    max_duration_s = float(getattr(args, "max_duration_s", 3.0))
+    ttl_ms = int(getattr(args, "ttl_ms", 350))
+    flags = mac_physical_supervised_firmware_flags(
+        max_abs_a=max_abs_a,
+        max_abs_b=max_abs_b,
+        max_ms=max_ms,
+        max_duration_ms=int(max_duration_s * 1000.0),
+        update_timeout_ms=ttl_ms,
+    )
     compile_cmd = [
         "arduino-cli",
         "compile",
@@ -2786,11 +2926,12 @@ def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, 
         write_summary_files(
             out_dir,
             {
-                "mode": "tune-motion",
+                "mode": mode,
                 "success": False,
-                "reason": "USB_PULSE_TEST_FIRMWARE_COMPILE_FAILED",
+                "reason": "MAC_PHYSICAL_SUPERVISED_FIRMWARE_COMPILE_FAILED",
+                "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
                 "returncode": completed.returncode,
-                "next_recommended_action": "Inspect Arduino compile output before retrying tune-motion.",
+                "next_recommended_action": "Inspect Arduino compile output before retrying the same command.",
                 "ready_for_full_path_following": False,
             },
             title=title,
@@ -2801,78 +2942,40 @@ def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, 
         write_summary_files(
             out_dir,
             {
-                "mode": "tune-motion",
+                "mode": mode,
                 "success": False,
-                "reason": "USB_PULSE_TEST_FIRMWARE_UPLOAD_FAILED",
+                "reason": "MAC_PHYSICAL_SUPERVISED_FIRMWARE_UPLOAD_FAILED",
+                "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
                 "returncode": completed.returncode,
-                "next_recommended_action": "Check OpenRB port and upload mode before retrying tune-motion.",
+                "next_recommended_action": "Check OpenRB port and upload mode before retrying the same command.",
                 "ready_for_full_path_following": False,
             },
             title=title,
         )
         return completed.returncode
     return 0
+
+
+def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, title: str) -> int:
+    build_path = "/private/tmp/openrb-tune-motion" if title == "Tune Motion" else "/private/tmp/openrb-usb-pulse-test"
+    mode = "tune-motion" if title == "Tune Motion" else "usb-pulse-test"
+    return _upload_mac_physical_supervised_firmware(
+        args,
+        out_dir,
+        title=title,
+        mode=mode,
+        build_path=build_path,
+    )
 
 
 def _upload_usb_drive_live_firmware(args: argparse.Namespace, out_dir: Path) -> int:
-    flags = usb_drive_live_firmware_flags(
-        max_abs_a=args.max_abs_a,
-        max_abs_b=args.max_abs_b,
-        max_duration_ms=int(args.max_duration_s * 1000.0),
-        update_timeout_ms=args.ttl_ms,
+    return _upload_mac_physical_supervised_firmware(
+        args,
+        out_dir,
+        title="USB Drive Live",
+        mode="usb-drive-live",
+        build_path="/private/tmp/openrb-usb-drive-live",
     )
-    build_path = "/private/tmp/openrb-usb-drive-live"
-    compile_cmd = [
-        "arduino-cli",
-        "compile",
-        "--fqbn",
-        "OpenRB-150:samd:OpenRB-150",
-        "--build-path",
-        build_path,
-        "--build-property",
-        f"compiler.cpp.extra_flags={flags}",
-        "firmware/openrb_robot_controller",
-    ]
-    upload_cmd = [
-        "arduino-cli",
-        "upload",
-        "-p",
-        str(args.port),
-        "--fqbn",
-        "OpenRB-150:samd:OpenRB-150",
-        "--build-path",
-        build_path,
-        "firmware/openrb_robot_controller",
-    ]
-    completed = subprocess.run(compile_cmd, check=False)
-    if completed.returncode != 0:
-        write_summary_files(
-            out_dir,
-            {
-                "mode": "usb-drive-live",
-                "success": False,
-                "reason": "USB_DRIVE_LIVE_FIRMWARE_COMPILE_FAILED",
-                "returncode": completed.returncode,
-                "ready_for_full_path_following": False,
-            },
-            title="USB Drive Live",
-        )
-        return completed.returncode
-    completed = subprocess.run(upload_cmd, check=False)
-    if completed.returncode != 0:
-        write_summary_files(
-            out_dir,
-            {
-                "mode": "usb-drive-live",
-                "success": False,
-                "reason": "USB_DRIVE_LIVE_FIRMWARE_UPLOAD_FAILED",
-                "returncode": completed.returncode,
-                "ready_for_full_path_following": False,
-            },
-            title="USB Drive Live",
-        )
-        return completed.returncode
-    return 0
 
 
 def usb_drive_live_summary(rows: Sequence[dict[str, str]], *, a_cmd: float, b_cmd: float, duration_s: float) -> dict[str, object]:
@@ -2892,6 +2995,7 @@ def usb_drive_live_summary(rows: Sequence[dict[str, str]], *, a_cmd: float, b_cm
         "mode": "usb-drive-live",
         "success": success,
         "reason": reason,
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
         "a_cmd": round(a_cmd, 3),
         "b_cmd": round(b_cmd, 3),
         "duration_s": duration_s,
@@ -2901,6 +3005,10 @@ def usb_drive_live_summary(rows: Sequence[dict[str, str]], *, a_cmd: float, b_cm
         "physical_output_active_seen": output_active_seen,
         "stop_seen": stop_seen,
         "final_zero": not final_nonzero,
+        "rc_ignored_for_usb_supervised": True,
+        "rc_warning": "RC_NOT_OK_IGNORED_FOR_MAC_USB_SUPERVISED_MODE"
+        if any(controller.rc_warning_for_usb_supervised(row).startswith("RC_NOT_OK") for row in rows)
+        else "NONE",
         "next_recommended_action": (
             "Use tune-motion or execute-plan after confirming smooth motion."
             if success else
@@ -2928,6 +3036,7 @@ def cmd_usb_drive_live(args: argparse.Namespace) -> int:
             "mode": "usb-drive-live",
             "success": True,
             "reason": "COMMAND_PRINTED",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
             "a_cmd": round(float(args.a), 3),
             "b_cmd": round(float(args.b), 3),
             "duration_s": args.duration_s,
@@ -2969,6 +3078,7 @@ def cmd_usb_drive_live(args: argparse.Namespace) -> int:
             "mode": "usb-drive-live",
             "success": False,
             "reason": "SERIAL_DISCONNECT",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
             "ready_for_full_path_following": False,
         }
         _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
@@ -3391,6 +3501,8 @@ def cmd_station_hw_manual(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
+    plan_dir_used = bool(getattr(args, "plan_dir", None))
+    gps_cache_for_run = load_cached_start(float(getattr(args, "max_cached_start_age_s", 600.0)))
     if getattr(args, "plan_dir", None):
         plan_dir = Path(args.plan_dir)
         candidates = [plan_dir / "preview_summary.json", plan_dir / "plan.json"]
@@ -3422,6 +3534,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         "mode": args.mode,
                         "success": False,
                         "reason": "NO_USABLE_START_GPS",
+                        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
                         "message": NO_USABLE_START_GPS_ACTION,
                         "next_recommended_action": NO_USABLE_START_GPS_ACTION,
                         "start_mode": getattr(args, "start_mode", "live_gps"),
@@ -3459,12 +3572,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.print_plan:
         _write_json(out_dir / "plan.json", plan)
-        start_source = str(plan.get("start_source", "plan_dir" if getattr(args, "plan_dir", None) else "explicit"))
+        start_source = "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit"))
         summary = {
             **plan,
             "mode": args.mode,
             "success": True,
             "reason": "PLAN_PRINTED",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
             "start_source": start_source,
             "current_lat": plan["start_lat"],
             "current_lon": plan["start_lon"],
@@ -3473,6 +3587,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "gps_wait_timeout_s": plan.get("gps_wait_timeout_s", 0.0),
             "gps_wait_elapsed_s": plan.get("gps_wait_elapsed_s", 0.0),
             "gps_ready": plan.get("gps_ready", "NA"),
+            "gps_ready_at_start": plan.get("gps_ready", "NA"),
             "gps_solution_valid": plan.get("gps_solution_valid", "NA"),
             "gps_sats": plan.get("gps_sats", "NA"),
             "gps_hdop": plan.get("gps_hdop", "NA"),
@@ -3487,6 +3602,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "motion_calibration_loaded": motion_calibration_loaded(cal),
             "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
             "continuous_drive_used": args.straight_motion_mode == "continuous",
+            "gps_cache_used": bool(plan.get("gps_cached_used") or gps_cache_for_run is not None),
+            "rc_ignored_for_usb_supervised": True,
             "gps_degraded_count": 0,
             "imu_heading_used_count": 0,
             "next_recommended_action": "Inspect summary.md and plan.json before running physical execution.",
@@ -3544,7 +3661,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "success": summary.get("aborted") is False,
         "reason": "OK" if summary.get("aborted") is False else str(abort_reason),
-        "start_source": str(plan.get("start_source", "plan_dir" if getattr(args, "plan_dir", None) else "explicit")),
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+        "start_source": "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit")),
         "current_lat": plan["start_lat"],
         "current_lon": plan["start_lon"],
         "start_mode": plan.get("start_mode", getattr(args, "start_mode", "explicit")),
@@ -3552,6 +3670,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "gps_wait_timeout_s": plan.get("gps_wait_timeout_s", 0.0),
         "gps_wait_elapsed_s": plan.get("gps_wait_elapsed_s", 0.0),
         "gps_ready": plan.get("gps_ready", "NA"),
+        "gps_ready_at_start": plan.get("gps_ready", "NA"),
         "gps_solution_valid": plan.get("gps_solution_valid", "NA"),
         "gps_sats": plan.get("gps_sats", "NA"),
         "gps_hdop": plan.get("gps_hdop", "NA"),
@@ -3566,6 +3685,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         "motion_calibration_loaded": motion_calibration_loaded(cal),
         "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "continuous_drive_used": summary.get("continuous_drive_used", args.straight_motion_mode == "continuous"),
+        "gps_cache_used": bool(plan.get("gps_cached_used") or gps_cache_for_run is not None),
+        "rc_ignored_for_usb_supervised": True,
+        "rc_warning": (
+            "RC_NOT_OK_IGNORED_FOR_MAC_USB_SUPERVISED_MODE"
+            if int(summary.get("rc_warning_count", 0)) > 0 else "NONE"
+        ),
+        "abort_reason": str(abort_reason),
         "next_recommended_action": (
             "Inspect path trace and run summary before any longer test."
             if summary.get("aborted") is False else
@@ -3690,6 +3816,7 @@ def build_parser() -> argparse.ArgumentParser:
     gps_p.add_argument("--status-interval-s", type=float, default=2.0)
     gps_p.add_argument("--min-sats", type=float, default=5.0)
     gps_p.add_argument("--max-hdop", type=float, default=2.5)
+    gps_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
     gps_p.add_argument("--out-dir", default="outputs/physical_path_planning/gps_wait")
     gps_p.set_defaults(handler=cmd_gps_wait)
 
@@ -3714,6 +3841,7 @@ def build_parser() -> argparse.ArgumentParser:
     preview_p.add_argument("--max-cached-start-age-s", type=float, default=600.0)
     preview_p.add_argument("--cached-start-max-age-ms", type=int, default=10000)
     preview_p.add_argument("--from-log", default=None, help="parse saved telemetry for start GPS instead of opening serial")
+    preview_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
     preview_p.add_argument("--out-dir", default="outputs/physical_path_planning/preview")
     preview_p.add_argument("--png", dest="png", action="store_true", default=True)
     preview_p.add_argument("--no-png", dest="png", action="store_false")

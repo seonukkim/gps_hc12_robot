@@ -299,8 +299,11 @@ def test_usb_pulse_test_default_does_not_require_rc_input() -> None:
 
 def test_usb_pulse_test_firmware_flags_include_rc_bypass() -> None:
     flags = cli.usb_pulse_test_firmware_flags(max_ms=1000)
+    assert "MAC_PHYSICAL_SUPERVISED=1" in flags
     assert "USB_PULSE_TEST_GUARDED=1" in flags
     assert "USB_PULSE_TEST_IGNORE_RC_INPUT=1" in flags
+    assert "USB_DRIVE_LIVE_ENABLE=1" in flags
+    assert "IMU_ENABLE=1" in flags
     assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
     assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
 
@@ -331,11 +334,25 @@ def test_usb_drive_live_print_command_uses_continuous_protocol(
     assert data["mode"] == "usb-drive-live"
 
 
+def test_usb_drive_live_summary_does_not_require_rc_ok() -> None:
+    rows = cli.telemetry.parse_usbdbg_rows(
+        "USB_DRIVE_LIVE event=ACTIVE rc_ok=false neutral_ok=false physical_output_active=true\n"
+        "USB_DRIVE_LIVE event=STOP rc_ok=false neutral_ok=false final_left_cmd=0.0 "
+        "final_right_cmd=0.0 physical_output_active=false\n"
+    )
+    summary = cli.usb_drive_live_summary(rows, a_cmd=0.3, b_cmd=0.0, duration_s=1.0)
+    assert summary["success"] is True
+    assert summary["reason"] == "OK"
+
+
 def test_usb_drive_live_firmware_flags_are_bounded_and_non_path_following() -> None:
     flags = cli.usb_drive_live_firmware_flags(max_duration_ms=3000, update_timeout_ms=350)
+    assert "MAC_PHYSICAL_SUPERVISED=1" in flags
+    assert "USB_PULSE_TEST_GUARDED=1" in flags
     assert "USB_DRIVE_LIVE_ENABLE=1" in flags
     assert "USB_DRIVE_LIVE_IGNORE_RC_INPUT=1" in flags
     assert "USB_DRIVE_LIVE_MAX_DURATION_MS=3000" in flags
+    assert "IMU_ENABLE=1" in flags
     assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
     assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
 
@@ -1188,6 +1205,192 @@ def test_gps_wait_success_detects_delayed_fix(tmp_path: Path, monkeypatch: pytes
     assert summary["current_lon"] == pytest.approx(129.1871)
 
 
+def test_gps_wait_parse_mismatch_is_clear(tmp_path: Path) -> None:
+    log = tmp_path / "gps.log"
+    log.write_text("RAW_GPS_LINE without key value telemetry\nanother unparsed sample\n")
+    rc = cli.main(["gps-wait", "--from-log", str(log), "--timeout-s", "300", "--out-dir", str(tmp_path)])
+    assert rc == 2
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "WRONG_FIRMWARE_PROFILE_OR_TELEMETRY_PARSE_MISMATCH"
+    assert (tmp_path / "raw_gps_samples.txt").exists()
+
+
+def test_gps_wait_keyboard_interrupt_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    port = tmp_path / "ttyUSB-test"
+    port.touch()
+
+    class InterruptingSerial:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def readline(self) -> bytes:
+            raise KeyboardInterrupt
+
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=InterruptingSerial))
+    rc = cli.main([
+        "gps-wait",
+        "--port",
+        str(port),
+        "--upload",
+        "false",
+        "--timeout-s",
+        "300",
+        "--out-dir",
+        str(tmp_path),
+    ])
+    assert rc == 130
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "USER_ABORTED"
+    assert (tmp_path / "raw_usbdbg.log").exists()
+
+
+def test_gps_wait_uploads_mac_physical_supervised_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    port = tmp_path / "ttyUSB-test"
+    port.touch()
+    compile_flags: list[str] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(cmd, check=False, **kwargs):
+        joined = " ".join(str(part) for part in cmd)
+        if "compiler.cpp.extra_flags=" in joined:
+            compile_flags.append(joined)
+        return Completed()
+
+    class ReadySerial:
+        def __init__(self, *args, **kwargs) -> None:
+            self.lines = [
+                b"USB_PULSE_TEST event=HEARTBEAT firmware_profile=MAC_PHYSICAL_SUPERVISED "
+                b"gps_chars=1200 gps_solution_valid=true gps_ready=true gps_sats=6 gps_hdop=1.8 "
+                b"current_lat=35.5709000 current_lon=129.1871000 imu_present=true "
+                b"imu_relative_yaw_deg=3.0\n"
+            ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def readline(self) -> bytes:
+            return self.lines.pop(0) if self.lines else b""
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=ReadySerial))
+    rc = cli.main(["gps-wait", "--port", str(port), "--timeout-s", "5", "--out-dir", str(tmp_path)])
+    assert rc == 0
+    assert compile_flags
+    assert "MAC_PHYSICAL_SUPERVISED=1" in compile_flags[0]
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["firmware_profile"] == "MAC_PHYSICAL_SUPERVISED"
+    assert summary["reason"] == "GPS_READY"
+
+
+def test_gps_wait_serial_disconnect_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    port = tmp_path / "ttyUSB-test"
+    port.touch()
+
+    class DisconnectingSerial:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def readline(self) -> bytes:
+            raise OSError("device disconnected")
+
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=DisconnectingSerial))
+    rc = cli.main([
+        "gps-wait",
+        "--port",
+        str(port),
+        "--upload",
+        "false",
+        "--timeout-s",
+        "5",
+        "--out-dir",
+        str(tmp_path),
+    ])
+    assert rc == 2
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "SERIAL_DISCONNECT"
+    assert (tmp_path / "raw_usbdbg.log").exists()
+
+
+def test_preview_live_gps_start_uses_mac_physical_supervised_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    port = tmp_path / "ttyUSB-test"
+    port.touch()
+    compile_flags: list[str] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(cmd, check=False, **kwargs):
+        joined = " ".join(str(part) for part in cmd)
+        if "compiler.cpp.extra_flags=" in joined:
+            compile_flags.append(joined)
+        return Completed()
+
+    class ReadySerial:
+        def __init__(self, *args, **kwargs) -> None:
+            self.lines = [
+                b"USB_PULSE_TEST event=HEARTBEAT firmware_profile=MAC_PHYSICAL_SUPERVISED "
+                b"gps_chars=1200 gps_solution_valid=true gps_ready=true gps_sats=6 gps_hdop=1.8 "
+                b"current_lat=35.5709000 current_lon=129.1871000 imu_present=true "
+                b"imu_relative_yaw_deg=3.0\n"
+            ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def readline(self) -> bytes:
+            return self.lines.pop(0) if self.lines else b""
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=ReadySerial))
+    rc = cli.main([
+        "preview",
+        "--port",
+        str(port),
+        "--goal-mode",
+        "relative_enu",
+        "--goal-east-m",
+        "4.0",
+        "--goal-north-m",
+        "-1.2",
+        "--workspace-width-m",
+        "1.2",
+        "--step-spacing-m",
+        "0.25",
+        "--no-png",
+        "--out-dir",
+        str(tmp_path),
+    ])
+    assert rc == 0
+    assert compile_flags and "MAC_PHYSICAL_SUPERVISED=1" in compile_flags[0]
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["firmware_profile"] == "MAC_PHYSICAL_SUPERVISED"
+    assert summary["start_source"] == "live_gps"
+
+
 # --- run / execute-plan: --print-plan stays no-serial -------------------------
 
 
@@ -1259,6 +1462,11 @@ def test_execute_plan_can_load_existing_plan_dir_without_start_coords(tmp_path: 
     )
     assert rc == 0
     assert (out_dir / "plan.json").exists()
+    summary = _assert_standard_summary(out_dir)
+    assert summary["start_source"] == "plan_dir"
+    assert summary["current_lat"] == pytest.approx(35.1)
+    assert summary["current_lon"] == pytest.approx(129.1)
+    assert summary["rc_ignored_for_usb_supervised"] is True
 
 
 def test_execute_plan_loads_default_motion_calibration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

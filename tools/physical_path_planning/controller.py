@@ -182,6 +182,33 @@ def manual_override_detected(row: dict[str, str] | None) -> bool:
     return False
 
 
+def rc_ignored_for_usb_supervised(row: dict[str, str] | None) -> bool:
+    """True when the active Mac USB motion firmware explicitly ignores RC input."""
+    if row is None:
+        return False
+    return any(
+        telemetry._parse_bool(row.get(key))
+        for key in (
+            "usb_pulse_test_ignore_rc_input",
+            "usb_drive_live_ignore_rc_input",
+            "usb_drive_live_mode",
+            "usb_pulse_test_mode",
+            "mac_physical_supervised",
+        )
+    ) or str(row.get("firmware_profile", "")).upper() == "MAC_PHYSICAL_SUPERVISED"
+
+
+def rc_warning_for_usb_supervised(row: dict[str, str] | None) -> str:
+    """Return non-fatal RC warning for USB-supervised modes."""
+    if row is None or not rc_ignored_for_usb_supervised(row):
+        return "NONE"
+    if telemetry._parse_bool(row.get("rc_ok")) is not True:
+        return "RC_NOT_OK_IGNORED_FOR_MAC_USB_SUPERVISED_MODE"
+    if telemetry._parse_bool(row.get("neutral_ok"), default=True) is not True:
+        return "RC_NOT_NEUTRAL_IGNORED_FOR_MAC_USB_SUPERVISED_MODE"
+    return "NONE"
+
+
 _USB_PULSE_COMPAT_MODE_KEY = "stage" + "20_physical_ab_guarded_crawl"
 _USB_PULSE_COMPAT_READY_KEY = "stage" + "20_firmware_ready"
 
@@ -226,6 +253,8 @@ def live_drive_block_reason(rows: Sequence[dict[str, str]]) -> str | None:
         return "RC_INVALID"
     if any(telemetry.event(row) == "REJECT" for row in rows):
         return safety.latest_reject_reason(rows)
+    if not any(telemetry.event(row) == "ACTIVE" for row in rows):
+        return "ACTIVE_MISSING"
     if not any(telemetry.event(row) in safety.STOP_EVENTS for row in rows):
         return "STOP_MISSING"
     if safety.output_active_after_stop(rows):
@@ -299,8 +328,12 @@ def build_execution_row(
     block_reason_override: str | None = None,
     drive_mode: str = "pulse",
 ) -> dict[str, object]:
-    block_reason = block_reason_override if block_reason_override is not None else pulse_block_reason(pulse_rows)
+    if drive_mode == "continuous":
+        block_reason = block_reason_override
+    else:
+        block_reason = block_reason_override if block_reason_override is not None else pulse_block_reason(pulse_rows)
     yaw = telemetry.imu_relative_yaw_deg(after_row) if after_row else None
+    rc_ignored = rc_ignored_for_usb_supervised(after_row)
     return {
         "row_type": "pulse",
         "segment_index": segment["segment_index"],
@@ -313,6 +346,7 @@ def build_execution_row(
         "current_lat": telemetry._fmt(gps["lat"], 7) if gps["lat"] is not None else "NA",
         "current_lon": telemetry._fmt(gps["lon"], 7) if gps["lon"] is not None else "NA",
         "gps_block_reason": (after_row or {}).get("gps_block_reason", "NA"),
+        "firmware_profile": (after_row or {}).get("firmware_profile", "NA"),
         "gps_degraded": gps["gps_degraded"],
         "gps_cached_used": gps["gps_cached_used"],
         "imu_relative_yaw_deg": telemetry._fmt(yaw),
@@ -328,7 +362,9 @@ def build_execution_row(
         "pulse_ms": int(pulse_ms),
         "ack_seen": any(telemetry.event(r) == "ACK" for r in pulse_rows),
         "stop_seen": any(telemetry.event(r) in safety.STOP_EVENTS for r in pulse_rows),
-        "manual_override_detected": manual_override_detected(after_row),
+        "manual_override_detected": False if rc_ignored else manual_override_detected(after_row),
+        "rc_ignored_for_usb_supervised": rc_ignored,
+        "rc_warning": rc_warning_for_usb_supervised(after_row),
         "calibration_source": calibration_source,
         "connector_mode": connector_mode,
         "drive_mode": drive_mode,
@@ -353,6 +389,7 @@ def build_controller_summary(
     pulse_rows = [r for r in rows if r.get("row_type") == "pulse"]
     valid = sum(1 for r in pulse_rows if r.get("valid_pulse") is True)
     continuous_drive_count = sum(1 for r in pulse_rows if r.get("drive_mode") == "continuous")
+    rc_warning_count = sum(1 for r in pulse_rows if r.get("rc_warning") not in (None, "", "NONE"))
     imu_heading_used_count = sum(
         1
         for r in pulse_rows
@@ -372,6 +409,8 @@ def build_controller_summary(
         "continuous_drive_used": continuous_drive_count > 0,
         "continuous_drive_count": continuous_drive_count,
         "imu_heading_used_count": imu_heading_used_count,
+        "rc_ignored_for_usb_supervised": any(r.get("rc_ignored_for_usb_supervised") is True for r in pulse_rows),
+        "rc_warning_count": rc_warning_count,
         "fallback_to_repeated_pulses": bool(fallback_to_repeated_pulses),
         "abort_reason": abort_reason,
         "aborted": abort_reason != "NONE",
@@ -468,10 +507,15 @@ def run_controller(
                 if heartbeat is None:
                     abort_reason = "NO_GUARDED_PULSE_HEARTBEAT"
                     break
-                if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True:
+                usb_supervised_rc_ignored = rc_ignored_for_usb_supervised(heartbeat)
+                if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True and not usb_supervised_rc_ignored:
                     abort_reason = "RC_NOT_OK"
                     break
-                if manual_override_detected(heartbeat) and manual_override_mode == "abort":
+                if (
+                    not usb_supervised_rc_ignored
+                    and manual_override_detected(heartbeat)
+                    and manual_override_mode == "abort"
+                ):
                     abort_reason = "MANUAL_OVERRIDE"
                     break
                 gps = dead_reckon_gps(heartbeat, gps_cache)
@@ -569,13 +613,18 @@ def run_controller(
                 if heartbeat is None:
                     abort_reason = "NO_GUARDED_PULSE_HEARTBEAT"
                     break
-                if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True:
+                usb_supervised_rc_ignored = rc_ignored_for_usb_supervised(heartbeat)
+                if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True and not usb_supervised_rc_ignored:
                     abort_reason = "RC_NOT_OK"
                     break
-                if manual_override_detected(heartbeat) and manual_override_mode == "abort":
+                if (
+                    not usb_supervised_rc_ignored
+                    and manual_override_detected(heartbeat)
+                    and manual_override_mode == "abort"
+                ):
                     abort_reason = "MANUAL_OVERRIDE"
                     break
-                if safety.rc_neutral_wait(heartbeat):
+                if not usb_supervised_rc_ignored and safety.rc_neutral_wait(heartbeat):
                     neutral = wait_for_neutral_rc(handle, raw_lines, rc_neutral_wait_s)
                     if neutral is None:
                         abort_reason = "RC_NOT_NEUTRAL"
