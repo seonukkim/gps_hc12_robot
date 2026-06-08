@@ -93,6 +93,11 @@ ready_for_full_path_following=false
 No mode sends motor output during `diagnose`, `station-hw-diagnose`, `manual-rc`
 validation monitoring, or `preview`. `station-hw-manual` listens to the separate
 physical station hardware and maps station throttle/steering to physical A/B.
+Station hardware transport/protocol are reported as `station_transport`,
+`station_protocol`, and `station_parser`; the workflow does not assume a fixed
+radio, UART, or baud setting. If frames arrive but no parser matches, the result
+is `WRONG_STATION_FRAME_PARSER` and the first unmatched frames are written to
+`raw_station_frames.txt` and `raw_station_frames_hex.txt`.
 `usb-pulse-test` sends only bounded A/B commands over USB after operator
 confirmation; it is not physical station hardware control, not RC manual
 passthrough, and not autonomous path planning. Guarded pulse execution remains

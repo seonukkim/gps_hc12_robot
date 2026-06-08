@@ -410,7 +410,7 @@ def test_station_hw_diagnose_classifies_absent_link() -> None:
 def test_station_hw_diagnose_classifies_rx_count_parse_fail() -> None:
     rows = [
         {
-            "hc12_rx_count": "5",
+            "station_rx_count": "5",
             "station_frame_count": "0",
             "station_parse_ok_count": "0",
             "station_parse_error_count": "5",
@@ -420,9 +420,12 @@ def test_station_hw_diagnose_classifies_rx_count_parse_fail() -> None:
         }
     ]
     summary = cli.evaluate_station_hw_rows(rows, mode="station-hw-diagnose")
-    assert summary["reason"] == "STATION_HW_FRAMES_PRESENT_PARSE_FAIL"
+    assert summary["reason"] == "WRONG_STATION_FRAME_PARSER"
     assert summary["station_link_seen"] is True
     assert summary["station_parse_error_count"] == 5
+    assert summary["station_transport"] == "station_hardware_serial"
+    assert summary["station_protocol"] == "auto"
+    assert summary["station_parser"] == "auto_station_manual"
 
 
 def test_station_hw_diagnose_classifies_deadman_false() -> None:
@@ -545,7 +548,7 @@ def test_station_hw_manual_classifies_valid_ab_without_motor_as_output_blocked()
 def test_station_hw_status_line_contains_pipeline_fields() -> None:
     rows = [
         {
-            "hc12_rx_count": "3",
+            "station_rx_count": "3",
             "station_seq": "9",
             "station_age_ms": "25",
             "station_manual_valid": "true",
@@ -562,15 +565,16 @@ def test_station_hw_status_line_contains_pipeline_fields() -> None:
     assert "station_deadman=true" in line
     assert "station_physical_a_cmd=0.300" in line
     assert "station_physical_b_cmd=0.260" in line
+    assert "station_rx_count=3" in line
+    assert "hc12_rx_count" not in line
     assert "reason_so_far=STATION_HW_MANUAL_READY" in line
 
 
-def test_station_hw_firmware_flags_enable_ab_mapping_and_hc12() -> None:
+def test_station_hw_firmware_flags_enable_ab_mapping() -> None:
     flags = cli.station_hw_manual_firmware_flags()
     assert "STATION_HW_MANUAL_ENABLE=1" in flags
     assert "STATION_HW_MANUAL_A_B_MAPPING=1" in flags
     assert "STATION_HW_MANUAL_IGNORE_RC_INPUT=1" in flags
-    assert "PATH_FOLLOWING_HC12_ENABLED=1" in flags
 
 
 def test_station_hw_diagnose_print_command_writes_summary(
@@ -599,6 +603,39 @@ def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:
     assert "} else if (stationManualActive) {" in source
     assert "currentControlSource = CONTROL_SOURCE_STATION_MANUAL;" in source
     assert "applyStationManualCommand();" in source
+
+
+def test_station_hw_firmware_supports_auto_station_manual_parser() -> None:
+    source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
+    assert "parseStationManualLineAuto" in source
+    assert 'command == "MANUAL"' in source
+    assert 'command == "AB"' in source
+    assert 'key == "THROTTLE"' in source
+    assert 'key == "STEER"' in source
+    assert "printStationRawFrameDump" in source
+
+
+def test_station_hw_raw_frame_dumps_are_written(tmp_path: Path) -> None:
+    rows = [
+        {
+            "station_raw_frame": "MANUAL%2Cnot_matching%2C%23",
+            "station_raw_frame_hex": "4D414E55414C",
+        },
+        {
+            "station_raw_frame": "A%3D0.1,B%3D0.2",
+            "station_raw_frame_hex": "413D302E31",
+        },
+    ]
+    count = cli.write_station_raw_frame_dumps(tmp_path, rows)
+    assert count == 2
+    assert (tmp_path / "raw_station_frames.txt").read_text().splitlines() == [
+        "MANUAL,not_matching,#",
+        "A=0.1,B=0.2",
+    ]
+    assert (tmp_path / "raw_station_frames_hex.txt").read_text().splitlines() == [
+        "4D414E55414C",
+        "413D302E31",
+    ]
 
 
 def test_station_hw_monitor_ctrl_c_writes_summary_without_traceback(

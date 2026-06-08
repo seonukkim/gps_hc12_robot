@@ -683,6 +683,7 @@ uint32_t stationHc12TxCount = 0;
 uint32_t stationFrameCount = 0;
 uint32_t stationParseOkCount = 0;
 uint32_t stationParseErrorCount = 0;
+uint8_t stationRawDumpCount = 0;
 StationManualCommand stationManual = {0.0f, 0.0f, false, 0};
 bool stationEstop = false;
 bool autoCommandActive = false;
@@ -2199,6 +2200,179 @@ bool splitCsvFields(const String &text, String *fields, size_t maxFields, size_t
   return true;
 }
 
+String normalizeStationToken(String token) {
+  token.trim();
+  token.toUpperCase();
+  return token;
+}
+
+void acceptStationManualCommand(float steer, float throttle, bool deadman, bool estop) {
+  clearAutoCommand();
+  stationManual.steer = clampUnit(steer);
+  stationManual.throttle = clampUnit(throttle);
+  stationManual.deadman = deadman;
+  stationManual.lastFrameMs = millis();
+  stationEstop = estop;
+  if (stationEstop) {
+    motorStop();
+    currentControlSource = CONTROL_SOURCE_STOP;
+  }
+}
+
+bool parseStationKeyValueLine(const String &line, float &steer, float &throttle, bool &deadman, bool &estop) {
+  String normalized = line;
+  normalized.replace(' ', ',');
+  normalized.replace(';', ',');
+  String fields[12];
+  size_t fieldCount = 0;
+  if (!splitCsvFields(normalized, fields, 12, fieldCount) || fieldCount == 0) {
+    return false;
+  }
+
+  bool sawSteer = false;
+  bool sawThrottle = false;
+  bool sawDeadman = false;
+  bool sawEstop = false;
+  for (size_t i = 0; i < fieldCount; ++i) {
+    String token = fields[i];
+    token.trim();
+    int equals = token.indexOf('=');
+    if (equals <= 0) {
+      continue;
+    }
+    String key = normalizeStationToken(token.substring(0, equals));
+    String value = token.substring(equals + 1);
+    value.trim();
+
+    float floatValue = 0.0f;
+    bool boolValue = false;
+    if (key == "STEER" || key == "STEERING" || key == "TURN" || key == "B" ||
+        key == "STATION_TURN_CMD" || key == "STATION_PHYSICAL_B_CMD") {
+      if (!parseFloatToken(value, floatValue)) {
+        return false;
+      }
+      steer = floatValue;
+      sawSteer = true;
+    } else if (key == "THROTTLE" || key == "FORWARD" || key == "PUSH" || key == "A" ||
+               key == "STATION_FORWARD_CMD" || key == "STATION_PHYSICAL_A_CMD") {
+      if (!parseFloatToken(value, floatValue)) {
+        return false;
+      }
+      throttle = floatValue;
+      sawThrottle = true;
+    } else if (key == "DEADMAN" || key == "ENABLE") {
+      if (!parseBoolToken(value, boolValue)) {
+        return false;
+      }
+      deadman = boolValue;
+      sawDeadman = true;
+    } else if (key == "ESTOP" || key == "E_STOP" || key == "STOP") {
+      if (!parseBoolToken(value, boolValue)) {
+        return false;
+      }
+      estop = boolValue;
+      sawEstop = true;
+    }
+  }
+  return sawSteer && sawThrottle && sawDeadman && sawEstop;
+}
+
+bool parseStationCsvLine(const String &line, float &steer, float &throttle, bool &deadman, bool &estop) {
+  String fields[8];
+  size_t fieldCount = 0;
+  if (!splitCsvFields(line, fields, 8, fieldCount) || fieldCount == 0) {
+    return false;
+  }
+
+  for (size_t i = 0; i < fieldCount; ++i) {
+    fields[i].trim();
+  }
+
+  String command0 = normalizeStationToken(fields[0]);
+  size_t offset = 0;
+  if (command0 == "CMD") {
+    if (fieldCount < 2) {
+      return false;
+    }
+    offset = 1;
+  }
+
+  String command = normalizeStationToken(fields[offset]);
+  if (command == "MANUAL") {
+    if (fieldCount != offset + 5) {
+      return false;
+    }
+    return parseFloatToken(fields[offset + 1], steer) &&
+           parseFloatToken(fields[offset + 2], throttle) &&
+           parseBoolToken(fields[offset + 3], deadman) &&
+           parseBoolToken(fields[offset + 4], estop);
+  }
+
+  if (command == "AB" || command == "A_B" || command == "PHYSICAL_AB") {
+    if (fieldCount != offset + 5) {
+      return false;
+    }
+    float physicalA = 0.0f;
+    float physicalB = 0.0f;
+    if (!parseFloatToken(fields[offset + 1], physicalA) ||
+        !parseFloatToken(fields[offset + 2], physicalB) ||
+        !parseBoolToken(fields[offset + 3], deadman) ||
+        !parseBoolToken(fields[offset + 4], estop)) {
+      return false;
+    }
+    throttle = physicalA;
+    steer = physicalB;
+    return true;
+  }
+
+  return false;
+}
+
+bool parseStationManualLineAuto(const String &line, float &steer, float &throttle, bool &deadman, bool &estop) {
+  if (parseStationCsvLine(line, steer, throttle, deadman, estop)) {
+    return true;
+  }
+  if (parseStationKeyValueLine(line, steer, throttle, deadman, estop)) {
+    return true;
+  }
+  return false;
+}
+
+void printStationRawFrameDump(const String &line, const char *reason) {
+  if (stationRawDumpCount >= 20) {
+    return;
+  }
+  stationRawDumpCount++;
+  Serial.print(F("STATION_HW_PARSE_ERROR station_parser=auto_station_manual station_parse_error_reason="));
+  Serial.print(reason);
+  Serial.print(F(" station_raw_frame="));
+  for (uint16_t i = 0; i < line.length(); ++i) {
+    uint8_t value = static_cast<uint8_t>(line.charAt(i));
+    bool safe = (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
+                (value >= '0' && value <= '9') || value == '-' || value == '_' ||
+                value == '.' || value == ':' || value == '/' ||
+                value == '@' || value == '*';
+    if (safe) {
+      Serial.print(static_cast<char>(value));
+    } else {
+      Serial.print('%');
+      if (value < 0x10) {
+        Serial.print('0');
+      }
+      Serial.print(value, HEX);
+    }
+  }
+  Serial.print(F(" station_raw_frame_hex="));
+  for (uint16_t i = 0; i < line.length(); ++i) {
+    uint8_t value = static_cast<uint8_t>(line.charAt(i));
+    if (value < 0x10) {
+      Serial.print('0');
+    }
+    Serial.print(value, HEX);
+  }
+  Serial.println();
+}
+
 void debugPrintStatus() {
   if (!ENABLE_USB_DEBUG) {
     return;
@@ -2308,6 +2482,11 @@ void debugPrintStatus() {
   Serial.print(stationParseOkCount);
   Serial.print(F(" station_parse_error_count="));
   Serial.print(stationParseErrorCount);
+  Serial.print(F(" station_transport=station_hardware_serial"));
+  Serial.print(F(" station_protocol=auto"));
+  Serial.print(F(" station_parser=auto_station_manual"));
+  Serial.print(F(" station_rx_count="));
+  Serial.print(stationHc12RxCount);
   Serial.print(F(" hc12_rx_count="));
   Serial.print(stationHc12RxCount);
   Serial.print(F(" hc12_tx_count="));
@@ -2893,16 +3072,7 @@ void handleCommand(long seq, const String &payload) {
       return;
     }
 
-    clearAutoCommand();
-    stationManual.steer = clampUnit(steer);
-    stationManual.throttle = clampUnit(throttle);
-    stationManual.deadman = deadman;
-    stationManual.lastFrameMs = millis();
-    stationEstop = estop;
-    if (stationEstop) {
-      motorStop();
-      currentControlSource = CONTROL_SOURCE_STOP;
-    }
+    acceptStationManualCommand(steer, throttle, deadman, estop);
     stationParseOkCount++;
     sendAck(seq, "OK");
     return;
@@ -2954,8 +3124,22 @@ void processHC12Line(const String &line) {
   long seq = 0;
   stationHc12RxCount++;
   if (!decodeFrame(line, type, seq, payload)) {
-    stationParseErrorCount++;
-    sendErr(0, "BAD_FRAME");
+    float steer = 0.0f;
+    float throttle = 0.0f;
+    bool deadman = false;
+    bool estop = false;
+    if (parseStationManualLineAuto(line, steer, throttle, deadman, estop)) {
+      stationFrameCount++;
+      lastStationFrameMs = millis();
+      lastStationSeq = stationFrameCount;
+      acceptStationManualCommand(steer, throttle, deadman, estop);
+      stationParseOkCount++;
+      sendAck(lastStationSeq, "OK");
+    } else {
+      stationParseErrorCount++;
+      printStationRawFrameDump(line, "NO_MATCH");
+      sendErr(0, "BAD_FRAME");
+    }
     return;
   }
 
@@ -4527,7 +4711,7 @@ void setup() {
   Serial.println("); override with -DMODE_CHANNEL_INDEX=<0-based> after probe.");
   Serial.println("RC mode input uses the mode channel above; PPM CH7 is reserved/unused.");
   Serial.println("Mode HIGH enters AUTO_READY only; drive stays STOP until explicit AUTO.");
-  Serial.println("Station manual accepts CMD,MANUAL only when fresh frames and deadman=1.");
+  Serial.println("Station hardware manual accepts auto-detected station frames when fresh and deadman=1.");
 }
 
 void loop() {

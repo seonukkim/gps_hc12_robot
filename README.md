@@ -81,6 +81,10 @@ bash scripts/run_physical_path_planner.sh calibrate-turn \
 OpenRB-150 is auto-detected when `--port` is omitted. Pass `--port "$PORT"` only
 when auto-detection fails.
 
+If station hardware frames arrive but no parser matches, the result is
+`WRONG_STATION_FRAME_PARSER`; inspect `raw_station_frames.txt` and
+`raw_station_frames_hex.txt` in that output directory.
+
 Field modes:
 
 - `diagnose` — read-only guarded pulse heartbeat, GPS, IMU, and RC telemetry.

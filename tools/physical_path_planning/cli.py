@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import sys
 import time
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Sequence
 
@@ -125,7 +126,6 @@ def station_hw_manual_firmware_flags() -> str:
         "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
         "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
         "-DPATH_FOLLOWING_DRYRUN=0 "
-        "-DPATH_FOLLOWING_HC12_ENABLED=1 "
         "-DGROUND_CRAWL_TEST_MODE=0 "
         "-DAUTO_MOTION_ARMED=0"
     )
@@ -227,7 +227,9 @@ def _station_hw_link_row(row: dict[str, str]) -> bool:
         return True
     if _station_value_present(row.get("station_seq")) or _station_value_present(row.get("station_age_ms")):
         return True
-    rx_count = telemetry._optional_float(row.get("hc12_rx_count"))
+    rx_count = telemetry._optional_float(row.get("station_rx_count"))
+    if rx_count is None:
+        rx_count = telemetry._optional_float(row.get("hc12_rx_count"))
     return rx_count is not None and rx_count > 0
 
 
@@ -238,6 +240,11 @@ def _station_hw_float_seen(rows: Sequence[dict[str, str]], *keys: str) -> bool:
             if value is not None and abs(value) > 1e-6:
                 return True
     return False
+
+
+def _station_last_present(last: dict[str, str], key: str, default: object = "NA") -> object:
+    value = last.get(key)
+    return value if _station_value_present(value) else default
 
 
 def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> dict[str, object]:
@@ -273,6 +280,7 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
     station_frame_count = max(
         len(link_rows),
         int(telemetry._optional_float(last.get("station_frame_count")) or 0),
+        int(telemetry._optional_float(last.get("station_rx_count")) or 0),
         int(telemetry._optional_float(last.get("hc12_rx_count")) or 0),
     )
     station_link_seen = station_frame_count > 0
@@ -285,15 +293,22 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
     if not station_link_seen:
         reason = "STATION_HW_LINK_ABSENT"
         success = False
-        next_action = "Check station hardware power, HC-12 station link wiring, baud rate, and whether the rover firmware has station hardware manual mode enabled."
+        next_action = (
+            "Check station hardware power, station transport wiring, station baud/settings, "
+            "and whether the rover firmware has station hardware manual mode enabled."
+        )
     elif estop_rows:
         reason = "STATION_HW_ESTOP_ACTIVE"
         success = False
         next_action = "Release station hardware emergency stop and rerun station-hw-diagnose."
     elif link_rows and not manual_valid_rows:
-        reason = "STATION_HW_FRAMES_PRESENT_PARSE_FAIL"
+        reason = "WRONG_STATION_FRAME_PARSER"
         success = False
-        next_action = "Station frames are arriving but not valid; check frame format, checksum, and station firmware protocol."
+        next_action = (
+            "Station bytes are arriving but no station manual frame parsed. Inspect "
+            "raw_station_frames.txt and raw_station_frames_hex.txt, then compare the "
+            "physical station output against the rover station parser."
+        )
     elif not deadman_rows:
         reason = "STATION_HW_DEADMAN_NOT_ACTIVE"
         success = False
@@ -327,8 +342,9 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
         "station_frame_count": station_frame_count,
         "station_parse_ok_count": parse_ok_count,
         "station_parse_error_count": parse_error_count,
-        "station_link_port": "Serial2",
-        "station_link_baud": 9600,
+        "station_transport": _station_last_present(last, "station_transport", "station_hardware_serial"),
+        "station_protocol": _station_last_present(last, "station_protocol", "auto"),
+        "station_parser": _station_last_present(last, "station_parser", "auto_station_manual"),
         "station_last_frame_age_ms": last.get("station_age_ms", "NA"),
         "station_seq": last.get("station_seq", "NA"),
         "station_manual_valid": bool(manual_valid_rows),
@@ -346,9 +362,7 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
         "station_physical_a_nonzero_seen": station_physical_a_nonzero_seen,
         "station_physical_b_nonzero_seen": station_physical_b_nonzero_seen,
         "active_control_source_candidate": "STATION_HW_MANUAL" if bool(manual_valid_rows) else "STOP",
-        "hc12_rx_count": last.get("hc12_rx_count", station_frame_count),
-        "hc12_tx_count": last.get("hc12_tx_count", "NA"),
-        "hc12_last_rx_age_ms": last.get("hc12_last_rx_age_ms", "NA"),
+        "station_rx_count": last.get("station_rx_count", last.get("hc12_rx_count", station_frame_count)),
         "motor_write_called_seen": any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in rows),
         "physical_output_active_seen": any(telemetry.physical_output_active(row) for row in rows),
         "final_motor_nonzero_seen": any(
@@ -379,14 +393,52 @@ def _station_hw_status_line(summary: dict[str, object], *, elapsed_s: float) -> 
         f"station_manual_valid={str(summary.get('station_manual_valid', False)).lower()} "
         f"station_physical_a_cmd={summary.get('station_physical_a_cmd', 'NA')} "
         f"station_physical_b_cmd={summary.get('station_physical_b_cmd', 'NA')} "
-        f"hc12_rx_count={summary.get('hc12_rx_count', 'NA')} "
-        f"hc12_last_rx_age_ms={summary.get('hc12_last_rx_age_ms', 'NA')} "
+        f"station_rx_count={summary.get('station_rx_count', 'NA')} "
+        f"station_transport={summary.get('station_transport', 'NA')} "
+        f"station_parser={summary.get('station_parser', 'NA')} "
+        f"motor_write_called={str(summary.get('motor_write_called_seen', False)).lower()} "
+        f"physical_output_active={str(summary.get('physical_output_active_seen', False)).lower()} "
         f"reason_so_far={summary.get('reason', 'NA')}"
     )
 
 
 def station_hw_status_line(rows: Sequence[dict[str, str]], *, mode: str, elapsed_s: float) -> str:
     return _station_hw_status_line(evaluate_station_hw_rows(rows, mode=mode), elapsed_s=elapsed_s)
+
+
+def _station_raw_frame_dumps(rows: Sequence[dict[str, str]]) -> list[tuple[str, str]]:
+    dumps: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        raw_text = row.get("station_raw_frame")
+        raw_hex = row.get("station_raw_frame_hex")
+        if not _station_value_present(raw_text) and not _station_value_present(raw_hex):
+            continue
+        decoded = unquote(str(raw_text or ""))
+        hex_text = str(raw_hex or "")
+        key = (decoded, hex_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        dumps.append(key)
+        if len(dumps) >= 20:
+            break
+    return dumps
+
+
+def write_station_raw_frame_dumps(out_dir: Path, rows: Sequence[dict[str, str]]) -> int:
+    dumps = _station_raw_frame_dumps(rows)
+    if not dumps:
+        return 0
+    (out_dir / "raw_station_frames.txt").write_text(
+        "\n".join(raw for raw, _ in dumps) + "\n",
+        encoding="utf-8",
+    )
+    (out_dir / "raw_station_frames_hex.txt").write_text(
+        "\n".join(raw_hex for _, raw_hex in dumps) + "\n",
+        encoding="utf-8",
+    )
+    return len(dumps)
 
 
 def arduino_cli_openrb_port() -> str | None:
@@ -1722,7 +1774,9 @@ def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str
         print(f"{mode}: monitoring physical station hardware frames")
         print("rc_receiver_required=false gps_required=false imu_required=false")
         print("station input mapping: throttle -> physical A, steering -> physical B")
-        print("station link: HC-12 frame protocol on old known-good rover station port Serial2 at 9600 baud")
+        print("station_transport=station_hardware_serial")
+        print("station_protocol=auto")
+        print("station_parser=auto_station_manual")
         duration_s = float(args.duration_s)
         deadline = None if duration_s <= 0 else time.monotonic() + duration_s
         started = time.monotonic()
@@ -1801,6 +1855,15 @@ def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str
         summary = checks.assert_not_ready_for_full_path_following(summary)
     _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
     _write_rows_csv(out_dir / csv_name, rows)
+    raw_dump_count = write_station_raw_frame_dumps(out_dir, rows)
+    if raw_dump_count:
+        summary = dict(summary)
+        summary["station_raw_frame_dump_count"] = raw_dump_count
+        summary["raw_station_frames"] = "raw_station_frames.txt"
+        summary["raw_station_frames_hex"] = "raw_station_frames_hex.txt"
+        summary = checks.assert_not_ready_for_full_path_following(summary)
+        if summary.get("station_parse_ok_count") == 0 and summary.get("station_parse_error_count", 0):
+            print("Station frames are arriving but parser does not match. See raw_station_frames.txt.")
     _write_json(out_dir / summary_name, summary)
     write_summary_files(out_dir, summary, title=title)
     print(f"station_link_seen={str(summary['station_link_seen']).lower()}")

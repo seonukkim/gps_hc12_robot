@@ -87,6 +87,11 @@ deadman, and estop are arriving. `station-hw-manual` is the separate physical
 station controller path; it maps station throttle to physical A and station
 steering to physical B.
 
+If station frames arrive but never parse, the result is
+`WRONG_STATION_FRAME_PARSER`. Inspect `raw_station_frames.txt` and
+`raw_station_frames_hex.txt` in the output directory; this means the station
+machine is transmitting a protocol the current rover parser does not match.
+
 ## 4. USB Pulse Test
 
 ```bash
