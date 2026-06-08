@@ -123,7 +123,7 @@ def mac_physical_supervised_firmware_flags(
     max_abs_a: float = 0.35,
     max_abs_b: float = 0.35,
     max_ms: int = 1000,
-    max_duration_ms: int = 3000,
+    max_duration_ms: int = 1000,
     update_timeout_ms: int = 350,
 ) -> str:
     return (
@@ -2979,7 +2979,7 @@ def _upload_mac_physical_supervised_firmware(
     max_abs_a = float(getattr(args, "max_abs_a", 0.35))
     max_abs_b = float(getattr(args, "max_abs_b", 0.35))
     max_ms = int(getattr(args, "max_ms", 1000))
-    max_duration_s = float(getattr(args, "max_duration_s", 3.0))
+    max_duration_s = float(getattr(args, "max_duration_s", max_ms / 1000.0))
     ttl_ms = int(getattr(args, "ttl_ms", 350))
     flags = mac_physical_supervised_firmware_flags(
         max_abs_a=max_abs_a,

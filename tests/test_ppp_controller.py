@@ -225,14 +225,23 @@ class FakeSerial:
         return self._responses.pop(0) if self._responses else b""
 
 
-def _heartbeat(lat: float, lon: float, *, rc_ok: bool = True, neutral_ok: bool = True, usb_ignore_rc: bool = False) -> bytes:
+def _heartbeat(
+    lat: float,
+    lon: float,
+    *,
+    rc_ok: bool = True,
+    neutral_ok: bool = True,
+    usb_ignore_rc: bool = False,
+    gps_block_reason: str = "OK",
+    imu_yaw_deg: float = 0.0,
+) -> bytes:
     return (
         f"USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true "
         f"usb_pulse_test_ignore_rc_input={str(usb_ignore_rc).lower()} "
         f"usb_drive_live_mode={str(usb_ignore_rc).lower()} "
         f"rc_ok={str(rc_ok).lower()} neutral_ok={str(neutral_ok).lower()} "
-        f"physical_output_active=false gps_block_reason=OK "
-        f"gps_lat={lat:.7f} gps_lon={lon:.7f} imu_relative_yaw_deg=0.0\n"
+        f"physical_output_active=false gps_block_reason={gps_block_reason} "
+        f"gps_lat={lat:.7f} gps_lon={lon:.7f} imu_relative_yaw_deg={imu_yaw_deg:.1f}\n"
     ).encode("ascii")
 
 
@@ -295,12 +304,211 @@ def test_run_controller_ignores_rc_not_ok_for_usb_supervised_continuous_drive() 
         heartbeat_timeout_s=0.2,
         straight_motion_mode="continuous",
         live_update_hz=100.0,
+        live_chunk_ms=1000,
     )
     assert abort_reason == "NONE"
     assert rows and rows[0]["valid_pulse"] is True
     assert rows[0]["rc_ignored_for_usb_supervised"] is True
     assert rows[0]["rc_warning"] == "RC_NOT_OK_IGNORED_FOR_MAC_USB_SUPERVISED_MODE"
     assert handle.writes[0].startswith("USB_DRIVE_LIVE_SET")
+
+
+def test_run_controller_splits_live_drive_segments_under_max_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_send_live_drive(
+        handle,
+        *,
+        seq,
+        duration_s,
+        update_hz,
+        ttl_ms,
+        command_fn,
+        raw_lines,
+        event_timeout_s,
+        verbose_raw=True,
+    ):
+        a_cmd, b_cmd = command_fn(None)
+        handle.write(
+            (
+                f"USB_DRIVE_LIVE_SET seq={seq} a={a_cmd:.3f} b={b_cmd:.3f} "
+                f"duration_ms={int(duration_s * 1000.0)} ttl_ms={ttl_ms}\n"
+            ).encode("ascii")
+        )
+        handle.write(f"USB_DRIVE_LIVE_STOP seq={seq}\n".encode("ascii"))
+        return controller.telemetry.parse_usbdbg_rows(
+            "USB_DRIVE_LIVE event=ACTIVE\n"
+            "USB_DRIVE_LIVE event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+        )
+
+    monkeypatch.setattr(controller.executor, "send_live_drive", fake_send_live_drive)
+    responses: list[bytes] = []
+    for idx in range(3):
+        responses.extend(
+            [
+                _heartbeat(35.0 + idx * 0.000001, 129.0, usb_ignore_rc=True, imu_yaw_deg=4.0),
+                _heartbeat(35.0 + (idx + 1) * 0.000001, 129.0, usb_ignore_rc=True, imu_yaw_deg=4.0),
+            ]
+        )
+    handle = FakeSerial(responses)
+    cal = dict(geometry.FALLBACK_RESOLVED_CALIBRATION)
+    cal["forward"] = {"a": 0.30, "b": 0.0, "ms": 3, "source": "approved_test"}
+    rows, _raw_lines, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=cal,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=-10.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        straight_motion_mode="continuous",
+        live_update_hz=1000.0,
+        live_chunk_ms=1,
+        live_max_ms=1,
+        max_segment_chunks=3,
+    )
+    assert abort_reason == "NONE"
+    setpoint_writes = [write for write in handle.writes if write.startswith("USB_DRIVE_LIVE_SET")]
+    assert setpoint_writes
+    assert all("duration_ms=1" in write for write in setpoint_writes)
+    assert max(int(write.split("duration_ms=")[1].split()[0]) for write in setpoint_writes) <= 1
+    assert len(rows) == 3
+    assert all(row["valid_pulse"] is True for row in rows)
+    assert any(abs(float(row["b_heading_component"])) > 0.0 for row in rows)
+    summary = controller.build_controller_summary(
+        rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        goal_distance_m=1.0,
+        fallback_to_repeated_pulses=False,
+        abort_reason=abort_reason,
+    )
+    assert summary["chunk_count"] == 3
+    assert summary["valid_chunk_count"] == 3
+    assert summary["imu_heading_used_count"] > 0
+
+
+def test_run_controller_maps_live_drive_duration_reject_to_host_error() -> None:
+    handle = FakeSerial(
+        [
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True),
+            b"USB_DRIVE_LIVE event=REJECT usb_pulse_test_reject_reason=USB_DRIVE_LIVE_DURATION_EXCEEDS_MAX\n",
+            b"USB_DRIVE_LIVE event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True),
+        ]
+    )
+    rows, _raw_lines, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=geometry.FALLBACK_RESOLVED_CALIBRATION,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=0.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        straight_motion_mode="continuous",
+        live_update_hz=1000.0,
+        live_chunk_ms=1500,
+        live_max_ms=1500,
+    )
+    assert abort_reason == "HOST_SENT_DURATION_OVER_MAX"
+    assert rows[-1]["invalid_reason"] == "HOST_SENT_DURATION_OVER_MAX"
+    assert rows[-1]["offending_duration_ms"] == 800
+    summary = controller.build_controller_summary(
+        rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        goal_distance_m=1.0,
+        fallback_to_repeated_pulses=False,
+        abort_reason=abort_reason,
+    )
+    assert summary["abort_reason"] == "HOST_SENT_DURATION_OVER_MAX"
+    assert summary["offending_duration_ms"] == 800
+
+
+def test_run_controller_continues_when_gps_degraded_policy_continue() -> None:
+    handle = FakeSerial(
+        [
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, gps_block_reason="BAD_HDOP"),
+            b"USB_DRIVE_LIVE event=ACTIVE\n",
+            b"USB_DRIVE_LIVE event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, gps_block_reason="BAD_HDOP"),
+        ]
+    )
+    rows, _raw_lines, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=geometry.FALLBACK_RESOLVED_CALIBRATION,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=0.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        gps_degradation_policy="continue",
+        straight_motion_mode="continuous",
+        live_update_hz=1000.0,
+        live_chunk_ms=1000,
+        live_max_ms=1000,
+    )
+    assert abort_reason == "NONE"
+    assert rows[0]["valid_pulse"] is True
+    assert rows[0]["gps_degraded"] is True
+
+
+def test_run_controller_splits_approved_connector_turn_under_max_duration() -> None:
+    connector = {
+        "segment_index": 2,
+        "segment_type": "connector_turn",
+        "start_x_m": 1.0,
+        "start_y_m": 0.0,
+        "end_x_m": 1.0,
+        "end_y_m": 1.0,
+        "length_m": 1.0,
+        "target_heading_deg": 180.0,
+        "expected_motion_direction": "turn_left",
+        "pulse_budget": 1,
+    }
+    responses: list[bytes] = []
+    for idx in range(3):
+        responses.extend(
+            [
+                _heartbeat(35.0, 129.0),
+                b"USB_PULSE_TEST event=ARM\n",
+                b"USB_PULSE_TEST event=ACK\n",
+                b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+                _heartbeat(35.0, 129.0),
+            ]
+        )
+    handle = FakeSerial(responses)
+    cal = dict(geometry.FALLBACK_RESOLVED_CALIBRATION)
+    cal["connector_mode_effective"] = "angle_calibrated"
+    cal["turn_left_90"] = {"a": 0.0, "b": 0.24, "ms": 25, "source": "approved_turn"}
+    rows, _raw_lines, abort_reason = controller.run_controller(
+        handle,
+        segments=[connector],
+        resolved_calibration=cal,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=0.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        live_max_ms=10,
+    )
+    assert abort_reason == "NONE"
+    command_writes = [write for write in handle.writes if write.startswith("USB_PULSE_TEST_CMD")]
+    assert [int(write.split("ms=")[1]) for write in command_writes] == [10, 10, 5]
+    assert all(row["valid_pulse"] is True for row in rows)
 
 
 def test_run_controller_aborts_on_rc_invalid_during_pulse() -> None:
