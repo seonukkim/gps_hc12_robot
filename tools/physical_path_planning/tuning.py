@@ -7,6 +7,7 @@ to the already-confirmed USB bounded-pulse executor.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -231,3 +232,33 @@ def save_approved_calibration(
 
 def motion_calibration_path(path: str | None = None) -> Path:
     return Path(path) if path else calibration.DEFAULT_MOTION_CALIBRATION
+
+
+def backup_calibration(path: Path, *, timestamp: str | None = None) -> Path | None:
+    """Copy an existing calibration JSON to a timestamped sibling.
+
+    Returns the backup path, or ``None`` when there is nothing to back up. The
+    timestamp is injectable so callers (and tests) get deterministic names.
+    """
+    if not path.exists():
+        return None
+    stamp = timestamp or time.strftime("%Y%m%d_%H%M%S")
+    backup_path = path.with_name(f"{path.stem}.backup_{stamp}{path.suffix}")
+    backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    return backup_path
+
+
+def reset_calibration(path: Path, *, timestamp: str | None = None) -> tuple[Path | None, bool]:
+    """Back up then delete the calibration file before a full recalibration.
+
+    Returns ``(backup_path, removed)``: ``backup_path`` is ``None`` when no prior
+    file existed, ``removed`` is ``True`` only when an existing file was deleted.
+    Approved ``tune-motion`` values written afterward start from a clean slate
+    while the previous calibration is preserved as a timestamped backup.
+    """
+    backup_path = backup_calibration(path, timestamp=timestamp)
+    removed = False
+    if path.exists():
+        path.unlink()
+        removed = True
+    return backup_path, removed

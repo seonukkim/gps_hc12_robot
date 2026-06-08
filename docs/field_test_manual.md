@@ -396,3 +396,141 @@ Behavior:
 The run writes `summary.md`, `summary.json`, `field_config_resolved.json`, the
 preview image, `closed_loop_trace.csv`, `planned_vs_actual.csv`, and
 `raw_usbdbg.log`. Every summary keeps `ready_for_full_path_following=false`.
+
+If alignment is requested (default `--initial-heading-align gps_probe` for
+`auto-relative-run`), it runs after the AUTO/keyboard start and before path
+execution; see section 14 for the alignment and recalibration details.
+
+## 14. Initial Heading Alignment
+
+The rover starts wherever it is pointing. The IMU reports only a relative yaw, not
+an absolute compass heading, so alignment derives the absolute heading from a
+short GPS displacement probe and then uses the IMU only as turn feedback.
+
+```bash
+bash scripts/run_physical_path_planner.sh align-heading \
+  --plan-dir outputs/physical_path_planning/preview_5m_relative_enu \
+  --strategy gps_probe \
+  --probe-a 0.25 --probe-duration-s 1.0 --min-probe-distance-m 0.30 \
+  --heading-tolerance-deg 8 --turn-b-left 0.24 --turn-b-right -0.12 \
+  --max-turn-duration-s 3.0 \
+  --out-dir outputs/physical_path_planning/preview_5m_relative_enu/alignment
+```
+
+Strategies:
+
+- `gps_probe` (automatic): read GPS, drive one short bounded forward probe, read
+  GPS again. With at least `--min-probe-distance-m` of displacement it estimates
+  the current ENU heading from the GPS displacement, compares it to the first
+  segment heading, and turns left (`B>0`) or right (`B<0`) by the shortest error.
+  The turn stops on the IMU yaw-delta reaching the heading error (preferred over
+  any calibration estimate). Displacement below the threshold reports
+  `reason=PROBE_GPS_DISPLACEMENT_TOO_SMALL` (increase `--probe-duration-s` or move
+  to open ground).
+- `user_confirmed`: point the rover toward the A->B direction by hand, press
+  Enter, and the current IMU yaw is captured as the first lane reference. No probe
+  and no GPS displacement are required; never aborts.
+- `skip`: no alignment, no serial.
+
+The summary records `strategy`, `target_heading_deg`, `probe_start_lat/lon`,
+`probe_end_lat/lon`, `probe_distance_m`, `estimated_current_heading_deg`,
+`initial_heading_error_deg`, `final_heading_error_deg`, `turn_direction`,
+`turn_b_cmd`, `turn_duration_ms`, `alignment_success`, and
+`ready_for_execute_plan`, plus `align_heading_trace.csv` and `raw_usbdbg.log`.
+
+A/B mapping is unchanged: `A>0` forward, `A<0` backward, `B>0` left, `B<0` right.
+
+`execute-plan`, `run`, and `auto-relative-run` accept the same alignment inline
+via `--initial-heading-align none|gps_probe|user_confirmed` (plus
+`--align-heading-tolerance-deg`, `--align-probe-a`, `--align-probe-duration-s`,
+`--align-min-probe-distance-m`). When alignment succeeds, its aligned IMU yaw
+becomes the first lane reference; per-lane references are still recaptured after
+each connector turn. A `gps_probe` failure aborts before any path motion;
+`user_confirmed` and `none` never abort on alignment. The default is `none` for
+`execute-plan`/`run` and `gps_probe` for `auto-relative-run`.
+
+## 15. Full Recalibration
+
+Recalibration overwrites the approved per-primitive entries. Back up the existing
+file first so the previous calibration is preserved:
+
+```bash
+bash scripts/run_physical_path_planner.sh reset-motion-calibration \
+  --out-dir outputs/physical_path_planning/reset_motion_calibration
+```
+
+This copies any existing
+`outputs/physical_path_planning/calibration/motion_calibration.json` to a
+timestamped `motion_calibration.backup_<stamp>.json` sibling, then removes the
+original so `tune-motion` starts clean. (`tune-motion --reset-calibration true`
+performs the same backup-then-clear at the start of a single tuning session.)
+
+Then recalibrate each primitive; entering `approve` overwrites that primitive's
+entry in the fresh file:
+
+```bash
+bash scripts/run_physical_path_planner.sh tune-motion --primitive forward \
+  --out-dir outputs/physical_path_planning/tune_forward
+bash scripts/run_physical_path_planner.sh tune-motion --primitive backward \
+  --out-dir outputs/physical_path_planning/tune_backward
+bash scripts/run_physical_path_planner.sh tune-motion --primitive turn-left-90 \
+  --out-dir outputs/physical_path_planning/tune_turn_left_90
+bash scripts/run_physical_path_planner.sh tune-motion --primitive turn-right-90 \
+  --out-dir outputs/physical_path_planning/tune_turn_right_90
+```
+
+## 16. Recalibrate + Aligned 3 m east / 4 m north Run
+
+The full field sequence for the 3-4-5 diagonal, from a clean recalibration through
+an aligned closed-loop run:
+
+1. Recalibrate everything (section 15): `reset-motion-calibration`, then
+   `tune-motion` for forward, backward, turn-left-90, turn-right-90.
+
+2. GPS readiness:
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh gps-wait \
+     --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+     --out-dir outputs/physical_path_planning/gps_wait_3x4m
+   ```
+
+3. Preview the 3 m east / 4 m north diagonal (writes the resolved field config):
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh preview \
+     --goal-mode relative_enu --goal-east-m 3.0 --goal-north-m 4.0 \
+     --workspace-width-m 1.5 --step-spacing-m 0.30 \
+     --path-shape diagonal_rectangle_serpentine --print-field-config true \
+     --out-dir outputs/physical_path_planning/preview_3x4m
+   ```
+
+4. Align to the first lane heading (section 14):
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh align-heading \
+     --plan-dir outputs/physical_path_planning/preview_3x4m \
+     --strategy gps_probe \
+     --out-dir outputs/physical_path_planning/preview_3x4m/alignment
+   ```
+
+5. Execute closed-loop with inline alignment:
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh execute-plan \
+     --plan-dir outputs/physical_path_planning/preview_3x4m \
+     --initial-heading-align gps_probe \
+     --path-control-mode gps_imu_closed_loop \
+     --live-chunk-ms 500 --max-segment-chunks 30 \
+     --gps-degradation-policy continue --gps-reanchor true \
+     --imu-heading-hold true --cross-track-correction true \
+     --k-heading 0.006 --k-cross-track 0.20 --max-correction-b 0.08 \
+     --out-dir outputs/physical_path_planning/execute_3x4m
+   ```
+
+   To skip alignment and keep the prior behavior, pass
+   `--initial-heading-align none`. The inline alignment in step 5 makes the
+   standalone step 4 optional; run step 4 first only to inspect the alignment
+   result before committing to execution.
+
+Every summary in this sequence keeps `ready_for_full_path_following=false`.

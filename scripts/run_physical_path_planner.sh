@@ -22,10 +22,12 @@ Modes:
   usb-pulse-test        Laptop USB bounded A/B pulse motor validation.
   usb-drive-live        Continuous laptop USB A/B setpoint drive.
   tune-motion           Interactive visual/IMU-assisted motion calibration.
+  reset-motion-calibration  Back up and clear approved motion calibration. No motion.
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
   preview               Build + render a rectangle coverage plan. No motion.
   auto-relative-preview Wait for GPS, resolve a relative A->B field + preview. No motion.
+  align-heading         Point the rover at the first lane heading (GPS probe + IMU turn).
   execute-plan          Execute an existing/specified plan with guarded pulses.
   run                   Plan and execute with guarded pulses.
   auto-relative-run     Wait for the AUTO mode switch, then run closed-loop path execution.
@@ -66,6 +68,9 @@ Examples:
     --primitive forward \
     --out-dir outputs/physical_path_planning/tune_forward
 
+  bash scripts/run_physical_path_planner.sh reset-motion-calibration \
+    --out-dir outputs/physical_path_planning/reset_motion_calibration
+
   bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
     --out-dir outputs/physical_path_planning/guarded_pulse_ready
 
@@ -79,8 +84,14 @@ Examples:
     --workspace-width-m 1.2 --step-spacing-m 0.25 \
     --out-dir outputs/physical_path_planning/preview_relative_enu
 
+  bash scripts/run_physical_path_planner.sh align-heading \
+    --plan-dir outputs/physical_path_planning/preview_relative_enu \
+    --strategy gps_probe \
+    --out-dir outputs/physical_path_planning/preview_relative_enu/alignment
+
   bash scripts/run_physical_path_planner.sh execute-plan \
     --plan-dir outputs/physical_path_planning/preview_relative_enu \
+    --initial-heading-align gps_probe \
     --out-dir outputs/physical_path_planning/execute_preview_relative_enu
 
   bash scripts/run_physical_path_planner.sh run \
@@ -294,7 +305,7 @@ mode_needs_port() {
     tune-motion)
       [[ "$PRINT_CANDIDATE" != "true" ]]
       ;;
-    run|execute-plan|auto-relative-run)
+    run|execute-plan|auto-relative-run|align-heading)
       [[ "$PRINT_PLAN" != "true" ]]
       ;;
     *)
@@ -395,15 +406,16 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
+  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|reset-motion-calibration|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
-  run|execute-plan|auto-relative-run)
+  run|execute-plan|auto-relative-run|align-heading)
     if [[ "$PRINT_PLAN" == "true" ]]; then
       # No motion, no serial: build/write the plan only.
       exec_cli
     fi
     if [[ -z "$PORT" ]]; then
+      # align-heading --strategy skip and the print-only run paths need no board.
       exec_cli
     fi
     flash_guarded_crawl_firmware "$PORT"

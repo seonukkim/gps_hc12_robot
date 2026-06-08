@@ -1805,3 +1805,186 @@ def test_diagnose_summary_is_pure_and_guarded(tmp_path: Path) -> None:
     assert summary["event_counts"]["ACK"] == 1
     assert summary["last_imu_relative_yaw_deg"] == "3.500000"
     assert summary["ready_for_full_path_following"] is False
+
+
+# --- align-heading / initial-heading-align / reset-motion-calibration ---------
+
+
+def _build_preview_plan_dir(tmp_path: Path) -> Path:
+    plan_dir = tmp_path / "preview"
+    rc = cli.main(
+        ["preview", *_PREVIEW_GOAL, "--workspace-width-m", "2", "--no-png", "--out-dir", str(plan_dir)]
+    )
+    assert rc == 0
+    return plan_dir
+
+
+def test_align_heading_skip_writes_artifacts_without_serial(tmp_path: Path) -> None:
+    plan_dir = _build_preview_plan_dir(tmp_path)
+    out_dir = tmp_path / "align"
+    rc = cli.main(
+        ["align-heading", "--plan-dir", str(plan_dir), "--strategy", "skip", "--out-dir", str(out_dir)]
+    )
+    assert rc == 0
+    summary = json.loads((out_dir / "align_heading_summary.json").read_text())
+    assert summary["mode"] == "align-heading"
+    assert summary["strategy"] == "skip"
+    assert summary["reason"] == "ALIGNMENT_SKIPPED"
+    assert summary["alignment_success"] is True
+    assert summary["ready_for_execute_plan"] is True
+    assert summary["ready_for_full_path_following"] is False
+    assert (out_dir / "align_heading_trace.csv").exists()
+    assert (out_dir / "raw_usbdbg.log").exists()
+    _assert_standard_summary(out_dir)
+    for old_term in ("stage" + "20", "stage" + "16"):
+        assert old_term not in json.dumps(summary).lower()
+
+
+def test_align_heading_requires_plan_dir(tmp_path: Path) -> None:
+    out_dir = tmp_path / "align"
+    rc = cli.main(["align-heading", "--strategy", "skip", "--out-dir", str(out_dir)])
+    assert rc == 2
+    summary = _assert_standard_summary(out_dir)
+    assert summary["reason"] == "ALIGN_PLAN_DIR_REQUIRED"
+
+
+def test_align_heading_plan_dir_without_segments_fails_cleanly(tmp_path: Path) -> None:
+    plan_dir = tmp_path / "preview"
+    plan_dir.mkdir()
+    (plan_dir / "preview_summary.json").write_text(json.dumps({"segments": []}))
+    out_dir = tmp_path / "align"
+    rc = cli.main(["align-heading", "--plan-dir", str(plan_dir), "--strategy", "skip", "--out-dir", str(out_dir)])
+    assert rc == 2
+    summary = _assert_standard_summary(out_dir)
+    assert summary["reason"] == "PLAN_HAS_NO_SEGMENTS"
+
+
+def test_execute_plan_default_initial_heading_align_is_none() -> None:
+    parser = cli.build_parser()
+    assert parser.parse_args(["execute-plan"]).initial_heading_align == "none"
+    assert parser.parse_args(["run"]).initial_heading_align == "none"
+
+
+def test_auto_relative_run_defaults_initial_heading_align_to_gps_probe() -> None:
+    parser = cli.build_parser()
+    assert parser.parse_args(["auto-relative-run"]).initial_heading_align == "gps_probe"
+
+
+def test_run_align_tunables_have_documented_defaults() -> None:
+    args = cli.build_parser().parse_args(["execute-plan"])
+    assert args.align_heading_tolerance_deg == pytest.approx(8.0)
+    assert args.align_probe_a == pytest.approx(0.25)
+    assert args.align_probe_duration_s == pytest.approx(1.0)
+    assert args.align_min_probe_distance_m == pytest.approx(0.30)
+
+
+def test_execute_plan_print_plan_with_gps_probe_align_stays_no_serial(tmp_path: Path) -> None:
+    # --print-plan must short-circuit before any alignment / serial work even when
+    # an alignment strategy is requested.
+    rc = cli.main(
+        [
+            "execute-plan",
+            *_PREVIEW_GOAL,
+            "--workspace-width-m",
+            "2",
+            "--initial-heading-align",
+            "gps_probe",
+            "--print-plan",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert (tmp_path / "plan.json").exists()
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "PLAN_PRINTED"
+    assert not (tmp_path / "alignment").exists()
+
+
+def test_run_initial_alignment_none_preserves_start_yaw(tmp_path: Path) -> None:
+    args = types.SimpleNamespace(initial_heading_align="none", start_yaw_deg=12.5)
+    raw_lines: list[str] = []
+    result = cli._run_initial_alignment(
+        None, args, segments=[{"target_heading_deg": 90.0}], out_dir=tmp_path, raw_lines=raw_lines
+    )
+    assert result["performed"] is False
+    assert result["ok"] is True
+    assert result["aligned_yaw_deg"] == 12.5
+    assert result["abort_reason"] is None
+    assert result["summary"] is None
+    assert raw_lines == []
+    assert not (tmp_path / "alignment").exists()
+
+
+def test_reset_motion_calibration_backs_up_and_clears_existing(tmp_path: Path) -> None:
+    cal_path = tmp_path / "cal" / "motion_calibration.json"
+    cal_path.parent.mkdir(parents=True)
+    cal_path.write_text(json.dumps({"forward": {"a": 0.30, "b": 0.0, "ms": 900, "approved_by_user": True}}))
+    out_dir = tmp_path / "reset"
+    rc = cli.main(
+        ["reset-motion-calibration", "--calibration-out", str(cal_path), "--out-dir", str(out_dir)]
+    )
+    assert rc == 0
+    summary = json.loads((out_dir / "reset_motion_calibration_summary.json").read_text())
+    assert summary["mode"] == "reset-motion-calibration"
+    assert summary["reason"] == "CALIBRATION_RESET"
+    assert summary["existing_calibration_found"] is True
+    assert summary["backup_path"] != "NONE"
+    assert summary["ready_for_full_path_following"] is False
+    assert not cal_path.exists()  # original cleared for a fresh recalibration
+    assert Path(summary["backup_path"]).exists()  # prior values preserved
+    _assert_standard_summary(out_dir)
+    for old_term in ("stage" + "20", "stage" + "16"):
+        assert old_term not in json.dumps(summary).lower()
+
+
+def test_reset_motion_calibration_no_existing_is_clean(tmp_path: Path) -> None:
+    cal_path = tmp_path / "cal" / "motion_calibration.json"  # never created
+    out_dir = tmp_path / "reset"
+    rc = cli.main(
+        ["reset-motion-calibration", "--calibration-out", str(cal_path), "--out-dir", str(out_dir)]
+    )
+    assert rc == 0
+    summary = json.loads((out_dir / "reset_motion_calibration_summary.json").read_text())
+    assert summary["reason"] == "NO_EXISTING_CALIBRATION"
+    assert summary["existing_calibration_found"] is False
+    assert summary["backup_path"] == "NONE"
+
+
+def test_tune_motion_reset_calibration_backs_up_before_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cal_path = tmp_path / "cal" / "motion_calibration.json"
+    cal_path.parent.mkdir(parents=True)
+    cal_path.write_text(json.dumps({"forward": {"a": 0.30, "b": 0.0, "ms": 900, "approved_by_user": True}}))
+    out_dir = tmp_path / "tune"
+    rc = cli.main(
+        [
+            "tune-motion",
+            "--primitive",
+            "forward",
+            "--reset-calibration",
+            "true",
+            "--print-candidate",
+            "true",
+            "--calibration-out",
+            str(cal_path),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "calibration backed up:" in out
+    assert "calibration reset:" in out
+    assert not cal_path.exists()  # cleared before the printed candidate session
+    backups = list(cal_path.parent.glob("motion_calibration.backup_*.json"))
+    assert backups, "a timestamped backup should remain after reset"
+
+
+def test_help_includes_alignment_and_reset_modes() -> None:
+    help_text = cli.build_parser().format_help()
+    assert "align-heading" in help_text
+    assert "reset-motion-calibration" in help_text
+    for old_term in ("Stage" + "20", "Stage" + "16"):
+        assert old_term not in help_text

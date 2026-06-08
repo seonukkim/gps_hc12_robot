@@ -163,7 +163,9 @@ def test_auto_relative_run_auto_switch_starts_execution(
             _hb(),  # post-pulse heartbeat
         ]
     )
-    args = _run_args(tmp_path)
+    # This test covers the AUTO-switch execution path; initial heading alignment
+    # is a separate concern (own coverage), so opt out of the gps_probe default.
+    args = _run_args(tmp_path, initial_heading_align="none")
     rc = cli._auto_relative_run_on_handle(
         handle, args, cal, tmp_path,
         plan=None, field_config=None, plan_dir_used=False, input_fn=lambda: "",
@@ -225,7 +227,9 @@ def test_auto_relative_run_manual_during_execution_stops_safely(
 
     monkeypatch.setattr(cli.controller, "run_controller", fake_run_controller)
     handle = FakeSerial([_hb(), _hb()])
-    args = _run_args(tmp_path)
+    # Initial heading alignment has its own coverage; this test isolates the
+    # mid-execution MANUAL stop, so opt out of the gps_probe default.
+    args = _run_args(tmp_path, initial_heading_align="none")
     rc = cli._auto_relative_run_on_handle(
         handle, args, geometry.FALLBACK_RESOLVED_CALIBRATION, tmp_path,
         plan=None, field_config=None, plan_dir_used=False, input_fn=lambda: "",
@@ -247,7 +251,8 @@ def test_auto_relative_run_keyboard_fallback_when_mode_channel_absent(
     started: list[object] = []
     monkeypatch.setattr(cli.controller, "run_controller", lambda *a, **k: started.append(k) or ([], [], "NONE"))
     handle = FakeSerial([_hb(include_mode=False) for _ in range(4)])
-    args = _run_args(tmp_path, allow_keyboard_start="true")
+    # Keyboard-start path under test; alignment is covered separately.
+    args = _run_args(tmp_path, allow_keyboard_start="true", initial_heading_align="none")
     pressed: list[int] = []
     rc = cli._auto_relative_run_on_handle(
         handle, args, geometry.FALLBACK_RESOLVED_CALIBRATION, tmp_path,
@@ -277,3 +282,34 @@ def test_auto_relative_run_no_keyboard_without_opt_in(
     )
     assert rc == 2
     assert not called
+
+
+# --- run: initial heading alignment gate --------------------------------------
+
+
+def test_auto_relative_run_aborts_when_gps_probe_alignment_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auto-relative default (gps_probe) must abort before execution when the
+    initial heading alignment fails, and it must never reach the controller."""
+    monkeypatch.setattr(cli, "DEFAULT_GPS_CACHE", tmp_path / "cache" / "latest_start.json")
+    called: list[object] = []
+    monkeypatch.setattr(
+        cli.controller, "run_controller",
+        lambda *a, **k: called.append(k) or ([], [], "NONE"),
+    )
+    # GPS resolves the start and AUTO is detected, but every heartbeat sits at the
+    # same lat/lon -> the gps_probe sees no usable displacement -> alignment fails.
+    handle = FakeSerial([_hb() for _ in range(4)])
+    args = _run_args(tmp_path)  # keep the gps_probe default
+    rc = cli._auto_relative_run_on_handle(
+        handle, args, geometry.FALLBACK_RESOLVED_CALIBRATION, tmp_path,
+        plan=None, field_config=None, plan_dir_used=False, input_fn=lambda: "",
+    )
+    assert rc == 2
+    assert not called  # alignment failure must short-circuit the controller
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["execution_started"] is False
+    assert str(summary["stop_reason"]).startswith("INITIAL_ALIGNMENT_FAILED")
+    assert summary["ready_for_full_path_following"] is False
+    assert (tmp_path / "alignment").is_dir()  # alignment artifacts were written

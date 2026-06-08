@@ -30,9 +30,9 @@ import sys
 import time
 from urllib.parse import unquote
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
-from tools.physical_path_planning import calibration, checks, controller, executor, geometry, preview, safety, telemetry, tuning
+from tools.physical_path_planning import alignment, calibration, checks, controller, executor, geometry, preview, safety, telemetry, tuning
 
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
@@ -3400,12 +3400,51 @@ def cmd_usb_drive_live(args: argparse.Namespace) -> int:
     return 0 if summary["success"] is True else 2
 
 
+def cmd_reset_motion_calibration(args: argparse.Namespace) -> int:
+    """Back up then delete the approved motion calibration before recalibrating.
+
+    Local-only: opens no serial port and uploads no firmware. The previous file
+    is preserved as a timestamped ``*.backup_<stamp>.json`` sibling so a full
+    ``tune-motion`` recalibration can start from a clean slate without losing the
+    prior approved values.
+    """
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    calibration_out = tuning.motion_calibration_path(getattr(args, "calibration_out", None))
+    backup_path, removed = tuning.reset_calibration(calibration_out)
+    summary = {
+        "mode": "reset-motion-calibration",
+        "success": True,
+        "reason": "CALIBRATION_RESET" if removed else "NO_EXISTING_CALIBRATION",
+        "calibration_path": str(calibration_out),
+        "existing_calibration_found": removed,
+        "backup_path": str(backup_path) if backup_path is not None else "NONE",
+        "next_recommended_action": (
+            "Recalibrate forward, backward, turn-left-90, turn-right-90 with tune-motion; "
+            "each approve overwrites the fresh calibration file."
+        ),
+        "ready_for_full_path_following": False,
+    }
+    _write_json(out_dir / "reset_motion_calibration_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Reset Motion Calibration")
+    if backup_path is not None:
+        print(f"calibration backed up: {backup_path}")
+    print(f"reset-motion-calibration: removed_existing={str(removed).lower()} -> {calibration_out}")
+    print("ready_for_full_path_following=false")
+    return 0
+
+
 def cmd_tune_motion(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     primitive = tuning.normalize_primitive(args.primitive)
     candidate = tuning.initial_candidate(primitive)
     calibration_out = tuning.motion_calibration_path(args.calibration_out)
+    if telemetry._parse_bool(getattr(args, "reset_calibration", "false"), default=False):
+        backup_path, removed = tuning.reset_calibration(calibration_out)
+        if backup_path is not None:
+            print(f"calibration backed up: {backup_path}")
+        print(f"calibration reset: removed_existing={str(removed).lower()} -> {calibration_out}")
     if args.print_candidate == "true":
         summary = tune_motion_summary(
             [],
@@ -3804,6 +3843,234 @@ def cmd_station_hw_manual(args: argparse.Namespace) -> int:
     )
 
 
+def _load_plan_segments(args: argparse.Namespace) -> tuple[list[dict[str, object]] | None, str, str]:
+    """Load planned segments from --plan-dir; return (segments, reason, message).
+
+    ``segments`` is None on failure, with a machine reason and operator message.
+    """
+    plan_dir = getattr(args, "plan_dir", None)
+    if not plan_dir:
+        return None, "ALIGN_PLAN_DIR_REQUIRED", "align-heading requires --plan-dir with a built plan (run preview first)"
+    plan_dir_path = Path(plan_dir)
+    candidates = [plan_dir_path / "preview_summary.json", plan_dir_path / "plan.json"]
+    plan_path = next((path for path in candidates if path.exists()), None)
+    if plan_path is None:
+        return None, "PLAN_DIR_MISSING_PLAN", f"--plan-dir must contain preview_summary.json or plan.json: {plan_dir_path}"
+    plan = json.loads(plan_path.read_text())
+    segments = plan.get("segments") if isinstance(plan, dict) else None
+    if not segments:
+        return None, "PLAN_HAS_NO_SEGMENTS", f"plan in {plan_dir_path} has no segments to align to"
+    return list(segments), "OK", ""
+
+
+def _write_align_artifacts(
+    out_dir: Path,
+    summary: dict[str, object],
+    trace: Sequence[dict[str, object]],
+    raw_lines: Sequence[str],
+) -> None:
+    _write_rows_csv(out_dir / "align_heading_trace.csv", list(trace))
+    _write_raw_log(out_dir / "raw_usbdbg.log", list(raw_lines))
+    _write_json(out_dir / "align_heading_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Physical Path Planner Align Heading")
+
+
+def _align_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    """Alignment knobs shared by the align-heading mode and the run integration."""
+    return {
+        "probe_a": float(getattr(args, "probe_a", getattr(args, "align_probe_a", alignment.DEFAULT_PROBE_A))),
+        "probe_duration_s": float(
+            getattr(args, "probe_duration_s", getattr(args, "align_probe_duration_s", alignment.DEFAULT_PROBE_DURATION_S))
+        ),
+        "min_probe_distance_m": float(
+            getattr(args, "min_probe_distance_m", getattr(args, "align_min_probe_distance_m", alignment.DEFAULT_MIN_PROBE_DISTANCE_M))
+        ),
+        "heading_tolerance_deg": float(
+            getattr(args, "heading_tolerance_deg", getattr(args, "align_heading_tolerance_deg", alignment.DEFAULT_HEADING_TOLERANCE_DEG))
+        ),
+        "turn_b_left": float(getattr(args, "turn_b_left", alignment.DEFAULT_TURN_B_LEFT)),
+        "turn_b_right": float(getattr(args, "turn_b_right", alignment.DEFAULT_TURN_B_RIGHT)),
+        "max_turn_duration_s": float(getattr(args, "max_turn_duration_s", alignment.DEFAULT_MAX_TURN_DURATION_S)),
+        "event_timeout_s": float(getattr(args, "event_timeout_s", alignment.DEFAULT_EVENT_TIMEOUT_S)),
+        "heartbeat_timeout_s": float(getattr(args, "heartbeat_timeout_s", alignment.DEFAULT_HEARTBEAT_TIMEOUT_S)),
+        "verbose_raw": getattr(args, "verbose_raw", "false") == "true",
+    }
+
+
+def cmd_align_heading(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    segments, reason, message = _load_plan_segments(args)
+    if segments is None:
+        return _fail_with_summary(args, reason=reason, message=message)
+
+    strategy = args.strategy
+    if strategy not in alignment.ALIGNMENT_STRATEGIES:
+        return _fail_with_summary(
+            args,
+            reason="UNKNOWN_ALIGNMENT_STRATEGY",
+            message=f"--strategy must be one of {alignment.ALIGNMENT_STRATEGIES}",
+        )
+    align_kwargs = _align_kwargs(args)
+    target_source = getattr(args, "target_heading_source", "first_segment")
+
+    if strategy == "skip":
+        summary, trace = alignment.align_heading(
+            None, segments=segments, strategy="skip", target_heading_source=target_source
+        )
+        summary["mode"] = args.mode
+        summary["firmware_profile"] = MAC_PHYSICAL_SUPERVISED_PROFILE
+        _write_align_artifacts(out_dir, summary, trace, [])
+        print(f"align-heading: strategy=skip success=true reason={summary['reason']} -> {out_dir}")
+        print("ready_for_full_path_following=false")
+        return 0
+
+    if not ensure_port(args):
+        return 2
+
+    import serial  # local import: preview/diagnose --from-log never need pyserial
+
+    raw_lines: list[str] = []
+    try:
+        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+            print(f"resolved_port={args.port}")
+            print(f"align-heading: strategy={strategy} target_heading_source={target_source}")
+            summary, trace = alignment.align_heading(
+                handle,
+                segments=segments,
+                strategy=strategy,
+                target_heading_source=target_source,
+                raw_lines=raw_lines,
+                **align_kwargs,
+            )
+    except OSError:
+        summary = {
+            "mode": args.mode,
+            "success": False,
+            "reason": "SERIAL_DISCONNECT",
+            "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+            "strategy": strategy,
+            "ready_for_full_path_following": False,
+        }
+        _write_align_artifacts(out_dir, summary, [], raw_lines)
+        print("align-heading: reason=SERIAL_DISCONNECT")
+        return 2
+
+    summary["mode"] = args.mode
+    summary["firmware_profile"] = MAC_PHYSICAL_SUPERVISED_PROFILE
+    _write_align_artifacts(out_dir, summary, trace, raw_lines)
+    print(
+        f"align-heading: strategy={summary['strategy']} success={str(summary['alignment_success']).lower()} "
+        f"reason={summary['reason']} initial_err={summary['initial_heading_error_deg']} "
+        f"final_err={summary['final_heading_error_deg']} -> {out_dir}"
+    )
+    print("ready_for_full_path_following=false")
+    return 0 if summary["alignment_success"] else 2
+
+
+def _run_initial_alignment(
+    handle: object,
+    args: argparse.Namespace,
+    *,
+    segments: Sequence[dict[str, object]],
+    out_dir: Path,
+    raw_lines: list[str],
+    input_fn: Callable[[str], str] = input,
+) -> dict[str, object]:
+    """Optionally align the rover to the first lane heading before execution.
+
+    Returns ``{performed, ok, aligned_yaw_deg, abort_reason, summary}``. When
+    ``--initial-heading-align none`` no alignment runs and the operator's
+    ``--start-yaw-deg`` (possibly ``None``) is preserved. A ``gps_probe`` failure
+    sets ``ok=False`` so the caller aborts; ``user_confirmed`` never aborts (a
+    missing IMU simply yields no yaw reference and the controller falls back to
+    per-lane capture). Alignment artifacts are written to ``<out_dir>/alignment``
+    and the alignment serial lines are folded into ``raw_lines``.
+    """
+    mode = str(getattr(args, "initial_heading_align", "none"))
+    fallback_yaw = getattr(args, "start_yaw_deg", None)
+    if mode == "none":
+        return {
+            "performed": False,
+            "ok": True,
+            "aligned_yaw_deg": fallback_yaw,
+            "abort_reason": None,
+            "summary": None,
+        }
+    align_raw: list[str] = []
+    summary, trace = alignment.align_heading(
+        handle,
+        segments=segments,
+        strategy=mode,
+        raw_lines=align_raw,
+        input_fn=input_fn,
+        **_align_kwargs(args),
+    )
+    summary["mode"] = "align-heading"
+    summary["firmware_profile"] = MAC_PHYSICAL_SUPERVISED_PROFILE
+    align_dir = Path(out_dir) / "alignment"
+    align_dir.mkdir(parents=True, exist_ok=True)
+    _write_align_artifacts(align_dir, summary, trace, align_raw)
+    raw_lines.extend(align_raw)
+    aligned_yaw = summary.get("aligned_yaw_deg")
+    if aligned_yaw is None:
+        aligned_yaw = fallback_yaw
+    ok = True
+    abort_reason: str | None = None
+    if mode == "gps_probe" and not summary.get("alignment_success"):
+        ok = False
+        abort_reason = f"INITIAL_ALIGNMENT_FAILED:{summary.get('reason')}"
+    return {
+        "performed": True,
+        "ok": ok,
+        "aligned_yaw_deg": aligned_yaw,
+        "abort_reason": abort_reason,
+        "summary": summary,
+    }
+
+
+def _alignment_summary_fields(align: dict[str, object]) -> dict[str, object]:
+    """Compact alignment fields to merge into a run/auto-relative-run summary."""
+    asum = align.get("summary") or {}
+    performed = bool(align.get("performed"))
+    return {
+        "alignment_performed": performed,
+        "alignment_strategy": asum.get("strategy", "none") if performed else "none",
+        "alignment_success": asum.get("alignment_success", "NA") if performed else "NA",
+        "alignment_reason": asum.get("reason", "NA") if performed else "NA",
+        "alignment_initial_heading_error_deg": asum.get("initial_heading_error_deg", "NA") if performed else "NA",
+        "alignment_final_heading_error_deg": asum.get("final_heading_error_deg", "NA") if performed else "NA",
+        "aligned_yaw_deg": align.get("aligned_yaw_deg"),
+    }
+
+
+def _alignment_abort_summary(
+    args: argparse.Namespace,
+    plan: dict[str, object],
+    cal: dict[str, object],
+    align: dict[str, object],
+    plan_dir_used: bool,
+) -> dict[str, object]:
+    """Guarded summary written when initial heading alignment fails before motion."""
+    return {
+        "mode": args.mode,
+        "success": False,
+        "aborted": True,
+        "reason": str(align.get("abort_reason")),
+        "abort_reason": str(align.get("abort_reason")),
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+        "start_source": "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit")),
+        "path_control_mode": args.path_control_mode,
+        "initial_heading_align": str(getattr(args, "initial_heading_align", "none")),
+        "next_recommended_action": (
+            "Initial heading alignment failed; inspect alignment/summary.md, move outdoors "
+            "for a stronger GPS displacement, or rerun with --initial-heading-align none."
+        ),
+        **_alignment_summary_fields(align),
+        "ready_for_full_path_following": False,
+    }
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
     plan_dir_used = bool(getattr(args, "plan_dir", None))
@@ -3958,15 +4225,30 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     import serial  # local import: preview/diagnose --from-log never need pyserial
 
+    align_raw_lines: list[str] = []
     handle = serial.Serial(args.port, baudrate=args.baud, timeout=0.5)
     try:
+        align = _run_initial_alignment(
+            handle,
+            args,
+            segments=plan["segments"],  # type: ignore[arg-type]
+            out_dir=out_dir,
+            raw_lines=align_raw_lines,
+        )
+        if not align["ok"]:
+            abort_summary = _alignment_abort_summary(args, plan, cal, align, plan_dir_used)
+            _write_json(out_dir / "run_summary.json", abort_summary)
+            write_summary_files(out_dir, abort_summary, title="Physical Path Planner Run")
+            _write_raw_log(out_dir / "run_serial.log", align_raw_lines)
+            print(f"run: aborted before motion, reason={abort_summary['reason']} -> {out_dir}")
+            return 2
         rows, raw_lines, abort_reason = controller.run_controller(
             handle,
             segments=plan["segments"],  # type: ignore[arg-type]
             resolved_calibration=cal,
             start_lat=float(plan["start_lat"]),
             start_lon=float(plan["start_lon"]),
-            start_yaw_deg=args.start_yaw_deg,
+            start_yaw_deg=align["aligned_yaw_deg"],
             goal_lat=float(plan["goal_lat"]),
             goal_lon=float(plan["goal_lon"]),
             event_timeout_s=args.event_timeout_s,
@@ -3992,6 +4274,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     finally:
         handle.close()
+
+    raw_lines = list(align_raw_lines) + list(raw_lines)
 
     summary = controller.build_controller_summary(
         rows,
@@ -4058,6 +4342,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             if summary.get("aborted") is False else
             "Inspect abort reason, raw USB log, and final motor command fields."
         ),
+        **_alignment_summary_fields(align),
         "ready_for_full_path_following": False,
     }
     _write_json(out_dir / "run_summary.json", summary)
@@ -4495,15 +4780,40 @@ def _auto_relative_run_on_handle(
         print(f"auto-relative-run: execution_started=false stop_reason={start_reason} -> {out_dir}")
         return 2
 
-    # 5/6. Execute closed-loop; require_auto_switch stops safely on a MANUAL flip.
+    # 4. Align to the first lane heading before path execution (if requested).
     assert plan is not None
+    align = _run_initial_alignment(
+        handle,
+        args,
+        segments=plan["segments"],  # type: ignore[arg-type]
+        out_dir=out_dir,
+        raw_lines=raw_lines,
+        input_fn=input_fn,
+    )
+    if not align["ok"]:
+        summary = _auto_relative_summary(
+            args, cal, plan, field_config,
+            controller_summary=None, start_lat=start_lat, start_lon=start_lon,
+            start_source=start_source, auto_switch_detected=(start_reason == "AUTO_SWITCH"),
+            execution_started=False, stop_reason=str(align["abort_reason"]),
+            reason=str(align["abort_reason"]),
+        )
+        summary.update(_alignment_summary_fields(align))
+        summary["auto_start_reason"] = start_reason
+        _write_json(out_dir / "run_summary.json", summary)
+        write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
+        _write_closed_loop_artifacts(out_dir, [], raw_lines)
+        print(f"auto-relative-run: execution_started=false stop_reason={align['abort_reason']} -> {out_dir}")
+        return 2
+
+    # 5/6. Execute closed-loop; require_auto_switch stops safely on a MANUAL flip.
     rows_exec, raw_exec, abort_reason = controller.run_controller(
         handle,
         segments=plan["segments"],  # type: ignore[arg-type]
         resolved_calibration=cal,
         start_lat=float(start_lat),
         start_lon=float(start_lon),
-        start_yaw_deg=args.start_yaw_deg,
+        start_yaw_deg=align["aligned_yaw_deg"],
         goal_lat=float(plan["goal_lat"]),
         goal_lon=float(plan["goal_lon"]),
         event_timeout_s=args.event_timeout_s,
@@ -4548,6 +4858,7 @@ def _auto_relative_run_on_handle(
         stop_reason=stop_reason,
         reason="OK" if stop_reason in {"COMPLETED", "USER_SWITCHED_TO_MANUAL"} else stop_reason,
     )
+    summary.update(_alignment_summary_fields(align))
     summary["auto_start_reason"] = start_reason
     _write_json(out_dir / "run_summary.json", summary)
     write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
@@ -4699,7 +5010,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,execute-plan,run,auto-relative-run}",
+        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,reset-motion-calibration,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
     )
 
     gps_p = sub.add_parser("gps-wait", help="wait for usable GPS start fix; no motion")
@@ -4982,8 +5293,22 @@ def build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
     tune_p.add_argument("--print-candidate", choices=["true", "false"], default="false")
     tune_p.add_argument("--calibration-out", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
+    tune_p.add_argument(
+        "--reset-calibration",
+        choices=["true", "false"],
+        default="false",
+        help="back up and clear the existing motion calibration before this session",
+    )
     tune_p.add_argument("--out-dir", default="outputs/physical_path_planning/tune_motion")
     tune_p.set_defaults(handler=cmd_tune_motion)
+
+    reset_cal_p = sub.add_parser(
+        "reset-motion-calibration",
+        help="back up and clear approved motion calibration before a full recalibration",
+    )
+    reset_cal_p.add_argument("--calibration-out", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
+    reset_cal_p.add_argument("--out-dir", default="outputs/physical_path_planning/reset_motion_calibration")
+    reset_cal_p.set_defaults(handler=cmd_reset_motion_calibration)
 
     def add_guarded_pulse_ready_parser(name: str) -> None:
         guarded_p = sub.add_parser(
@@ -5081,6 +5406,22 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="build + write the plan and exit (no serial opened)",
         )
+        run_p.add_argument(
+            "--initial-heading-align",
+            choices=["none", "gps_probe", "user_confirmed"],
+            default="none",
+            help="align the rover to the first lane heading before path execution",
+        )
+        run_p.add_argument(
+            "--align-heading-tolerance-deg", type=float, default=alignment.DEFAULT_HEADING_TOLERANCE_DEG
+        )
+        run_p.add_argument("--align-probe-a", type=float, default=alignment.DEFAULT_PROBE_A)
+        run_p.add_argument(
+            "--align-probe-duration-s", type=float, default=alignment.DEFAULT_PROBE_DURATION_S
+        )
+        run_p.add_argument(
+            "--align-min-probe-distance-m", type=float, default=alignment.DEFAULT_MIN_PROBE_DISTANCE_M
+        )
         if name == "auto-relative-run":
             run_p.add_argument(
                 "--allow-keyboard-start",
@@ -5091,9 +5432,42 @@ def build_parser() -> argparse.ArgumentParser:
             run_p.add_argument("--auto-switch-timeout-s", type=float, default=300.0)
             run_p.add_argument("--png", dest="png", action="store_true", default=True)
             run_p.add_argument("--no-png", dest="png", action="store_false")
-            run_p.set_defaults(handler=cmd_auto_relative_run, goal_mode="relative_enu")
+            # auto-relative-run aligns by default; pass --initial-heading-align none
+            # to keep the prior (no-alignment) behavior.
+            run_p.set_defaults(
+                handler=cmd_auto_relative_run,
+                goal_mode="relative_enu",
+                initial_heading_align="gps_probe",
+            )
         else:
             run_p.set_defaults(handler=cmd_run)
+
+    align_p = sub.add_parser(
+        "align-heading",
+        help="point the rover at the first lane heading via a GPS probe + IMU-feedback turn",
+    )
+    align_p.add_argument("--plan-dir", default=None, help="preview/plan dir holding the planned segments")
+    align_p.add_argument("--port", default=None)
+    align_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    align_p.add_argument(
+        "--strategy",
+        choices=list(alignment.ALIGNMENT_STRATEGIES),
+        default="gps_probe",
+        help="gps_probe (automatic), user_confirmed (operator points + Enter), or skip",
+    )
+    align_p.add_argument("--target-heading-source", choices=["first_segment"], default="first_segment")
+    align_p.add_argument("--probe-a", type=float, default=alignment.DEFAULT_PROBE_A)
+    align_p.add_argument("--probe-duration-s", type=float, default=alignment.DEFAULT_PROBE_DURATION_S)
+    align_p.add_argument("--min-probe-distance-m", type=float, default=alignment.DEFAULT_MIN_PROBE_DISTANCE_M)
+    align_p.add_argument("--heading-tolerance-deg", type=float, default=alignment.DEFAULT_HEADING_TOLERANCE_DEG)
+    align_p.add_argument("--turn-b-left", type=float, default=alignment.DEFAULT_TURN_B_LEFT)
+    align_p.add_argument("--turn-b-right", type=float, default=alignment.DEFAULT_TURN_B_RIGHT)
+    align_p.add_argument("--max-turn-duration-s", type=float, default=alignment.DEFAULT_MAX_TURN_DURATION_S)
+    align_p.add_argument("--event-timeout-s", type=float, default=alignment.DEFAULT_EVENT_TIMEOUT_S)
+    align_p.add_argument("--heartbeat-timeout-s", type=float, default=alignment.DEFAULT_HEARTBEAT_TIMEOUT_S)
+    align_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
+    align_p.add_argument("--out-dir", default="outputs/physical_path_planning/align_heading")
+    align_p.set_defaults(handler=cmd_align_heading)
 
     diag_p = sub.add_parser("diagnose", help="read-only telemetry summary (live port or --from-log)")
     diag_p.add_argument("--port", default=None)

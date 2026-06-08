@@ -19,10 +19,10 @@ Imports flow one way:
 geometry  calibration  telemetry  safety  checks
                          \        /
                           executor
-                             |
-                         controller
-                             |
-                            cli
+                          /      \
+                 controller    alignment    tuning
+                          \      |      /
+                              cli
 ```
 
 | Module | Responsibility |
@@ -32,9 +32,11 @@ geometry  calibration  telemetry  safety  checks
 | `telemetry.py` | USB debug row parsing and typed accessors for GPS, IMU, RC, and guarded pulse fields. |
 | `safety.py` | Guarded motion predicates for ACK/STOP, final-zero checks, RC validity, output-active checks, and neutral preflight. |
 | `checks.py` | Enforces `ready_for_full_path_following=false` on every summary. |
-| `executor.py` | One guarded pulse transaction: ARM, command, completion wait, STOP, and row collection. |
-| `controller.py` | Supervised segment loop that issues guarded pulses along the planned coverage path. |
-| `cli.py` | User-facing modes: `diagnose`, `manual-rc`, `guarded-pulse-ready`, `calibrate-turn`, `preview`, `execute-plan`, and `run`. |
+| `executor.py` | One guarded pulse transaction: ARM, command, completion wait, STOP, and row collection; plus bounded live-drive setpoints used for probes and straight chunks. |
+| `controller.py` | Supervised segment loop that issues guarded pulses/live chunks along the planned coverage path. |
+| `alignment.py` | Initial heading alignment: GPS displacement probe for absolute heading, IMU-feedback turn-to-heading, and the `gps_probe`/`user_confirmed`/`skip` strategies. |
+| `tuning.py` | Interactive motion calibration candidate adjustment, approved-calibration persistence, and calibration backup/reset. |
+| `cli.py` | User-facing modes: `diagnose`, `manual-rc`, `guarded-pulse-ready`, `calibrate-turn`, `tune-motion`, `reset-motion-calibration`, `preview`, `align-heading`, `execute-plan`, `run`, and `auto-relative-run`. |
 
 ## Guarded Pulse Contract
 

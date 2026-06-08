@@ -17,10 +17,12 @@ Modes:
 - `station-hw-manual` — deprecated serial-frame monitor; use `manual-control` for the current PPM controller.
 - `usb-pulse-test` — laptop USB bounded A/B pulse motor validation.
 - `tune-motion` — interactive visual/IMU-assisted motion calibration using USB pulses.
+- `reset-motion-calibration` — back up and clear approved motion calibration before a full recalibration. No motor output.
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
 - `preview` — build + render a rectangle coverage plan without motor output.
 - `auto-relative-preview` — wait for GPS, resolve a relative A→B field, write the field config + preview without motor output.
+- `align-heading` — point the rover at the first lane heading via a GPS displacement probe + IMU-feedback turn.
 - `execute-plan` / `run` — supervised guarded pulse execution (default `--path-control-mode gps_imu_closed_loop`).
 - `auto-relative-run` — wait for GPS, then start closed-loop execution when the physical mode switch is set to AUTO.
 
@@ -248,6 +250,48 @@ entries become the straight-pulse base, with IMU heading hold applying only a
 small clamped B correction. Approved `turn_left_90` and `turn_right_90` entries
 become the preferred connector commands; repeated small turn pulses remain a
 fallback when approved 90-degree turn calibration is missing.
+
+To recalibrate from scratch without losing the prior values, back up first:
+
+```bash
+bash scripts/run_physical_path_planner.sh reset-motion-calibration \
+  --out-dir outputs/physical_path_planning/reset_motion_calibration
+```
+
+This copies the existing `motion_calibration.json` to a timestamped
+`motion_calibration.backup_<stamp>.json` sibling, then clears the original so the
+next `tune-motion` approvals start clean. `tune-motion --reset-calibration true`
+does the same backup-then-clear at the start of one session.
+
+## Initial Heading Alignment
+
+The IMU reports a relative yaw, not an absolute compass heading, so `align-heading`
+derives the absolute starting heading from a short GPS displacement probe and uses
+the IMU only as turn feedback.
+
+```bash
+bash scripts/run_physical_path_planner.sh align-heading \
+  --plan-dir outputs/physical_path_planning/preview_relative_enu \
+  --strategy gps_probe \
+  --probe-a 0.25 --probe-duration-s 1.0 --min-probe-distance-m 0.30 \
+  --heading-tolerance-deg 8 --turn-b-left 0.24 --turn-b-right -0.12 \
+  --out-dir outputs/physical_path_planning/preview_relative_enu/alignment
+```
+
+Strategies are `gps_probe` (drive a short forward probe, estimate the current ENU
+heading from GPS displacement, then turn left `B>0` / right `B<0` by the shortest
+heading error and stop on the IMU yaw delta), `user_confirmed` (point the rover by
+hand, press Enter, capture the current IMU yaw as the lane reference), and `skip`
+(no alignment, no serial). Displacement below `--min-probe-distance-m` reports
+`reason=PROBE_GPS_DISPLACEMENT_TOO_SMALL`.
+
+`execute-plan`, `run`, and `auto-relative-run` run the same alignment inline via
+`--initial-heading-align none|gps_probe|user_confirmed` (default `none` for
+`execute-plan`/`run`, `gps_probe` for `auto-relative-run`). On success the aligned
+IMU yaw becomes the first lane reference; per-lane references are still recaptured
+after each connector turn. A `gps_probe` failure aborts before any path motion;
+`user_confirmed` and `none` never abort on alignment. The A/B mapping is unchanged:
+`A>0` forward, `A<0` backward, `B>0` left, `B<0` right.
 
 During physical execution, straight coverage segments use continuous USB live
 drive updates by default rather than dense stop-start micro-pulses. GPS is used

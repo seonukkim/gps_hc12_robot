@@ -42,6 +42,16 @@ def _write_line(handle: object, text: object) -> None:
     handle.flush()  # type: ignore[attr-defined]
 
 
+def write_command(handle: object, text: object) -> None:
+    """Write one newline-terminated command to the serial handle and flush.
+
+    Public wrapper around :func:`_write_line` so peer modules (e.g. heading
+    alignment) can issue their own bounded live-drive SET/STOP commands without
+    reaching into a private helper.
+    """
+    _write_line(handle, text)
+
+
 def wait_for_row(
     handle: object,
     raw_lines: list[str],
