@@ -424,6 +424,60 @@ def planner_primitive(calibration: dict[str, object], name: str) -> dict[str, ob
     }
 
 
+def _is_motion_calibrated(primitive: object) -> bool:
+    """A motion primitive is user-calibrated when it is not a known-safe fallback.
+
+    The resolver always returns a usable ``forward``/``backward`` primitive, but
+    falls back to the built-in safe values (``source`` prefixed ``fallback_known_``)
+    when no real calibration file supplied them. Driving the rover physically should
+    use measured calibration, so a fallback source counts as *not calibrated*.
+    """
+    if not isinstance(primitive, dict):
+        return False
+    return not str(primitive.get("source", "")).startswith("fallback_known_")
+
+
+def plan_requires_backward(segments: Sequence[dict[str, object]] | None) -> bool:
+    """True when any planned lane drives backward (serpentine return lanes)."""
+    for segment in segments or []:
+        if str(segment.get("expected_motion_direction", "")) == "backward":
+            return True
+    return False
+
+
+def calibration_completeness(
+    calibration: dict[str, object],
+    *,
+    segments: Sequence[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Report which motion primitives are calibrated and which the plan requires.
+
+    ``forward`` is always required to drive. ``backward`` is required only when the
+    plan contains a backward (serpentine return) lane. ``turn_left_90`` /
+    ``turn_right_90`` are reported but never required: a missing turn-angle
+    calibration falls back to repeated fixed pulses, so it cannot block motion.
+    """
+    left_90 = calibration.get("turn_left_90")
+    right_90 = calibration.get("turn_right_90")
+    present_and_approved = {
+        "forward": _is_motion_calibrated(calibration.get("forward")),
+        "backward": _is_motion_calibrated(calibration.get("backward")),
+        "turn_left_90": bool(isinstance(left_90, dict) and left_90.get("available")),
+        "turn_right_90": bool(isinstance(right_90, dict) and right_90.get("available")),
+    }
+    needs_backward = plan_requires_backward(segments)
+    required = ["forward"] + (["backward"] if needs_backward else [])
+    missing_required = [name for name in required if not present_and_approved[name]]
+    return {
+        "present_and_approved": present_and_approved,
+        "required_for_current_plan": required,
+        "missing_required": missing_required,
+        "plan_requires_backward": needs_backward,
+        "can_run_stop_correct_go": not missing_required,
+        "ready_for_full_path_following": False,
+    }
+
+
 def connector_primitive(calibration: dict[str, object], direction: str) -> dict[str, object]:
     effective = str(calibration.get("connector_mode_effective", "repeated_pulses"))
     if effective == "angle_calibrated":

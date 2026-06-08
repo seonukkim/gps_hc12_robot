@@ -36,7 +36,7 @@ geometry  calibration  telemetry  safety  checks
 | `controller.py` | Supervised segment loop that issues guarded pulses/live chunks along the planned coverage path. |
 | `alignment.py` | Initial heading alignment: GPS displacement probe for absolute heading, IMU-feedback turn-to-heading, and the `gps_probe`/`user_confirmed`/`skip` strategies. |
 | `tuning.py` | Interactive motion calibration candidate adjustment, approved-calibration persistence, and calibration backup/reset. |
-| `cli.py` | User-facing modes: `diagnose`, `manual-rc`, `guarded-pulse-ready`, `calibrate-turn`, `tune-motion`, `reset-motion-calibration`, `preview`, `align-heading`, `execute-plan`, `run`, and `auto-relative-run`. |
+| `cli.py` | User-facing modes: `diagnose`, `manual-rc`, `guarded-pulse-ready`, `calibrate-turn`, `tune-motion`, `reset-motion-calibration`, `calibration-check`, `preview`, `align-heading`, `execute-plan`, `run`, and `auto-relative-run`. |
 
 ## Guarded Pulse Contract
 
@@ -68,6 +68,15 @@ b_cmd             = clamp(heading_component + cte_component, ±0.08)
 ```
 
 The controller does not silently lower calibrated A values or pulse durations.
+
+The `stop_correct_go` control mode reuses this same B-only correction math but
+applies it discretely: it drives one bounded calibrated chunk, stops, reads a
+stabilized GPS/IMU heartbeat, and applies the heading correction (plus a small
+bounded cross-track trim) only while stopped before continuing. Because it
+drives calibrated chunks, it requires real forward calibration (and backward for
+multi-lane serpentine plans); `calibration.calibration_completeness` gates it and
+`run`/`auto-relative-run` abort before any motion with `CALIBRATION_INCOMPLETE`
+when a required primitive is still the repeated-pulses fallback.
 
 ## Calibration Resolution
 

@@ -18,6 +18,7 @@ Modes:
 - `usb-pulse-test` — laptop USB bounded A/B pulse motor validation.
 - `tune-motion` — interactive visual/IMU-assisted motion calibration using USB pulses.
 - `reset-motion-calibration` — back up and clear approved motion calibration before a full recalibration. No motor output.
+- `calibration-check` — report which motion primitives the current plan requires and whether `stop_correct_go` can run. No motor output; exit code is `0` when ready, `1` when calibration is incomplete.
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
 - `preview` — build + render a rectangle coverage plan without motor output.
@@ -145,6 +146,15 @@ Control modes:
   correction.
 - `open_loop_chunks` — bounded calibrated chunks with no correction, useful only
   as a baseline comparison.
+- `stop_correct_go` — discrete move/stop/sense/correct cycles: drive a bounded
+  calibrated chunk, stop, read a stabilized GPS/IMU heartbeat, apply a bounded
+  heading correction (and small cross-track trim) only while stopped, then
+  continue. Sensor priority follows `--sensor-trust-mode` (`imu_gps_first` by
+  default); GPS degradation dead-reckons on the IMU. This mode requires real
+  forward motion calibration (and backward for multi-lane serpentine plans);
+  `run` and `auto-relative-run` abort **before any motion** with
+  `reason=CALIBRATION_INCOMPLETE` when a required primitive is still the
+  repeated-pulses fallback. Run `calibration-check` first to confirm readiness.
 
 Execution writes:
 
@@ -156,9 +166,15 @@ summary.md
 summary.json
 ```
 
+`stop_correct_go` additionally writes `stop_correct_go_trace.csv` (per-chunk
+move/correction trace) and `heading_correction_trace.csv` (only the stopped
+correction cycles).
+
 The summary reports whether closed-loop correction was actually enabled, GPS
 degradation/reanchor counts, IMU heading usage, cross-track correction usage,
-and heading/cross-track error statistics.
+and heading/cross-track error statistics. The `stop_correct_go` summary adds
+`sensor_trust_mode`, heading-correction counts/successes, cross-track-trim
+count, and sensor-fallback count.
 
 ## Safety Posture
 

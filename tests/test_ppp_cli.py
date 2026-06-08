@@ -174,6 +174,7 @@ def test_help_uses_functional_mode_names() -> None:
     assert "station-manual" not in help_text
     assert "guarded-pulse-ready" in help_text
     assert "calibrate-turn" in help_text
+    assert "calibration-check" in help_text
     for old_term in ("Stage" + "20", "Stage" + "16", "Stage" + "35", "Stage" + "36", "stage" + "20-imu"):
         assert old_term not in help_text
 
@@ -197,6 +198,7 @@ def test_shell_help_uses_functional_mode_names() -> None:
     assert "station-drive" not in help_text
     assert "station-manual" not in help_text
     assert "guarded-pulse-ready" in help_text
+    assert "calibration-check" in help_text
     for old_term in ("Stage" + "20", "Stage" + "16", "Stage" + "35", "Stage" + "36"):
         assert old_term not in help_text
 

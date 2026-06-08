@@ -23,6 +23,7 @@ Modes:
   usb-drive-live        Continuous laptop USB A/B setpoint drive.
   tune-motion           Interactive visual/IMU-assisted motion calibration.
   reset-motion-calibration  Back up and clear approved motion calibration. No motion.
+  calibration-check     Report motion-calibration completeness for stop_correct_go. No motion.
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
   preview               Build + render a rectangle coverage plan. No motion.
@@ -71,6 +72,11 @@ Examples:
   bash scripts/run_physical_path_planner.sh reset-motion-calibration \
     --out-dir outputs/physical_path_planning/reset_motion_calibration
 
+  bash scripts/run_physical_path_planner.sh calibration-check \
+    --goal-mode relative_enu --goal-east-m 3.0 --goal-north-m 4.0 \
+    --workspace-width-m 1.5 --step-spacing-m 0.30 \
+    --out-dir outputs/physical_path_planning/calibration_check
+
   bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
     --out-dir outputs/physical_path_planning/guarded_pulse_ready
 
@@ -110,6 +116,17 @@ Examples:
     --path-control-mode gps_imu_closed_loop \
     --gps-reanchor true --imu-heading-hold true --cross-track-correction true \
     --out-dir outputs/physical_path_planning/auto_relative_3x4m
+
+  # stop_correct_go is a --path-control-mode value for run / auto-relative-run.
+  # run / auto-relative-run abort before motion (reason=CALIBRATION_INCOMPLETE)
+  # if the plan's required motion primitives are not yet calibrated; use
+  # calibration-check first to confirm readiness.
+  bash scripts/run_physical_path_planner.sh run \
+    --goal-mode relative_enu --goal-east-m 3.0 --goal-north-m 4.0 \
+    --workspace-width-m 1.5 --step-spacing-m 0.30 \
+    --path-control-mode stop_correct_go \
+    --sensor-trust-mode imu_gps_first \
+    --out-dir outputs/physical_path_planning/run_stop_correct_go
 
 Every mode writes:
   <out-dir>/summary.md
@@ -406,7 +423,7 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|reset-motion-calibration|station-drive|station-manual|guarded-pulse-ready)
+  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
   run|execute-plan|auto-relative-run|align-heading)

@@ -4071,6 +4071,156 @@ def _alignment_abort_summary(
     }
 
 
+def _calibration_status_detail(cal: dict[str, object]) -> dict[str, object]:
+    """Per-primitive calibration status for the calibration-check report.
+
+    A motion primitive counts as operator-approved when its ``source`` does not
+    start with ``fallback_known_`` (the resolver always returns a usable safe
+    default with that source when no real calibration exists). The 90-degree
+    turn entries are connector fallbacks and report their ``available`` flag.
+    """
+
+    def motion(name: str) -> dict[str, object]:
+        primitive = cal.get(name)
+        source = str(primitive.get("source", "")) if isinstance(primitive, dict) else "missing"
+        return {
+            "approved": calibration._is_motion_calibrated(primitive),
+            "source": source,
+        }
+
+    def turn90(name: str) -> dict[str, object]:
+        entry = cal.get(name)
+        available = bool(isinstance(entry, dict) and entry.get("available"))
+        return {
+            "approved": available,
+            "source": str(entry.get("source", "")) if isinstance(entry, dict) else "missing",
+        }
+
+    return {
+        "forward": motion("forward"),
+        "backward": motion("backward"),
+        "turn_left_90": turn90("turn_left_90"),
+        "turn_right_90": turn90("turn_right_90"),
+    }
+
+
+def _calibration_check_segments(
+    args: argparse.Namespace, cal: dict[str, object]
+) -> tuple[list[dict[str, object]] | None, str]:
+    """Resolve the plan segments used to decide what calibration is required.
+
+    Serial-free: prefers a saved ``--plan-dir`` plan, else builds a plan from the
+    goal flags (defaulting an unset start to 0,0 so relative goal modes still
+    yield the correct lane directions). Returns ``(segments, plan_source)``;
+    ``segments`` is ``None`` when no plan could be built (forward-only required).
+    """
+    plan_dir = getattr(args, "plan_dir", None)
+    if plan_dir:
+        plan_dir_path = Path(plan_dir)
+        candidates = [plan_dir_path / "preview_summary.json", plan_dir_path / "plan.json"]
+        plan_path = next((path for path in candidates if path.exists()), None)
+        if plan_path is None:
+            return None, "PLAN_DIR_MISSING_PLAN"
+        loaded = json.loads(plan_path.read_text())
+        segments = loaded.get("segments") if isinstance(loaded, dict) else None
+        if isinstance(segments, list):
+            return segments, "plan_dir"
+        return None, "PLAN_DIR_MISSING_SEGMENTS"
+    if getattr(args, "start_lat", None) is None:
+        args.start_lat = 0.0
+    if getattr(args, "start_lon", None) is None:
+        args.start_lon = 0.0
+    try:
+        plan = resolve_plan(args, cal)
+    except ValueError:
+        return None, "PLAN_INPUT_INVALID"
+    segments = plan.get("segments")
+    return (segments if isinstance(segments, list) else None), "goal_flags"
+
+
+def cmd_calibration_check(args: argparse.Namespace) -> int:
+    """Report motion-calibration completeness for stop_correct_go (local-only).
+
+    Opens no serial port and uploads no firmware. Resolves the on-disk
+    calibration, determines which primitives the current plan requires (forward
+    always; backward when a multi-lane serpentine has return lanes), and reports
+    whether stop_correct_go can run before motion is ever attempted.
+    """
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cal = resolve_calibration(args)
+    segments, plan_source = _calibration_check_segments(args, cal)
+    completeness = calibration.calibration_completeness(cal, segments=segments)
+    detail = _calibration_status_detail(cal)
+    missing = list(completeness["missing_required"])
+    can_run = bool(completeness["can_run_stop_correct_go"])
+    summary = {
+        "mode": "calibration-check",
+        "success": can_run,
+        "reason": "CALIBRATION_COMPLETE" if can_run else "CALIBRATION_INCOMPLETE",
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+        "calibration_completeness": completeness,
+        "calibration_detail": detail,
+        "required_for_current_plan": list(completeness["required_for_current_plan"]),
+        "missing_required_calibration": missing,
+        "plan_requires_backward": bool(completeness["plan_requires_backward"]),
+        "can_run_stop_correct_go": can_run,
+        "plan_source": plan_source,
+        "plan_evaluated": plan_source in {"plan_dir", "goal_flags"},
+        "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "fallback_to_repeated_pulses": bool(cal.get("fallback_to_repeated_pulses", True)),
+        "next_recommended_action": (
+            "stop_correct_go is ready; run preview then run --path-control-mode stop_correct_go."
+            if can_run
+            else (
+                "Calibrate the missing motion primitives "
+                f"({', '.join(missing) or 'none'}) with tune-motion before stop_correct_go."
+            )
+        ),
+        "ready_for_full_path_following": False,
+    }
+    _write_json(out_dir / "calibration_check_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Calibration Check")
+    print(
+        "calibration-check: "
+        f"can_run_stop_correct_go={str(can_run).lower()} "
+        f"required={completeness['required_for_current_plan']} "
+        f"missing={missing} plan_source={plan_source} -> {out_dir}"
+    )
+    print("ready_for_full_path_following=false")
+    return 0 if can_run else 1
+
+
+def _calibration_incomplete_summary(
+    args: argparse.Namespace,
+    plan: dict[str, object],
+    cal: dict[str, object],
+    completeness: dict[str, object],
+    plan_dir_used: bool,
+) -> dict[str, object]:
+    """Guarded summary written when stop_correct_go is requested without the
+    motion calibration its plan requires (no motion is attempted)."""
+    missing = list(completeness["missing_required"])
+    return {
+        "mode": getattr(args, "mode", "run"),
+        "success": False,
+        "aborted": True,
+        "reason": "CALIBRATION_INCOMPLETE",
+        "abort_reason": "CALIBRATION_INCOMPLETE",
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+        "start_source": "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit")),
+        "path_control_mode": getattr(args, "path_control_mode", "stop_correct_go"),
+        "calibration_completeness": completeness,
+        "missing_required_calibration": missing,
+        "next_recommended_action": (
+            "Run calibration-check for the full report, then calibrate the missing "
+            f"motion primitives ({', '.join(missing) or 'none'}) before stop_correct_go."
+        ),
+        "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "ready_for_full_path_following": False,
+    }
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
     plan_dir_used = bool(getattr(args, "plan_dir", None))
@@ -4220,6 +4370,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"-> {out_dir}/plan.json (no serial opened)"
         )
         return 0
+    if args.path_control_mode == "stop_correct_go":
+        completeness = calibration.calibration_completeness(cal, segments=plan["segments"])
+        if not completeness["can_run_stop_correct_go"]:
+            abort_summary = _calibration_incomplete_summary(
+                args, plan, cal, completeness, plan_dir_used
+            )
+            _write_json(out_dir / "run_summary.json", abort_summary)
+            write_summary_files(out_dir, abort_summary, title="Physical Path Planner Run")
+            print(
+                "run: aborted before motion, reason=CALIBRATION_INCOMPLETE "
+                f"missing={completeness['missing_required']} -> {out_dir}"
+            )
+            return 2
     if not ensure_port(args):
         return 2
 
@@ -4242,51 +4405,72 @@ def cmd_run(args: argparse.Namespace) -> int:
             _write_raw_log(out_dir / "run_serial.log", align_raw_lines)
             print(f"run: aborted before motion, reason={abort_summary['reason']} -> {out_dir}")
             return 2
-        rows, raw_lines, abort_reason = controller.run_controller(
-            handle,
-            segments=plan["segments"],  # type: ignore[arg-type]
-            resolved_calibration=cal,
-            start_lat=float(plan["start_lat"]),
-            start_lon=float(plan["start_lon"]),
-            start_yaw_deg=align["aligned_yaw_deg"],
-            goal_lat=float(plan["goal_lat"]),
-            goal_lon=float(plan["goal_lon"]),
-            event_timeout_s=args.event_timeout_s,
-            heartbeat_timeout_s=args.heartbeat_timeout_s,
-            rc_neutral_wait_s=args.rc_neutral_wait_s,
-            gps_degradation_policy=args.gps_degradation_policy,
-            manual_override_mode=args.manual_override_mode,
-            left_fixed_pulses=args.left_fixed_pulses,
-            right_fixed_pulses=args.right_fixed_pulses,
-            straight_motion_mode=args.straight_motion_mode,
-            live_update_hz=args.live_update_hz,
-            live_ttl_ms=args.live_ttl_ms,
-            live_chunk_ms=args.live_chunk_ms,
-            max_segment_chunks=args.max_segment_chunks,
-            live_max_ms=args.max_ms,
-            imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
-            cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
-            path_control_mode=args.path_control_mode,
-            k_heading=args.k_heading,
-            k_cross_track=args.k_cross_track,
-            max_correction_b=args.max_correction_b,
-            gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
-        )
+        if args.path_control_mode == "stop_correct_go":
+            rows, raw_lines, abort_reason = _run_stop_correct_go_from_args(
+                handle, args, plan, cal, start_yaw_deg=align["aligned_yaw_deg"]
+            )
+        else:
+            rows, raw_lines, abort_reason = controller.run_controller(
+                handle,
+                segments=plan["segments"],  # type: ignore[arg-type]
+                resolved_calibration=cal,
+                start_lat=float(plan["start_lat"]),
+                start_lon=float(plan["start_lon"]),
+                start_yaw_deg=align["aligned_yaw_deg"],
+                goal_lat=float(plan["goal_lat"]),
+                goal_lon=float(plan["goal_lon"]),
+                event_timeout_s=args.event_timeout_s,
+                heartbeat_timeout_s=args.heartbeat_timeout_s,
+                rc_neutral_wait_s=args.rc_neutral_wait_s,
+                gps_degradation_policy=args.gps_degradation_policy,
+                manual_override_mode=args.manual_override_mode,
+                left_fixed_pulses=args.left_fixed_pulses,
+                right_fixed_pulses=args.right_fixed_pulses,
+                straight_motion_mode=args.straight_motion_mode,
+                live_update_hz=args.live_update_hz,
+                live_ttl_ms=args.live_ttl_ms,
+                live_chunk_ms=args.live_chunk_ms,
+                max_segment_chunks=args.max_segment_chunks,
+                live_max_ms=args.max_ms,
+                imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
+                cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
+                path_control_mode=args.path_control_mode,
+                k_heading=args.k_heading,
+                k_cross_track=args.k_cross_track,
+                max_correction_b=args.max_correction_b,
+                gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
+            )
     finally:
         handle.close()
 
     raw_lines = list(align_raw_lines) + list(raw_lines)
 
-    summary = controller.build_controller_summary(
-        rows,
-        start_lat=float(plan["start_lat"]),
-        start_lon=float(plan["start_lon"]),
-        goal_lat=float(plan["goal_lat"]),
-        goal_lon=float(plan["goal_lon"]),
-        goal_distance_m=float(plan["goal_distance_m"]),
-        fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
-        abort_reason=abort_reason,
-    )
+    if args.path_control_mode == "stop_correct_go":
+        summary = controller.build_stop_correct_go_summary(
+            rows,
+            start_lat=float(plan["start_lat"]),
+            start_lon=float(plan["start_lon"]),
+            goal_lat=float(plan["goal_lat"]),
+            goal_lon=float(plan["goal_lon"]),
+            goal_distance_m=float(plan["goal_distance_m"]),
+            fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
+            sensor_trust_mode=args.sensor_trust_mode,
+            allow_calibration_fallback=telemetry._parse_bool(
+                args.allow_calibration_fallback, default=True
+            ),
+            abort_reason=abort_reason,
+        )
+    else:
+        summary = controller.build_controller_summary(
+            rows,
+            start_lat=float(plan["start_lat"]),
+            start_lon=float(plan["start_lon"]),
+            goal_lat=float(plan["goal_lat"]),
+            goal_lon=float(plan["goal_lon"]),
+            goal_distance_m=float(plan["goal_distance_m"]),
+            fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
+            abort_reason=abort_reason,
+        )
     summary = {
         **summary,
         "mode": args.mode,
@@ -4350,6 +4534,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     _write_rows_csv(out_dir / "run_rows.csv", rows)
     _write_raw_log(out_dir / "run_serial.log", raw_lines)
     _write_closed_loop_artifacts(out_dir, rows, raw_lines)
+    if args.path_control_mode == "stop_correct_go":
+        _write_stop_correct_go_artifacts(out_dir, rows)
     print(
         f"run: abort_reason={abort_reason}, pulses={summary['pulse_count']}, "
         f"valid={summary['valid_pulse_count']} -> {out_dir}"
@@ -4388,6 +4574,108 @@ def _write_closed_loop_artifacts(
     ]
     _write_rows_csv(out_dir / "planned_vs_actual.csv", planned_vs_actual)
     _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+
+
+def _run_stop_correct_go_from_args(
+    handle: object,
+    args: argparse.Namespace,
+    plan: dict[str, object],
+    cal: dict[str, object],
+    *,
+    start_yaw_deg: float | None,
+    start_lat: float | None = None,
+    start_lon: float | None = None,
+    require_auto_switch: bool = False,
+) -> tuple[list[dict[str, object]], list[str], str]:
+    """Map CLI args onto :func:`controller.run_stop_correct_go`."""
+    s_lat = float(plan["start_lat"]) if start_lat is None else float(start_lat)
+    s_lon = float(plan["start_lon"]) if start_lon is None else float(start_lon)
+    return controller.run_stop_correct_go(
+        handle,
+        segments=plan["segments"],  # type: ignore[arg-type]
+        resolved_calibration=cal,
+        start_lat=s_lat,
+        start_lon=s_lon,
+        start_yaw_deg=start_yaw_deg,
+        goal_lat=float(plan["goal_lat"]),
+        goal_lon=float(plan["goal_lon"]),
+        move_chunk_ms=args.move_chunk_ms,
+        settle_after_move_ms=args.settle_after_move_ms,
+        telemetry_stabilize_ms=args.telemetry_stabilize_ms,
+        heading_correction_threshold_deg=args.heading_correction_threshold_deg,
+        heading_correction_tolerance_deg=args.heading_correction_tolerance_deg,
+        cross_track_correction_threshold_m=args.cross_track_correction_threshold_m,
+        heading_correction_b_left=args.heading_correction_b_left,
+        heading_correction_b_right=args.heading_correction_b_right,
+        max_heading_correction_ms=args.max_heading_correction_ms,
+        sensor_trust_mode=args.sensor_trust_mode,
+        allow_calibration_fallback=telemetry._parse_bool(
+            args.allow_calibration_fallback, default=True
+        ),
+        event_timeout_s=args.event_timeout_s,
+        heartbeat_timeout_s=args.heartbeat_timeout_s,
+        rc_neutral_wait_s=args.rc_neutral_wait_s,
+        gps_degradation_policy=args.gps_degradation_policy,
+        manual_override_mode=args.manual_override_mode,
+        left_fixed_pulses=args.left_fixed_pulses,
+        right_fixed_pulses=args.right_fixed_pulses,
+        live_update_hz=args.live_update_hz,
+        live_ttl_ms=args.live_ttl_ms,
+        max_segment_chunks=args.max_segment_chunks,
+        k_cross_track=args.k_cross_track,
+        max_correction_b=args.max_correction_b,
+        gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
+        require_auto_switch=require_auto_switch,
+    )
+
+
+def _write_stop_correct_go_artifacts(
+    out_dir: Path, rows: Sequence[dict[str, object]]
+) -> None:
+    """Write the stop_correct_go cycle trace and the heading-correction trace."""
+    cycle_rows = [row for row in rows if row.get("row_type") == "pulse"]
+    trace = [
+        {
+            "segment_index": row.get("segment_index"),
+            "chunk_index": row.get("chunk_index"),
+            "phase": row.get("phase"),
+            "gps_valid": row.get("gps_valid"),
+            "imu_valid": row.get("imu_valid"),
+            "current_x_m": row.get("current_x_m"),
+            "current_y_m": row.get("current_y_m"),
+            "target_heading_deg": row.get("target_heading_deg"),
+            "imu_yaw_deg": row.get("imu_yaw_deg"),
+            "heading_error_deg": row.get("heading_error_deg"),
+            "cross_track_error_m": row.get("cross_track_error_m"),
+            "along_track_progress_m": row.get("along_track_progress_m"),
+            "remaining_distance_m": row.get("remaining_distance_m"),
+            "move_a_cmd": row.get("move_a_cmd"),
+            "move_b_cmd": row.get("move_b_cmd"),
+            "correction_b_cmd": row.get("correction_b_cmd"),
+            "correction_duration_ms": row.get("correction_duration_ms"),
+            "correction_success": row.get("correction_success"),
+            "sensor_source": row.get("sensor_source"),
+            "fallback_used": row.get("fallback_used"),
+            "final_zero": row.get("final_zero"),
+        }
+        for row in cycle_rows
+    ]
+    _write_rows_csv(out_dir / "stop_correct_go_trace.csv", trace)
+    corrections = [
+        {
+            "segment_index": row.get("segment_index"),
+            "chunk_index": row.get("chunk_index"),
+            "imu_yaw_deg": row.get("imu_yaw_deg"),
+            "heading_error_deg": row.get("heading_error_deg"),
+            "correction_b_cmd": row.get("correction_b_cmd"),
+            "correction_duration_ms": row.get("correction_duration_ms"),
+            "correction_success": row.get("correction_success"),
+            "post_correction_heading_error_deg": row.get("post_correction_heading_error_deg"),
+        }
+        for row in cycle_rows
+        if int(telemetry._optional_float(row.get("correction_duration_ms")) or 0) > 0
+    ]
+    _write_rows_csv(out_dir / "heading_correction_trace.csv", corrections)
 
 
 def _write_preview_outputs(
@@ -4782,6 +5070,27 @@ def _auto_relative_run_on_handle(
 
     # 4. Align to the first lane heading before path execution (if requested).
     assert plan is not None
+    if args.path_control_mode == "stop_correct_go":
+        completeness = calibration.calibration_completeness(cal, segments=plan["segments"])
+        if not completeness["can_run_stop_correct_go"]:
+            summary = _auto_relative_summary(
+                args, cal, plan, field_config,
+                controller_summary=None, start_lat=start_lat, start_lon=start_lon,
+                start_source=start_source, auto_switch_detected=(start_reason == "AUTO_SWITCH"),
+                execution_started=False, stop_reason="CALIBRATION_INCOMPLETE",
+                reason="CALIBRATION_INCOMPLETE",
+            )
+            summary["calibration_completeness"] = completeness
+            summary["missing_required_calibration"] = list(completeness["missing_required"])
+            summary["auto_start_reason"] = start_reason
+            _write_json(out_dir / "run_summary.json", summary)
+            write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
+            _write_closed_loop_artifacts(out_dir, [], raw_lines)
+            print(
+                "auto-relative-run: aborted before motion, reason=CALIBRATION_INCOMPLETE "
+                f"missing={completeness['missing_required']} -> {out_dir}"
+            )
+            return 2
     align = _run_initial_alignment(
         handle,
         args,
@@ -4807,48 +5116,72 @@ def _auto_relative_run_on_handle(
         return 2
 
     # 5/6. Execute closed-loop; require_auto_switch stops safely on a MANUAL flip.
-    rows_exec, raw_exec, abort_reason = controller.run_controller(
-        handle,
-        segments=plan["segments"],  # type: ignore[arg-type]
-        resolved_calibration=cal,
-        start_lat=float(start_lat),
-        start_lon=float(start_lon),
-        start_yaw_deg=align["aligned_yaw_deg"],
-        goal_lat=float(plan["goal_lat"]),
-        goal_lon=float(plan["goal_lon"]),
-        event_timeout_s=args.event_timeout_s,
-        heartbeat_timeout_s=args.heartbeat_timeout_s,
-        rc_neutral_wait_s=args.rc_neutral_wait_s,
-        gps_degradation_policy=args.gps_degradation_policy,
-        manual_override_mode=args.manual_override_mode,
-        left_fixed_pulses=args.left_fixed_pulses,
-        right_fixed_pulses=args.right_fixed_pulses,
-        straight_motion_mode=args.straight_motion_mode,
-        live_update_hz=args.live_update_hz,
-        live_ttl_ms=args.live_ttl_ms,
-        live_chunk_ms=args.live_chunk_ms,
-        max_segment_chunks=args.max_segment_chunks,
-        live_max_ms=args.max_ms,
-        imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
-        cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
-        path_control_mode=args.path_control_mode,
-        k_heading=args.k_heading,
-        k_cross_track=args.k_cross_track,
-        max_correction_b=args.max_correction_b,
-        gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
-        require_auto_switch=True,
-    )
+    if args.path_control_mode == "stop_correct_go":
+        rows_exec, raw_exec, abort_reason = _run_stop_correct_go_from_args(
+            handle, args, plan, cal,
+            start_yaw_deg=align["aligned_yaw_deg"],
+            start_lat=float(start_lat), start_lon=float(start_lon),
+            require_auto_switch=True,
+        )
+    else:
+        rows_exec, raw_exec, abort_reason = controller.run_controller(
+            handle,
+            segments=plan["segments"],  # type: ignore[arg-type]
+            resolved_calibration=cal,
+            start_lat=float(start_lat),
+            start_lon=float(start_lon),
+            start_yaw_deg=align["aligned_yaw_deg"],
+            goal_lat=float(plan["goal_lat"]),
+            goal_lon=float(plan["goal_lon"]),
+            event_timeout_s=args.event_timeout_s,
+            heartbeat_timeout_s=args.heartbeat_timeout_s,
+            rc_neutral_wait_s=args.rc_neutral_wait_s,
+            gps_degradation_policy=args.gps_degradation_policy,
+            manual_override_mode=args.manual_override_mode,
+            left_fixed_pulses=args.left_fixed_pulses,
+            right_fixed_pulses=args.right_fixed_pulses,
+            straight_motion_mode=args.straight_motion_mode,
+            live_update_hz=args.live_update_hz,
+            live_ttl_ms=args.live_ttl_ms,
+            live_chunk_ms=args.live_chunk_ms,
+            max_segment_chunks=args.max_segment_chunks,
+            live_max_ms=args.max_ms,
+            imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
+            cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
+            path_control_mode=args.path_control_mode,
+            k_heading=args.k_heading,
+            k_cross_track=args.k_cross_track,
+            max_correction_b=args.max_correction_b,
+            gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
+            require_auto_switch=True,
+        )
     raw_lines.extend(raw_exec)
-    controller_summary = controller.build_controller_summary(
-        rows_exec,
-        start_lat=float(start_lat),
-        start_lon=float(start_lon),
-        goal_lat=float(plan["goal_lat"]),
-        goal_lon=float(plan["goal_lon"]),
-        goal_distance_m=float(plan["goal_distance_m"]),
-        fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
-        abort_reason=abort_reason,
-    )
+    if args.path_control_mode == "stop_correct_go":
+        controller_summary = controller.build_stop_correct_go_summary(
+            rows_exec,
+            start_lat=float(start_lat),
+            start_lon=float(start_lon),
+            goal_lat=float(plan["goal_lat"]),
+            goal_lon=float(plan["goal_lon"]),
+            goal_distance_m=float(plan["goal_distance_m"]),
+            fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
+            sensor_trust_mode=args.sensor_trust_mode,
+            allow_calibration_fallback=telemetry._parse_bool(
+                args.allow_calibration_fallback, default=True
+            ),
+            abort_reason=abort_reason,
+        )
+    else:
+        controller_summary = controller.build_controller_summary(
+            rows_exec,
+            start_lat=float(start_lat),
+            start_lon=float(start_lon),
+            goal_lat=float(plan["goal_lat"]),
+            goal_lon=float(plan["goal_lon"]),
+            goal_distance_m=float(plan["goal_distance_m"]),
+            fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
+            abort_reason=abort_reason,
+        )
     stop_reason = "COMPLETED" if abort_reason == "NONE" else str(abort_reason)
     summary = _auto_relative_summary(
         args, cal, plan, field_config,
@@ -4863,6 +5196,8 @@ def _auto_relative_run_on_handle(
     _write_json(out_dir / "run_summary.json", summary)
     write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
     _write_closed_loop_artifacts(out_dir, rows_exec, raw_lines)
+    if args.path_control_mode == "stop_correct_go":
+        _write_stop_correct_go_artifacts(out_dir, rows_exec)
     print(
         f"auto-relative-run: started={start_reason} stop_reason={stop_reason} "
         f"chunks={controller_summary.get('chunk_count', 0)} -> {out_dir}"
@@ -5010,7 +5345,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,reset-motion-calibration,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
+        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,reset-motion-calibration,calibration-check,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
     )
 
     gps_p = sub.add_parser("gps-wait", help="wait for usable GPS start fix; no motion")
@@ -5310,6 +5645,16 @@ def build_parser() -> argparse.ArgumentParser:
     reset_cal_p.add_argument("--out-dir", default="outputs/physical_path_planning/reset_motion_calibration")
     reset_cal_p.set_defaults(handler=cmd_reset_motion_calibration)
 
+    cal_check_p = sub.add_parser(
+        "calibration-check",
+        help="report motion-calibration completeness for stop_correct_go; no motion",
+    )
+    _add_goal_arguments(cal_check_p, require_start=False)
+    _add_calibration_arguments(cal_check_p)
+    cal_check_p.add_argument("--plan-dir", default=None)
+    cal_check_p.add_argument("--out-dir", default="outputs/physical_path_planning/calibration_check")
+    cal_check_p.set_defaults(handler=cmd_calibration_check)
+
     def add_guarded_pulse_ready_parser(name: str) -> None:
         guarded_p = sub.add_parser(
             name,
@@ -5383,7 +5728,7 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--straight-motion-mode", choices=["continuous", "pulse"], default="continuous")
         run_p.add_argument(
             "--path-control-mode",
-            choices=["open_loop_chunks", "imu_heading", "gps_imu_closed_loop"],
+            choices=["open_loop_chunks", "imu_heading", "gps_imu_closed_loop", "stop_correct_go"],
             default="gps_imu_closed_loop",
         )
         run_p.add_argument("--live-update-hz", type=float, default=8.0)
@@ -5397,6 +5742,60 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--k-heading", type=float, default=0.006)
         run_p.add_argument("--k-cross-track", type=float, default=0.20)
         run_p.add_argument("--max-correction-b", type=float, default=0.08)
+        # stop_correct_go: discrete move -> stop -> measure -> correct cycle.
+        run_p.add_argument(
+            "--move-chunk-ms", type=int, default=controller.DEFAULT_MOVE_CHUNK_MS,
+            help="stop_correct_go: forward chunk duration per move-measure-correct cycle",
+        )
+        run_p.add_argument(
+            "--settle-after-move-ms", type=int, default=controller.DEFAULT_SETTLE_AFTER_MOVE_MS,
+            help="stop_correct_go: pause after STOP before reading a settled pose",
+        )
+        run_p.add_argument(
+            "--telemetry-stabilize-ms", type=int, default=controller.DEFAULT_TELEMETRY_STABILIZE_MS,
+            help="stop_correct_go: window of heartbeats averaged for the settled pose",
+        )
+        run_p.add_argument(
+            "--heading-correction-threshold-deg", type=float,
+            default=controller.DEFAULT_HEADING_CORRECTION_THRESHOLD_DEG,
+            help="stop_correct_go: |heading error| above this triggers an IMU turn-in-place",
+        )
+        run_p.add_argument(
+            "--heading-correction-tolerance-deg", type=float,
+            default=controller.DEFAULT_HEADING_CORRECTION_TOLERANCE_DEG,
+            help="stop_correct_go: stop the correction turn once within this tolerance",
+        )
+        run_p.add_argument(
+            "--cross-track-correction-threshold-m", type=float,
+            default=controller.DEFAULT_CROSS_TRACK_CORRECTION_THRESHOLD_M,
+            help="stop_correct_go: |cross-track| above this trims the next chunk's B",
+        )
+        run_p.add_argument(
+            "--heading-correction-b-left", type=float,
+            default=controller.DEFAULT_HEADING_CORRECTION_B_LEFT,
+            help="stop_correct_go: B command for a left (B>0) correction turn",
+        )
+        run_p.add_argument(
+            "--heading-correction-b-right", type=float,
+            default=controller.DEFAULT_HEADING_CORRECTION_B_RIGHT,
+            help="stop_correct_go: B command for a right (B<0) correction turn",
+        )
+        run_p.add_argument(
+            "--max-heading-correction-ms", type=int,
+            default=controller.DEFAULT_MAX_HEADING_CORRECTION_MS,
+            help="stop_correct_go: cap on a single correction turn's duration",
+        )
+        run_p.add_argument(
+            "--sensor-trust-mode",
+            choices=sorted(controller.SENSOR_TRUST_MODES),
+            default=controller.DEFAULT_SENSOR_TRUST_MODE,
+            help="stop_correct_go: imu_gps_first uses live sensors first; "
+            "calibration_fallback tolerates sensor loss via dead reckoning",
+        )
+        run_p.add_argument(
+            "--allow-calibration-fallback", choices=["true", "false"], default="true",
+            help="stop_correct_go: continue dead-reckoned when both GPS and IMU drop out",
+        )
         run_p.add_argument("--out-dir", default="outputs/physical_path_planning/run")
         run_p.add_argument("--print-field-config", choices=["true", "false"], default="false")
         run_p.add_argument("--allow-wide-field", choices=["true", "false"], default="false")

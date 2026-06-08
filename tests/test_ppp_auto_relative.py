@@ -190,6 +190,31 @@ def test_auto_relative_run_auto_switch_starts_execution(
         assert column in trace
 
 
+def test_auto_relative_run_stop_correct_go_aborts_before_motion_when_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "DEFAULT_GPS_CACHE", tmp_path / "cache" / "latest_start.json")
+
+    def _no_align(*_a: object, **_k: object) -> dict[str, object]:
+        raise AssertionError("alignment (motion) must not run when calibration is incomplete")
+
+    monkeypatch.setattr(cli, "_run_initial_alignment", _no_align)
+    # Default fallback calibration leaves forward as repeated-pulses fallback.
+    cal = dict(geometry.FALLBACK_RESOLVED_CALIBRATION)
+    handle = FakeSerial([_hb(), _hb()])  # GPS wait, then AUTO; gate fires before alignment
+    args = _run_args(tmp_path, path_control_mode="stop_correct_go", initial_heading_align="none")
+    rc = cli._auto_relative_run_on_handle(
+        handle, args, cal, tmp_path,
+        plan=None, field_config=None, plan_dir_used=False, input_fn=lambda: "",
+    )
+    assert rc == 2
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["reason"] == "CALIBRATION_INCOMPLETE"
+    assert summary["execution_started"] is False
+    assert summary["missing_required_calibration"] == ["forward"]
+    assert summary["ready_for_full_path_following"] is False
+
+
 # --- run: MANUAL prevents execution -------------------------------------------
 
 
