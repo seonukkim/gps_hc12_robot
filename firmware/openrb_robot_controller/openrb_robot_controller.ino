@@ -231,6 +231,30 @@
 #define USB_PULSE_TEST_MAX_MS 1000
 #endif
 
+#ifndef USB_DRIVE_LIVE_ENABLE
+#define USB_DRIVE_LIVE_ENABLE 0
+#endif
+
+#ifndef USB_DRIVE_LIVE_IGNORE_RC_INPUT
+#define USB_DRIVE_LIVE_IGNORE_RC_INPUT 0
+#endif
+
+#ifndef USB_DRIVE_LIVE_MAX_ABS_A
+#define USB_DRIVE_LIVE_MAX_ABS_A 0.35
+#endif
+
+#ifndef USB_DRIVE_LIVE_MAX_ABS_B
+#define USB_DRIVE_LIVE_MAX_ABS_B 0.35
+#endif
+
+#ifndef USB_DRIVE_LIVE_MAX_DURATION_MS
+#define USB_DRIVE_LIVE_MAX_DURATION_MS 3000
+#endif
+
+#ifndef USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS
+#define USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS 350
+#endif
+
 #ifndef STATION_HW_MANUAL_ENABLE
 #define STATION_HW_MANUAL_ENABLE 0
 #endif
@@ -299,6 +323,19 @@
 #define STAGE20_MAX_MS USB_PULSE_TEST_MAX_MS
 #undef STATION_MANUAL_IGNORE_RC_INPUT
 #define STATION_MANUAL_IGNORE_RC_INPUT USB_PULSE_TEST_IGNORE_RC_INPUT
+#endif
+
+#if USB_DRIVE_LIVE_ENABLE
+#undef STAGE20_PHYSICAL_AB_GUARDED_CRAWL
+#define STAGE20_PHYSICAL_AB_GUARDED_CRAWL 1
+#undef STAGE20_MAX_ABS_A
+#define STAGE20_MAX_ABS_A USB_DRIVE_LIVE_MAX_ABS_A
+#undef STAGE20_MAX_ABS_B
+#define STAGE20_MAX_ABS_B USB_DRIVE_LIVE_MAX_ABS_B
+#undef STAGE20_MAX_MS
+#define STAGE20_MAX_MS USB_DRIVE_LIVE_MAX_DURATION_MS
+#undef STATION_MANUAL_IGNORE_RC_INPUT
+#define STATION_MANUAL_IGNORE_RC_INPUT USB_DRIVE_LIVE_IGNORE_RC_INPUT
 #endif
 
 #if STAGE15_GUARDED_CRAWL_TEST && \
@@ -546,6 +583,12 @@ constexpr float STAGE18_MAX_CMD_VALUE = STAGE18_MAX_CMD;
 constexpr uint32_t STAGE18_MAX_MS_VALUE = STAGE18_MAX_MS;
 constexpr bool STATION_DRIVE_GUARDED_ENABLED = STATION_DRIVE_GUARDED != 0;
 constexpr bool USB_PULSE_TEST_GUARDED_ENABLED = USB_PULSE_TEST_GUARDED != 0;
+constexpr bool USB_DRIVE_LIVE_ENABLED = USB_DRIVE_LIVE_ENABLE != 0;
+constexpr bool USB_DRIVE_LIVE_IGNORE_RC_INPUT_ENABLED = USB_DRIVE_LIVE_IGNORE_RC_INPUT != 0;
+constexpr float USB_DRIVE_LIVE_MAX_ABS_A_VALUE = USB_DRIVE_LIVE_MAX_ABS_A;
+constexpr float USB_DRIVE_LIVE_MAX_ABS_B_VALUE = USB_DRIVE_LIVE_MAX_ABS_B;
+constexpr uint32_t USB_DRIVE_LIVE_MAX_DURATION_MS_VALUE = USB_DRIVE_LIVE_MAX_DURATION_MS;
+constexpr uint32_t USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS_VALUE = USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS;
 constexpr bool STATION_HW_MANUAL_ENABLED = STATION_HW_MANUAL_ENABLE != 0;
 constexpr bool STATION_HW_MANUAL_A_B_MAPPING_ENABLED =
     STATION_HW_MANUAL_ENABLE != 0 && STATION_HW_MANUAL_A_B_MAPPING != 0;
@@ -709,6 +752,7 @@ float lastCalibratedRightCmd = 0.0f;
 float lastOutputLeftPinCmd = 0.0f;
 float lastOutputRightPinCmd = 0.0f;
 bool lastMixerBypassedForMotorPulse = false;
+bool motorEscWriteInitialized = false;
 
 #if FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT
 bool singleWaypointAutoTimingActiveFlag = false;
@@ -790,6 +834,15 @@ bool stage16LatchedStopFlag = false;
 bool stage16ArmedFlag = false;
 uint32_t stage16LastCmdMs = 0;
 uint32_t stage16LastHeartbeatMs = 0;
+bool usbDriveLiveActiveFlag = false;
+int32_t usbDriveLiveSeq = -1;
+float usbDriveLiveACmd = 0.0f;
+float usbDriveLiveBCmd = 0.0f;
+uint32_t usbDriveLiveStartMs = 0;
+uint32_t usbDriveLiveLastUpdateMs = 0;
+uint32_t usbDriveLiveDurationMs = 0;
+uint32_t usbDriveLiveTtlMs = USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS_VALUE;
+const char *usbDriveLiveRejectReason = "NONE";
 #endif
 
 void printImuDiagFields();
@@ -842,9 +895,48 @@ void writeFrame(const char *type, uint32_t seq, const String &payload) {
 #endif
 }
 
-void motorStop() {
+bool motorOutputZeroState() {
+  return (lastLogicalLeftCmd < 0.0f ? -lastLogicalLeftCmd : lastLogicalLeftCmd) <= 0.0001f &&
+         (lastLogicalRightCmd < 0.0f ? -lastLogicalRightCmd : lastLogicalRightCmd) <= 0.0001f &&
+         (lastLeftOutputCmd < 0.0f ? -lastLeftOutputCmd : lastLeftOutputCmd) <= 0.0001f &&
+         (lastRightOutputCmd < 0.0f ? -lastRightOutputCmd : lastRightOutputCmd) <= 0.0001f &&
+         (lastOutputLeftPinCmd < 0.0f ? -lastOutputLeftPinCmd : lastOutputLeftPinCmd) <= 0.0001f &&
+         (lastOutputRightPinCmd < 0.0f ? -lastOutputRightPinCmd : lastOutputRightPinCmd) <= 0.0001f;
+}
+
+void printMotorTrace(const char *source, float requestedACmd, float requestedBCmd, bool motorWriteCalled) {
+  Serial.print(F("MOTOR_TRACE timestamp_ms="));
+  Serial.print(millis());
+  Serial.print(F(" source="));
+  Serial.print(source);
+  Serial.print(F(" requested_a_cmd="));
+  Serial.print(requestedACmd, 3);
+  Serial.print(F(" requested_b_cmd="));
+  Serial.print(requestedBCmd, 3);
+  Serial.print(F(" physical_a_cmd="));
+  Serial.print(lastOutputLeftPinCmd, 3);
+  Serial.print(F(" physical_b_cmd="));
+  Serial.print(lastOutputRightPinCmd, 3);
+  Serial.print(F(" final_left_cmd="));
+  Serial.print(lastLeftOutputCmd, 3);
+  Serial.print(F(" final_right_cmd="));
+  Serial.print(lastRightOutputCmd, 3);
+  Serial.print(F(" output_left_pin_cmd="));
+  Serial.print(lastOutputLeftPinCmd, 3);
+  Serial.print(F(" output_right_pin_cmd="));
+  Serial.print(lastOutputRightPinCmd, 3);
+  Serial.print(F(" motor_write_called="));
+  Serial.print(motorWriteCalled ? F("true") : F("false"));
+  Serial.println();
+}
+
+void motorStopWithSource(const char *source) {
+  if (motorEscWriteInitialized && motorOutputZeroState()) {
+    return;
+  }
   escLeft.writeMicroseconds(ESC_NEUTRAL_US);
   escRight.writeMicroseconds(ESC_NEUTRAL_US);
+  motorEscWriteInitialized = true;
   lastLogicalLeftCmd = 0.0f;
   lastLogicalRightCmd = 0.0f;
   lastRawLeftCmd = 0.0f;
@@ -856,6 +948,11 @@ void motorStop() {
   lastOutputLeftPinCmd = 0.0f;
   lastOutputRightPinCmd = 0.0f;
   lastMixerBypassedForMotorPulse = false;
+  printMotorTrace(source, 0.0f, 0.0f, true);
+}
+
+void motorStop() {
+  motorStopWithSource("STOP");
 }
 
 void clearAutoCommand() {
@@ -1325,7 +1422,8 @@ float applyMotorCalibration(float raw, float sign, float scale, float minCmd) {
   return clampUnit(calibrated);
 }
 
-void writeEscOutputPins(float physicalACmd, float physicalBCmd) {
+void writeEscOutputPinsWithTrace(float physicalACmd, float physicalBCmd, const char *source,
+                                 float requestedACmd, float requestedBCmd) {
   lastOutputLeftPinCmd = physicalACmd;
   lastOutputRightPinCmd = physicalBCmd;
 
@@ -1333,6 +1431,12 @@ void writeEscOutputPins(float physicalACmd, float physicalBCmd) {
   int rightPulse = ESC_NEUTRAL_US + static_cast<int>(physicalBCmd * ESC_RANGE_US);
   escLeft.writeMicroseconds(clampPulse(leftPulse));
   escRight.writeMicroseconds(clampPulse(rightPulse));
+  motorEscWriteInitialized = true;
+  printMotorTrace(source, requestedACmd, requestedBCmd, true);
+}
+
+void writeEscOutputPins(float physicalACmd, float physicalBCmd) {
+  writeEscOutputPinsWithTrace(physicalACmd, physicalBCmd, "PHYSICAL_OUTPUT", physicalACmd, physicalBCmd);
 }
 
 void applyDriveCommandInternal(float logicalLeft, float logicalRight, bool motorPulseDirectWheelMode) {
@@ -1371,7 +1475,7 @@ void applyDriveCommandInternal(float logicalLeft, float logicalRight, bool motor
   float physicalACmd = clampUnit((outputLeft + outputRight) * 0.5f);
   float physicalBCmd = clampUnit((outputRight - outputLeft) * 0.5f);
 
-  writeEscOutputPins(physicalACmd, physicalBCmd);
+  writeEscOutputPinsWithTrace(physicalACmd, physicalBCmd, "WHEEL_MIXER", physicalACmd, physicalBCmd);
 }
 
 void applyDriveCommand(float logicalLeft, float logicalRight) {
@@ -1382,7 +1486,7 @@ void applyMotorPulseDirectWheelCommand(float logicalLeft, float logicalRight) {
   applyDriveCommandInternal(logicalLeft, logicalRight, true);
 }
 
-void applyPhysicalABManualEquivalentCommand(float physicalACmd, float physicalBCmd) {
+void applyPhysicalABManualEquivalentCommandWithSource(float physicalACmd, float physicalBCmd, const char *source) {
   float a = clampUnit(physicalACmd);
   float b = clampUnit(physicalBCmd);
   float logicalLeft = clampUnit(a - b);
@@ -1396,7 +1500,11 @@ void applyPhysicalABManualEquivalentCommand(float physicalACmd, float physicalBC
   lastLeftOutputCmd = logicalLeft;
   lastRightOutputCmd = logicalRight;
   lastMixerBypassedForMotorPulse = true;
-  writeEscOutputPins(a, b);
+  writeEscOutputPinsWithTrace(a, b, source, a, b);
+}
+
+void applyPhysicalABManualEquivalentCommand(float physicalACmd, float physicalBCmd) {
+  applyPhysicalABManualEquivalentCommandWithSource(physicalACmd, physicalBCmd, "PHYSICAL_AB");
 }
 
 void applyAutoCommand(float left, float right) {
@@ -1735,7 +1843,8 @@ bool stage16RcInputRequiredForStationPulse() {
 
 void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
   uint32_t now = millis();
-  if (USB_PULSE_TEST_GUARDED_ENABLED || STATION_DRIVE_GUARDED_ENABLED) {
+  bool guardedOutputActive = stage16PulseActiveFlag || usbDriveLiveActiveFlag;
+  if (USB_PULSE_TEST_GUARDED_ENABLED || STATION_DRIVE_GUARDED_ENABLED || USB_DRIVE_LIVE_ENABLED) {
     Serial.print(F("USB_PULSE_TEST usb_pulse_test_mode=true event="));
     Serial.print(event);
     Serial.print(F(" usb_pulse_test_ready=true"));
@@ -1755,6 +1864,18 @@ void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
     }
     Serial.print(F(" usb_pulse_test_ms="));
     Serial.print(stage16CmdMs);
+    Serial.print(F(" usb_drive_live_mode="));
+    Serial.print(USB_DRIVE_LIVE_ENABLED ? F("true") : F("false"));
+    Serial.print(F(" usb_drive_live_active="));
+    Serial.print(usbDriveLiveActiveFlag ? F("true") : F("false"));
+    Serial.print(F(" usb_drive_live_seq="));
+    Serial.print(usbDriveLiveSeq < 0 ? 0 : usbDriveLiveSeq);
+    Serial.print(F(" usb_drive_live_last_update_age_ms="));
+    if (usbDriveLiveLastUpdateMs == 0) {
+      Serial.print(F("NA"));
+    } else {
+      Serial.print(now - usbDriveLiveLastUpdateMs);
+    }
     Serial.print(F(" requested_a_cmd="));
     Serial.print(stage16LeftCmd, 3);
     Serial.print(F(" requested_b_cmd="));
@@ -1766,11 +1887,11 @@ void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
     Serial.print(F(" usb_pulse_test_reject_reason="));
     Serial.print(stage16RejectReason);
     Serial.print(F(" usb_pulse_test_physical_output_active="));
-    Serial.print(stage16PulseActiveFlag ? F("true") : F("false"));
+    Serial.print(guardedOutputActive ? F("true") : F("false"));
     Serial.print(F(" physical_output_active="));
-    Serial.print(stage16PulseActiveFlag ? F("true") : F("false"));
+    Serial.print(guardedOutputActive ? F("true") : F("false"));
     Serial.print(F(" motor_write_called="));
-    Serial.print(stage16PulseActiveFlag ? F("true") : F("false"));
+    Serial.print(guardedOutputActive ? F("true") : F("false"));
     Serial.print(F(" final_left_cmd="));
     Serial.print(lastLeftOutputCmd, 3);
     Serial.print(F(" final_right_cmd="));
@@ -1919,15 +2040,22 @@ void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
 }
 
 void stage16Stop(bool rcValid, bool neutralOk, const char *reason) {
+  bool alreadyZero = !stage16PulseActiveFlag && !usbDriveLiveActiveFlag && motorOutputZeroState();
   stage16PulseActiveFlag = false;
+  usbDriveLiveActiveFlag = false;
   stage16ArmedFlag = false;
   stage16LatchedStopFlag = true;
   stage16LeftCmd = 0.0f;
   stage16RightCmd = 0.0f;
   stage16CmdMs = 0;
   stage16CmdState = "STOPPED";
+  if (alreadyZero && strcmp(reason, "USB_STOP") == 0) {
+    stage16RejectReason = "STOP_ALREADY_ZERO";
+    stage16PrintStatus("STOP_ALREADY_ZERO", rcValid, neutralOk);
+    return;
+  }
   stage16RejectReason = reason;
-  motorStop();
+  motorStopWithSource(reason);
   stage16PrintStatus("STOP", rcValid, neutralOk);
 }
 
@@ -1935,9 +2063,10 @@ void stage16Reject(bool rcValid, bool neutralOk, const char *reason) {
   stage16CmdState = "REJECTED";
   stage16RejectReason = reason;
   stage16PulseActiveFlag = false;
+  usbDriveLiveActiveFlag = false;
   stage16ArmedFlag = false;
   stage16LatchedStopFlag = true;
-  motorStop();
+  motorStopWithSource("REJECT");
   stage16PrintStatus("REJECT", rcValid, neutralOk);
 }
 
@@ -1968,7 +2097,85 @@ void stage16Arm(bool rcValid, bool neutralOk, uint32_t now, const String &line) 
   stage16PrintStatus("ARM", rcValid, neutralOk);
 }
 
+bool usbDriveLiveHandleCommand(const String &line, bool rcValid, bool neutralOk, uint32_t now) {
+  if (!USB_DRIVE_LIVE_ENABLED) {
+    return false;
+  }
+  if (line.startsWith("USB_DRIVE_LIVE_STOP")) {
+    int32_t seq = 0;
+    if (stage16ParseIntToken(line, "seq", seq)) {
+      usbDriveLiveSeq = seq;
+      stage16CmdSeq = seq;
+    }
+    stage16LastCmdMs = now;
+    stage16Stop(rcValid, neutralOk, "USB_DRIVE_LIVE_STOP");
+    return true;
+  }
+  if (!line.startsWith("USB_DRIVE_LIVE_SET")) {
+    return false;
+  }
+
+  int32_t seq = 0;
+  float a = 0.0f;
+  float b = 0.0f;
+  int32_t durationMs = 0;
+  int32_t ttlMs = USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS_VALUE;
+  bool parsed = stage16ParseIntToken(line, "seq", seq) &&
+                stage16ParseFloatToken(line, "a", a) &&
+                stage16ParseFloatToken(line, "b", b) &&
+                stage16ParseIntToken(line, "duration_ms", durationMs);
+  stage16ParseIntToken(line, "ttl_ms", ttlMs);
+  if (!parsed) {
+    stage16Reject(rcValid, neutralOk, "USB_DRIVE_LIVE_PARSE_ERROR");
+    return true;
+  }
+  bool requireRcInput = stage16RcInputRequiredForStationPulse();
+  if (requireRcInput && !rcValid) {
+    stage16Reject(rcValid, neutralOk, "RC_INVALID");
+    return true;
+  }
+  if (absFloat(a) > USB_DRIVE_LIVE_MAX_ABS_A_VALUE || absFloat(b) > USB_DRIVE_LIVE_MAX_ABS_B_VALUE) {
+    stage16Reject(rcValid, neutralOk, "USB_DRIVE_LIVE_COMMAND_EXCEEDS_MAX");
+    return true;
+  }
+  if (durationMs < 1 || static_cast<uint32_t>(durationMs) > USB_DRIVE_LIVE_MAX_DURATION_MS_VALUE) {
+    stage16Reject(rcValid, neutralOk, "USB_DRIVE_LIVE_DURATION_EXCEEDS_MAX");
+    return true;
+  }
+  if (ttlMs < 50 || static_cast<uint32_t>(ttlMs) > USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS_VALUE) {
+    ttlMs = USB_DRIVE_LIVE_UPDATE_TIMEOUT_MS_VALUE;
+  }
+
+  if (!usbDriveLiveActiveFlag || usbDriveLiveSeq != seq) {
+    usbDriveLiveStartMs = now;
+  }
+  usbDriveLiveSeq = seq;
+  usbDriveLiveACmd = a;
+  usbDriveLiveBCmd = b;
+  usbDriveLiveDurationMs = static_cast<uint32_t>(durationMs);
+  usbDriveLiveTtlMs = static_cast<uint32_t>(ttlMs);
+  usbDriveLiveLastUpdateMs = now;
+  usbDriveLiveActiveFlag = true;
+  usbDriveLiveRejectReason = "NONE";
+  stage16CmdSeq = seq;
+  stage16LeftCmd = a;
+  stage16RightCmd = b;
+  stage16CmdMs = static_cast<uint32_t>(durationMs);
+  stage16LastCmdMs = now;
+  stage16LatchedStopFlag = false;
+  stage16ArmedFlag = false;
+  stage16PulseActiveFlag = false;
+  stage16CmdState = "ACTIVE";
+  stage16RejectReason = "NONE";
+  applyPhysicalABManualEquivalentCommandWithSource(a, b, "USB_DRIVE_LIVE");
+  stage16PrintStatus("ACTIVE", rcValid, neutralOk);
+  return true;
+}
+
 void stage16HandleCommand(const String &line, bool rcValid, bool neutralOk, uint32_t now) {
+  if (usbDriveLiveHandleCommand(line, rcValid, neutralOk, now)) {
+    return;
+  }
   if (line.startsWith("USB_PULSE_TEST_STOP") || line.startsWith("STATION_DRIVE_STOP") || line.startsWith("STAGE16_STOP") || line.startsWith("STAGE17_STOP") || line.startsWith("STAGE18_STOP") || line.startsWith("STAGE20_STOP")) {
     int32_t seq = 0;
     if (stage16ParseIntToken(line, "seq", seq)) {
@@ -2044,7 +2251,7 @@ void stage16HandleCommand(const String &line, bool rcValid, bool neutralOk, uint
   stage16CmdState = "ACTIVE";
   stage16RejectReason = "NONE";
   if (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED) {
-    applyPhysicalABManualEquivalentCommand(stage16LeftCmd, stage16RightCmd);
+    applyPhysicalABManualEquivalentCommandWithSource(stage16LeftCmd, stage16RightCmd, "USB_PULSE_TEST");
   } else {
     applyMotorPulseDirectWheelCommand(stage16LeftCmd, stage16RightCmd);
   }
@@ -2075,9 +2282,23 @@ void stage16UpdatePulse(bool rcValid, bool neutralOk, uint32_t now) {
     stage16ArmedFlag = false;
     if (stage16PulseActiveFlag) {
       stage16Stop(rcValid, neutralOk, "RC_INVALID");
+    } else if (usbDriveLiveActiveFlag) {
+      stage16Stop(rcValid, neutralOk, "RC_INVALID");
     } else {
       motorStop();
     }
+    return;
+  }
+  if (usbDriveLiveActiveFlag) {
+    if (now - usbDriveLiveLastUpdateMs > usbDriveLiveTtlMs) {
+      stage16Stop(rcValid, neutralOk, "USB_DRIVE_LIVE_UPDATE_TIMEOUT");
+      return;
+    }
+    if (now - usbDriveLiveStartMs >= usbDriveLiveDurationMs) {
+      stage16Stop(rcValid, neutralOk, "USB_DRIVE_LIVE_DURATION_COMPLETE");
+      return;
+    }
+    stage16CmdState = "ACTIVE";
     return;
   }
   if (!stage16PulseActiveFlag) {
@@ -2090,7 +2311,7 @@ void stage16UpdatePulse(bool rcValid, bool neutralOk, uint32_t now) {
     return;
   }
   if (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED) {
-    applyPhysicalABManualEquivalentCommand(stage16LeftCmd, stage16RightCmd);
+    applyPhysicalABManualEquivalentCommandWithSource(stage16LeftCmd, stage16RightCmd, "USB_PULSE_TEST");
   } else {
     applyMotorPulseDirectWheelCommand(stage16LeftCmd, stage16RightCmd);
   }
@@ -4776,7 +4997,7 @@ void loop() {
   clearAutoCommand();
   clearStationManualCommand();
   bool neutralOk = stage16NeutralOk(steeringUs, throttleUs);
-  if (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED && rcManualActive && !neutralOk) {
+  if (STAGE20_PHYSICAL_AB_GUARDED_CRAWL_ENABLED && !USB_DRIVE_LIVE_ENABLED && rcManualActive && !neutralOk) {
     stage16PulseActiveFlag = false;
     stage16ArmedFlag = false;
     stage16CmdState = "STOPPED";
@@ -4792,8 +5013,9 @@ void loop() {
   stage16ReadUsbCommands(rcValid, neutralOk, now);
   stage16UpdatePulse(rcValid, neutralOk, now);
   stage16Heartbeat(rcValid, neutralOk, now);
-  currentControlSource = stage16PulseActiveFlag ? CONTROL_SOURCE_AUTO : CONTROL_SOURCE_STOP;
-  currentMode = rcValid ? (stage16PulseActiveFlag ? AUTO_RUNNING : AUTO_READY) : FAILSAFE;
+  bool guardedUsbActive = stage16PulseActiveFlag || usbDriveLiveActiveFlag;
+  currentControlSource = guardedUsbActive ? CONTROL_SOURCE_AUTO : CONTROL_SOURCE_STOP;
+  currentMode = rcValid ? (guardedUsbActive ? AUTO_RUNNING : AUTO_READY) : FAILSAFE;
   return;
 #endif
 

@@ -66,6 +66,19 @@ def test_tune_motion_has_no_observed_distance_option() -> None:
     assert "observed-distance" not in help_text
 
 
+def test_opposite_sign_transient_detects_reverse_kick() -> None:
+    rows = [
+        {
+            "motor_write_called": "true",
+            "physical_a_cmd": "-0.020",
+            "final_left_cmd": "-0.020",
+            "final_right_cmd": "-0.020",
+        }
+    ]
+    assert tuning.opposite_sign_transient("forward", rows) is True
+    assert tuning.opposite_sign_transient("backward", rows) is False
+
+
 def test_tune_motion_print_candidate_writes_summary(tmp_path: Path) -> None:
     rc = cli.main(
         [

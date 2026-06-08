@@ -49,8 +49,9 @@ def test_send_pulse_writes_arm_command_stop_in_order() -> None:
     raw_lines: list[str] = []
     rows = executor.send_pulse(handle, PLANNED, raw_lines, event_timeout_s=2.0)
 
-    # The three commands are issued in the safety-critical order.
-    assert handle.writes == ["ARMCMD", "PULSECMD", "STOPCMD"]
+    # Firmware already reported a stop-class completion, so the host does not
+    # send a redundant STOP command that could create a second neutral write.
+    assert handle.writes == ["ARMCMD", "PULSECMD"]
     # All scripted telemetry lines were captured into the shared buffer.
     assert raw_lines == [
         "event=ARM",
@@ -83,13 +84,43 @@ def test_send_pulse_can_suppress_raw_console(capsys) -> None:
     assert capsys.readouterr().out == ""
 
 
-def test_send_pulse_stop_command_follows_pulse_complete() -> None:
+def test_send_pulse_stop_command_is_skipped_after_stop_class_completion() -> None:
     handle = FakeSerial(
         [b"event=ARM\n", b"event=ACK\n", b"event=PULSE_DONE\n", b"event=STOP\n"]
     )
     executor.send_pulse(handle, PLANNED, [], event_timeout_s=2.0)
-    # STOPCMD is only written after the pulse-complete event is observed.
-    assert handle.writes.index("STOPCMD") == 2
+    assert handle.writes == ["ARMCMD", "PULSECMD"]
+
+
+def test_send_pulse_sends_stop_if_completion_missing() -> None:
+    handle = FakeSerial([b"event=ARM\n", b"event=ACK\n"])
+    executor.send_pulse(handle, PLANNED, [], event_timeout_s=0.01)
+    assert handle.writes == ["ARMCMD", "PULSECMD", "STOPCMD"]
+
+
+def test_send_live_drive_sends_repeated_setpoints_then_stop() -> None:
+    handle = FakeSerial(
+        [
+            b"USB_DRIVE_LIVE event=ACTIVE\n",
+            b"USB_DRIVE_LIVE event=ACTIVE\n",
+            b"USB_DRIVE_LIVE event=STOP final_left_cmd=0.0 final_right_cmd=0.0\n",
+        ]
+    )
+    raw_lines: list[str] = []
+    rows = executor.send_live_drive(
+        handle,
+        seq=7,
+        duration_s=0.02,
+        update_hz=100.0,
+        ttl_ms=350,
+        command_fn=lambda _row: (0.3, 0.0),
+        raw_lines=raw_lines,
+        event_timeout_s=0.1,
+        verbose_raw=False,
+    )
+    assert handle.writes[0].startswith("USB_DRIVE_LIVE_SET seq=7 a=0.300 b=0.000")
+    assert handle.writes[-1] == "USB_DRIVE_LIVE_STOP seq=7"
+    assert any(executor.telemetry.event(row) == "STOP" for row in rows)
 
 
 def test_wait_for_event_returns_when_wanted_seen() -> None:

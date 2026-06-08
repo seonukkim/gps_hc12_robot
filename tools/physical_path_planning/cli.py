@@ -124,6 +124,32 @@ def usb_pulse_test_firmware_flags(
     )
 
 
+def usb_drive_live_firmware_flags(
+    *,
+    max_abs_a: float = 0.35,
+    max_abs_b: float = 0.35,
+    max_duration_ms: int = 3000,
+    update_timeout_ms: int = 350,
+) -> str:
+    return (
+        "-DUSB_DRIVE_LIVE_ENABLE=1 "
+        "-DUSB_DRIVE_LIVE_IGNORE_RC_INPUT=1 "
+        "-DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 "
+        f"-DUSB_DRIVE_LIVE_MAX_ABS_A={max_abs_a} "
+        f"-DUSB_DRIVE_LIVE_MAX_ABS_B={max_abs_b} "
+        f"-DUSB_DRIVE_LIVE_MAX_DURATION_MS={max_duration_ms} "
+        f"-DUSB_DRIVE_LIVE_UPDATE_TIMEOUT_MS={update_timeout_ms} "
+        "-DIMU_ENABLE=1 "
+        "-DIMU_YAW_DIAG=1 "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+
+
 def station_hw_manual_firmware_flags() -> str:
     return (
         "-DSTATION_HW_MANUAL_ENABLE=1 "
@@ -2026,6 +2052,7 @@ def tune_motion_trial_row(
     pulse_rows: Sequence[dict[str, str]],
     invalid_reason: str | None,
     yaw_delta_deg: float | None,
+    opposite_sign_transient: bool = False,
 ) -> dict[str, object]:
     last = pulse_rows[-1] if pulse_rows else {}
     final_left = telemetry._optional_float(last.get("final_left_cmd")) if last else None
@@ -2049,6 +2076,7 @@ def tune_motion_trial_row(
         "active_seen": any(telemetry.event(row) == "ACTIVE" or _station_drive_latest_state(row) == "ACTIVE" for row in pulse_rows),
         "stop_seen": any(telemetry.event(row) in safety.STOP_EVENTS for row in pulse_rows),
         "reject_seen": any(telemetry.event(row) == "REJECT" for row in pulse_rows),
+        "opposite_sign_transient": opposite_sign_transient,
         "final_left_cmd": last.get("final_left_cmd", "NA"),
         "final_right_cmd": last.get("final_right_cmd", "NA"),
         "final_zero": final_zero,
@@ -2073,6 +2101,8 @@ def tune_motion_summary(
         "reason": reason,
         "primitive": primitive,
         "trial_count": len(rows),
+        "actual_pulse_count": sum(1 for row in rows if row.get("valid_pulse") in {True, False}),
+        "opposite_sign_transient_count": sum(1 for row in rows if row.get("opposite_sign_transient") is True),
         "approved_candidate": {
             "a": round(float(candidate["a"]), 3),
             "b": round(float(candidate["b"]), 3),
@@ -2153,6 +2183,177 @@ def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, 
     return 0
 
 
+def _upload_usb_drive_live_firmware(args: argparse.Namespace, out_dir: Path) -> int:
+    flags = usb_drive_live_firmware_flags(
+        max_abs_a=args.max_abs_a,
+        max_abs_b=args.max_abs_b,
+        max_duration_ms=int(args.max_duration_s * 1000.0),
+        update_timeout_ms=args.ttl_ms,
+    )
+    build_path = "/private/tmp/openrb-usb-drive-live"
+    compile_cmd = [
+        "arduino-cli",
+        "compile",
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        build_path,
+        "--build-property",
+        f"compiler.cpp.extra_flags={flags}",
+        "firmware/openrb_robot_controller",
+    ]
+    upload_cmd = [
+        "arduino-cli",
+        "upload",
+        "-p",
+        str(args.port),
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        build_path,
+        "firmware/openrb_robot_controller",
+    ]
+    completed = subprocess.run(compile_cmd, check=False)
+    if completed.returncode != 0:
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "usb-drive-live",
+                "success": False,
+                "reason": "USB_DRIVE_LIVE_FIRMWARE_COMPILE_FAILED",
+                "returncode": completed.returncode,
+                "ready_for_full_path_following": False,
+            },
+            title="USB Drive Live",
+        )
+        return completed.returncode
+    completed = subprocess.run(upload_cmd, check=False)
+    if completed.returncode != 0:
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "usb-drive-live",
+                "success": False,
+                "reason": "USB_DRIVE_LIVE_FIRMWARE_UPLOAD_FAILED",
+                "returncode": completed.returncode,
+                "ready_for_full_path_following": False,
+            },
+            title="USB Drive Live",
+        )
+        return completed.returncode
+    return 0
+
+
+def usb_drive_live_summary(rows: Sequence[dict[str, str]], *, a_cmd: float, b_cmd: float, duration_s: float) -> dict[str, object]:
+    reject_seen = any(telemetry.event(row) == "REJECT" for row in rows)
+    stop_seen = any(telemetry.event(row) in safety.STOP_EVENTS for row in rows)
+    trace_rows = [row for row in rows if "physical_a_cmd" in row and "motor_write_called" in row]
+    motor_write_seen = any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in trace_rows)
+    output_active_seen = any(telemetry.physical_output_active(row) for row in rows)
+    final_nonzero = safety.nonzero_final_cmd(rows)
+    success = not reject_seen and stop_seen and not final_nonzero
+    reason = "OK" if success else (
+        "REJECT" if reject_seen else
+        "STOP_MISSING" if not stop_seen else
+        "FINAL_COMMANDS_NONZERO"
+    )
+    summary = {
+        "mode": "usb-drive-live",
+        "success": success,
+        "reason": reason,
+        "a_cmd": round(a_cmd, 3),
+        "b_cmd": round(b_cmd, 3),
+        "duration_s": duration_s,
+        "setpoint_update_count": sum(1 for row in rows if telemetry.event(row) == "ACTIVE"),
+        "motor_trace_count": len(trace_rows),
+        "motor_write_called_seen": motor_write_seen,
+        "physical_output_active_seen": output_active_seen,
+        "stop_seen": stop_seen,
+        "final_zero": not final_nonzero,
+        "next_recommended_action": (
+            "Use tune-motion or execute-plan after confirming smooth motion."
+            if success else
+            "Inspect raw_usbdbg.log and motor trace rows before retrying live drive."
+        ),
+        "ready_for_full_path_following": False,
+    }
+    return checks.assert_not_ready_for_full_path_following(summary)
+
+
+def cmd_usb_drive_live(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if abs(float(args.a)) > args.max_abs_a or abs(float(args.b)) > args.max_abs_b:
+        return _fail_with_summary(args, reason="USB_DRIVE_LIVE_COMMAND_EXCEEDS_MAX", message="--a/--b exceed live-drive bounds")
+    if args.duration_s <= 0 or args.duration_s > args.max_duration_s:
+        return _fail_with_summary(args, reason="USB_DRIVE_LIVE_DURATION_EXCEEDS_MAX", message="--duration-s must be >0 and <= --max-duration-s")
+    if args.print_command == "true":
+        print(
+            f"USB_DRIVE_LIVE_SET seq=1 a={float(args.a):.3f} b={float(args.b):.3f} "
+            f"duration_ms={int(args.duration_s * 1000.0)} ttl_ms={int(args.ttl_ms)}"
+        )
+        print("USB_DRIVE_LIVE_STOP seq=1")
+        summary = {
+            "mode": "usb-drive-live",
+            "success": True,
+            "reason": "COMMAND_PRINTED",
+            "a_cmd": round(float(args.a), 3),
+            "b_cmd": round(float(args.b), 3),
+            "duration_s": args.duration_s,
+            "ready_for_full_path_following": False,
+        }
+        write_summary_files(out_dir, summary, title="USB Drive Live")
+        return 0
+    if not ensure_port(args):
+        return 2
+    if args.upload in {"true", "auto"}:
+        uploaded = _upload_usb_drive_live_firmware(args, out_dir)
+        if uploaded != 0:
+            return uploaded
+
+    import serial
+
+    raw_lines: list[str] = []
+    rows: list[dict[str, str]] = []
+    try:
+        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+            print(f"resolved_port={args.port}")
+            print(f"usb_drive_live A={float(args.a):+0.3f} B={float(args.b):+0.3f} duration_s={float(args.duration_s):.2f}")
+            rows = executor.send_live_drive(
+                handle,
+                seq=1,
+                duration_s=float(args.duration_s),
+                update_hz=float(args.update_hz),
+                ttl_ms=int(args.ttl_ms),
+                command_fn=lambda _row: (float(args.a), float(args.b)),
+                raw_lines=raw_lines,
+                event_timeout_s=float(args.event_timeout_s),
+                verbose_raw=args.verbose_raw == "true",
+            )
+    except KeyboardInterrupt:
+        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+    except OSError:
+        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+        summary = {
+            "mode": "usb-drive-live",
+            "success": False,
+            "reason": "SERIAL_DISCONNECT",
+            "ready_for_full_path_following": False,
+        }
+        _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+        _write_rows_csv(out_dir / "usb_drive_live_rows.csv", rows)
+        write_summary_files(out_dir, summary, title="USB Drive Live")
+        return 2
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "usb_drive_live_rows.csv", rows)
+    summary = usb_drive_live_summary(rows, a_cmd=float(args.a), b_cmd=float(args.b), duration_s=float(args.duration_s))
+    write_summary_files(out_dir, summary, title="USB Drive Live")
+    print(f"usb_drive_live_success={str(summary['success']).lower()}")
+    print(f"reason={summary['reason']}")
+    print("ready_for_full_path_following=false")
+    return 0 if summary["success"] is True else 2
+
+
 def cmd_tune_motion(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2226,8 +2427,11 @@ def cmd_tune_motion(args: argparse.Namespace) -> int:
                 )
                 invalid_reason = controller.pulse_block_reason(pulse_rows)
                 yaw_delta = tuning.yaw_delta_from_rows(pulse_rows)
+                opposite = tuning.opposite_sign_transient(primitive, pulse_rows)
                 if yaw_delta is not None:
                     print(f"imu_yaw_delta_deg={yaw_delta:.3f}")
+                if opposite:
+                    print("opposite_sign_transient=true")
                 if invalid_reason is not None:
                     reason = invalid_reason
                     trial_rows.append(
@@ -2238,6 +2442,7 @@ def cmd_tune_motion(args: argparse.Namespace) -> int:
                             pulse_rows=pulse_rows,
                             invalid_reason=invalid_reason,
                             yaw_delta_deg=yaw_delta,
+                            opposite_sign_transient=opposite,
                         )
                     )
                     break
@@ -2252,12 +2457,16 @@ def cmd_tune_motion(args: argparse.Namespace) -> int:
                         pulse_rows=pulse_rows,
                         invalid_reason=invalid_reason,
                         yaw_delta_deg=yaw_delta,
+                        opposite_sign_transient=opposite,
                     )
                 )
                 if feedback == "abort":
                     reason = "USER_ABORTED"
                     break
                 if feedback == "approve":
+                    if opposite:
+                        reason = "OPPOSITE_SIGN_TRANSIENT"
+                        break
                     tuning.save_approved_calibration(
                         calibration_out,
                         candidate,
@@ -2615,6 +2824,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             manual_override_mode=args.manual_override_mode,
             left_fixed_pulses=args.left_fixed_pulses,
             right_fixed_pulses=args.right_fixed_pulses,
+            straight_motion_mode=args.straight_motion_mode,
+            live_update_hz=args.live_update_hz,
+            live_ttl_ms=args.live_ttl_ms,
         )
     finally:
         handle.close()
@@ -2747,7 +2959,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
+        metavar="{diagnose,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
     )
 
     preview_p = sub.add_parser("preview", help="build + render the plan (no serial, no motion)")
@@ -2826,7 +3038,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     manual_control_p = sub.add_parser(
         "manual-control",
-        help="upload and monitor PPM physical manual control",
+        help="upload and monitor PPM physical manual control with full telemetry display",
     )
     manual_control_p.add_argument("--port", default=None)
     manual_control_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
@@ -2915,6 +3127,27 @@ def build_parser() -> argparse.ArgumentParser:
     station_drive_p.add_argument("--print-command", choices=["true", "false"], default="false")
     station_drive_p.set_defaults(handler=cmd_usb_pulse_test)
 
+    live_p = sub.add_parser(
+        "usb-drive-live",
+        help="continuous laptop USB A/B setpoint drive with firmware deadman",
+    )
+    live_p.add_argument("--port", default=None)
+    live_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    live_p.add_argument("--a", type=float, required=True)
+    live_p.add_argument("--b", type=float, required=True)
+    live_p.add_argument("--duration-s", type=float, required=True)
+    live_p.add_argument("--update-hz", type=float, default=8.0)
+    live_p.add_argument("--ttl-ms", type=int, default=350)
+    live_p.add_argument("--max-abs-a", type=float, default=0.35)
+    live_p.add_argument("--max-abs-b", type=float, default=0.35)
+    live_p.add_argument("--max-duration-s", type=float, default=3.0)
+    live_p.add_argument("--event-timeout-s", type=float, default=controller.DEFAULT_EVENT_TIMEOUT_S)
+    live_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
+    live_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
+    live_p.add_argument("--print-command", choices=["true", "false"], default="false")
+    live_p.add_argument("--out-dir", default="outputs/physical_path_planning/usb_drive_live")
+    live_p.set_defaults(handler=cmd_usb_drive_live)
+
     tune_p = sub.add_parser(
         "tune-motion",
         help="interactive visual/IMU-assisted USB pulse calibration",
@@ -2989,6 +3222,9 @@ def build_parser() -> argparse.ArgumentParser:
         )
         run_p.add_argument("--left-fixed-pulses", type=int, default=12)
         run_p.add_argument("--right-fixed-pulses", type=int, default=12)
+        run_p.add_argument("--straight-motion-mode", choices=["continuous", "pulse"], default="continuous")
+        run_p.add_argument("--live-update-hz", type=float, default=8.0)
+        run_p.add_argument("--live-ttl-ms", type=int, default=350)
         run_p.add_argument("--out-dir", default="outputs/physical_path_planning/run")
         run_p.add_argument(
             "--print-plan",

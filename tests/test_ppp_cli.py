@@ -303,6 +303,41 @@ def test_usb_pulse_test_firmware_flags_include_rc_bypass() -> None:
     assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
 
 
+def test_usb_drive_live_print_command_uses_continuous_protocol(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(
+        [
+            "usb-drive-live",
+            "--a",
+            "0.30",
+            "--b",
+            "0.00",
+            "--duration-s",
+            "2",
+            "--print-command",
+            "true",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "USB_DRIVE_LIVE_SET seq=1 a=0.300 b=0.000 duration_ms=2000 ttl_ms=350" in out
+    assert "USB_DRIVE_LIVE_STOP seq=1" in out
+    data = _assert_standard_summary(tmp_path)
+    assert data["mode"] == "usb-drive-live"
+
+
+def test_usb_drive_live_firmware_flags_are_bounded_and_non_path_following() -> None:
+    flags = cli.usb_drive_live_firmware_flags(max_duration_ms=3000, update_timeout_ms=350)
+    assert "USB_DRIVE_LIVE_ENABLE=1" in flags
+    assert "USB_DRIVE_LIVE_IGNORE_RC_INPUT=1" in flags
+    assert "USB_DRIVE_LIVE_MAX_DURATION_MS=3000" in flags
+    assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
+    assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
+
+
 def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
     flags = cli.manual_rc_recovery_flags(mode_channel_index=4)
     assert "MANUAL_RC_RECOVERY=1" in flags

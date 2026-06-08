@@ -107,10 +107,12 @@ CH2 throttle -> physical A
 CH5 mode/manual-auto
 ```
 
-Run `manual-control` to upload and monitor that PPM manual path. If PPM channels
-are all zero, the result is `PPM_INPUT_ABSENT` and the issue is wiring, receiver
-power, binding, or PPM output mode. `station-hw-manual` is deprecated for this
-hardware unless a real serial station frame protocol is confirmed.
+Run `manual-control` to upload and monitor that PPM manual path. It keeps the
+full RC/GPS/IMU USBDBG display visible: sensors are telemetry-only diagnostics
+and do not gate manual drive. If PPM channels are all zero, the result is
+`PPM_INPUT_ABSENT` and the issue is wiring, receiver power, binding, or PPM
+output mode. `station-hw-manual` is deprecated for this hardware unless a real
+serial station frame protocol is confirmed.
 `usb-pulse-test` sends only bounded A/B commands over USB after operator
 confirmation; it is not physical station hardware control, not RC manual
 passthrough, and not autonomous path planning. Guarded pulse execution remains

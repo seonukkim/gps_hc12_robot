@@ -15,7 +15,7 @@ from typing import Sequence
 from tools.physical_path_planning import telemetry
 
 # Events that mark the controlled end of a pulse (motor output must be zero after).
-STOP_EVENTS = {"STOP", "PULSE_COMPLETE", "PULSE_DONE"}
+STOP_EVENTS = {"STOP", "STOP_ALREADY_ZERO", "PULSE_COMPLETE", "PULSE_DONE"}
 
 _ZERO_TOLERANCE = 1e-9
 

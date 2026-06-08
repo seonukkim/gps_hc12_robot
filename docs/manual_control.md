@@ -4,6 +4,10 @@ This document describes the current rover manual-control setup, which files are
 used, how to flash the rover firmware, how to run the station-side manual tool,
 and how the current code maps joystick input to motor commands.
 
+`manual-control` is PPM manual drive with full telemetry display. It is not a
+sensor-disabled mode: GPS and IMU status continue to print when available, but
+they are diagnostic-only and do not gate manual motor output.
+
 All motor and ESC checks are wheel-off-ground only.
 
 ## Active Files
@@ -115,6 +119,12 @@ Latest outdoor recovery note:
 - A later outdoor nearby dry-run briefly showed a failsafe-like PPM glitch
   (`rc_ok=false`, invalid-looking `steer_us` / `throttle_us`); the firmware kept
   `control_source=STOP`, which is the correct safe behavior.
+- Current `manual-control` status should still show the full USBDBG context:
+  `rc_input_detected`, `rc_ok`, `mode`, `auto_sw`, `steer_us`,
+  `throttle_us`, `mode_us`, physical A/B commands, `control_source`,
+  motor-output fields, `gps_block_reason`, `current_lat`, `current_lon`,
+  `gps_sats`, `gps_hdop`, `imu_present`, `imu_relative_yaw_deg`, and
+  `imu_heading_block_reason`.
 
 Current calibration and direction constants:
 

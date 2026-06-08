@@ -213,6 +213,20 @@ def pulse_block_reason(pulse_rows: Sequence[dict[str, str]]) -> str | None:
     return None
 
 
+def live_drive_block_reason(rows: Sequence[dict[str, str]]) -> str | None:
+    if safety.rc_invalid_abort(rows):
+        return "RC_INVALID"
+    if any(telemetry.event(row) == "REJECT" for row in rows):
+        return safety.latest_reject_reason(rows)
+    if not any(telemetry.event(row) in safety.STOP_EVENTS for row in rows):
+        return "STOP_MISSING"
+    if safety.output_active_after_stop(rows):
+        return "OUTPUT_ACTIVE_AFTER_STOP"
+    if safety.nonzero_final_cmd(rows):
+        return "FINAL_COMMANDS_NONZERO"
+    return None
+
+
 def planned_pulse(
     *, seq: int, a_cmd: float, b_cmd: float, pulse_ms: int
 ) -> dict[str, object]:
@@ -224,6 +238,7 @@ def planned_pulse(
         ),
         "stop_command_text": f"STAGE20_STOP seq={seq}",
         "pulse_ms": int(pulse_ms),
+        "force_stop_command": True,
     }
 
 
@@ -273,8 +288,10 @@ def build_execution_row(
     gps: dict[str, object],
     calibration_source: str,
     connector_mode: str,
+    block_reason_override: str | None = None,
+    drive_mode: str = "pulse",
 ) -> dict[str, object]:
-    block_reason = pulse_block_reason(pulse_rows)
+    block_reason = block_reason_override if block_reason_override is not None else pulse_block_reason(pulse_rows)
     yaw = telemetry.imu_relative_yaw_deg(after_row) if after_row else None
     return {
         "row_type": "pulse",
@@ -306,6 +323,7 @@ def build_execution_row(
         "manual_override_detected": manual_override_detected(after_row),
         "calibration_source": calibration_source,
         "connector_mode": connector_mode,
+        "drive_mode": drive_mode,
         "valid_pulse": block_reason is None,
         "invalid_reason": block_reason or "NONE",
         "ready_for_full_path_following": False,
@@ -383,6 +401,9 @@ def run_controller(
     manual_override_mode: str = DEFAULT_MANUAL_OVERRIDE_MODE,
     left_fixed_pulses: int = 12,
     right_fixed_pulses: int = 12,
+    straight_motion_mode: str = "pulse",
+    live_update_hz: float = 8.0,
+    live_ttl_ms: int = 350,
 ) -> tuple[list[dict[str, object]], list[str], str]:
     """Run the supervised pulse loop over ``segments``; return (rows, raw_lines, abort_reason).
 
@@ -422,6 +443,107 @@ def run_controller(
             connector_mode = "lane"
             connector_b = 0.0
             base_b = float(motion.get("b_cmd", 0.0))
+
+        if not is_connector and straight_motion_mode == "continuous":
+            primitive_index += 1
+            try:
+                heartbeat = wait_for_stage20_heartbeat(handle, raw_lines, heartbeat_timeout_s)
+                if heartbeat is None:
+                    abort_reason = "NO_STAGE20_HEARTBEAT"
+                    break
+                if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True:
+                    abort_reason = "RC_NOT_OK"
+                    break
+                if manual_override_detected(heartbeat) and manual_override_mode == "abort":
+                    abort_reason = "MANUAL_OVERRIDE"
+                    break
+                gps = dead_reckon_gps(heartbeat, gps_cache)
+                gps_action = geometry.gps_policy_action(bool(gps["gps_degraded"]), gps_degradation_policy)
+                if gps_action == "abort":
+                    abort_reason = "GPS_DEGRADED"
+                    break
+                if gps_action == "pause":
+                    continue
+                latest_correction: dict[str, float] | None = None
+
+                def command_from_row(row: dict[str, str] | None) -> tuple[float, float]:
+                    nonlocal latest_correction
+                    source = row or heartbeat
+                    local_gps = dead_reckon_gps(source, gps_cache)
+                    lat = float(local_gps["lat"]) if local_gps["lat"] is not None else start_lat
+                    lon = float(local_gps["lon"]) if local_gps["lon"] is not None else start_lon
+                    x, y = geometry.goal_to_local(start_lat, start_lon, lat, lon)
+                    yaw = telemetry.imu_relative_yaw_deg(source)
+                    latest_correction = pulse_correction(
+                        segment=segment,
+                        x=x,
+                        y=y,
+                        target_heading_deg=target_heading,
+                        yaw=yaw,
+                        start_yaw_deg=start_yaw_deg,
+                        is_connector=False,
+                        base_b_cmd=base_b,
+                    )
+                    return a_cmd, float(latest_correction["b_cmd"])
+
+                duration_s = max(0.1, (pulse_ms * max(1, budget)) / 1000.0)
+                live_rows = executor.send_live_drive(
+                    handle,
+                    seq=primitive_index,
+                    duration_s=duration_s,
+                    update_hz=live_update_hz,
+                    ttl_ms=live_ttl_ms,
+                    command_fn=command_from_row,
+                    raw_lines=raw_lines,
+                    event_timeout_s=event_timeout_s,
+                )
+                after = wait_for_stage20_heartbeat(handle, raw_lines, heartbeat_timeout_s) or heartbeat
+            except OSError:
+                abort_reason = "SERIAL_DISCONNECT"
+                break
+
+            gps_after = dead_reckon_gps(after, gps_cache)
+            if latest_correction is None:
+                lat = float(gps_after["lat"]) if gps_after["lat"] is not None else start_lat
+                lon = float(gps_after["lon"]) if gps_after["lon"] is not None else start_lon
+                x, y = geometry.goal_to_local(start_lat, start_lon, lat, lon)
+                latest_correction = pulse_correction(
+                    segment=segment,
+                    x=x,
+                    y=y,
+                    target_heading_deg=target_heading,
+                    yaw=telemetry.imu_relative_yaw_deg(after),
+                    start_yaw_deg=start_yaw_deg,
+                    is_connector=False,
+                    base_b_cmd=base_b,
+                )
+            row = build_execution_row(
+                segment=segment,
+                primitive_index=primitive_index,
+                after_row=after,
+                pulse_rows=live_rows,
+                start_lat=start_lat,
+                start_lon=start_lon,
+                goal_lat=goal_lat,
+                goal_lon=goal_lon,
+                start_yaw_deg=start_yaw_deg,
+                target_heading_deg=target_heading,
+                a_cmd=a_cmd,
+                correction=latest_correction,
+                pulse_ms=int(duration_s * 1000.0),
+                gps=gps_after,
+                calibration_source=calibration_source,
+                connector_mode=connector_mode,
+                block_reason_override=live_drive_block_reason(live_rows),
+                drive_mode="continuous",
+            )
+            rows.append(row)
+            if row["invalid_reason"] == "RC_INVALID":
+                abort_reason = "RC_INVALID"
+                break
+            if row["valid_pulse"] is not True:
+                break
+            continue
 
         for _ in range(budget):
             primitive_index += 1

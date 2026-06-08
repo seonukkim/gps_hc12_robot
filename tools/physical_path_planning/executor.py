@@ -19,9 +19,18 @@ from tools.physical_path_planning import safety, telemetry
 # FSM transition event sets (a REJECT at the arm/command step ends the pulse early).
 ARM_EVENTS = {"ARM", "REJECT"}
 COMMAND_ACK_EVENTS = {"ACK", "REJECT"}
-STOP_CONFIRM_EVENTS = {"STOP"}
+STOP_CONFIRM_EVENTS = {"STOP", "STOP_ALREADY_ZERO"}
 # Pulse-complete events are shared with the safety layer's stop-class set.
 PULSE_COMPLETE_EVENTS = safety.STOP_EVENTS
+
+
+def should_send_stop_after_completion(rows: Sequence[dict[str, str]]) -> bool:
+    """True when the host should send an explicit STOP after the completion wait."""
+    if not rows:
+        return True
+    stop_like_seen = any(telemetry.event(row) in safety.STOP_EVENTS for row in rows)
+    active_after_stop = safety.output_active_after_stop(rows)
+    return (not stop_like_seen) or active_after_stop
 
 
 def serial_rows(raw_lines: Sequence[str], start_index: int = 0) -> list[dict[str, str]]:
@@ -105,13 +114,70 @@ def send_pulse(
     _write_line(handle, command_text)
     wait_for_event(handle, raw_lines, COMMAND_ACK_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
     pulse_ms = int(planned["pulse_ms"])
-    wait_for_event(
+    completion_rows = wait_for_event(
         handle,
         raw_lines,
         PULSE_COMPLETE_EVENTS,
         max(event_timeout_s, pulse_ms / 1000.0 + 1.0),
         verbose_raw=verbose_raw,
     )
-    _write_line(handle, planned["stop_command_text"])
-    wait_for_event(handle, raw_lines, STOP_CONFIRM_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
+    if completion_rows and not any(telemetry.event(row) in STOP_CONFIRM_EVENTS for row in completion_rows):
+        wait_for_event(
+            handle,
+            raw_lines,
+            STOP_CONFIRM_EVENTS,
+            min(event_timeout_s, 0.25),
+            verbose_raw=verbose_raw,
+        )
+    rows_so_far = serial_rows(raw_lines, pulse_start)
+    send_explicit_stop = bool(planned.get("force_stop_command")) or should_send_stop_after_completion(completion_rows)
+    if send_explicit_stop:
+        _write_line(handle, planned["stop_command_text"])
+        if not any(telemetry.event(row) in STOP_CONFIRM_EVENTS for row in rows_so_far):
+            wait_for_event(handle, raw_lines, STOP_CONFIRM_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
     return serial_rows(raw_lines, pulse_start)
+
+
+def send_live_drive(
+    handle: object,
+    *,
+    seq: int,
+    duration_s: float,
+    update_hz: float,
+    ttl_ms: int,
+    command_fn: Callable[[dict[str, str] | None], tuple[float, float]],
+    raw_lines: list[str],
+    event_timeout_s: float,
+    verbose_raw: bool = True,
+) -> list[dict[str, str]]:
+    """Send continuous USB A/B setpoints with a firmware-side deadman TTL."""
+    start_index = len(raw_lines)
+    duration_ms = max(1, int(duration_s * 1000.0))
+    update_period_s = 1.0 / max(1.0, float(update_hz))
+    deadline = time.monotonic() + max(0.0, float(duration_s))
+    latest_row: dict[str, str] | None = None
+    while time.monotonic() < deadline:
+        a_cmd, b_cmd = command_fn(latest_row)
+        _write_line(
+            handle,
+            (
+                f"USB_DRIVE_LIVE_SET seq={seq} a={float(a_cmd):.3f} b={float(b_cmd):.3f} "
+                f"duration_ms={duration_ms} ttl_ms={int(ttl_ms)}"
+            ),
+        )
+        row = wait_for_row(
+            handle,
+            raw_lines,
+            lambda r: telemetry.event(r) in {"ACTIVE", "REJECT"} or "MOTOR_TRACE" in str(r.get("_raw", "")),
+            min(update_period_s, event_timeout_s),
+            verbose_raw=verbose_raw,
+        )
+        if row is not None:
+            latest_row = row
+            if telemetry.event(row) == "REJECT":
+                break
+        else:
+            time.sleep(min(update_period_s, 0.05))
+    _write_line(handle, f"USB_DRIVE_LIVE_STOP seq={seq}")
+    wait_for_event(handle, raw_lines, STOP_CONFIRM_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
+    return serial_rows(raw_lines, start_index)

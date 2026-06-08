@@ -75,7 +75,9 @@ bash scripts/run_physical_path_planner.sh manual-rc \
 ## 3. PPM Physical Manual Control
 
 The current physical station/controller manual path is PPM into OpenRB D6. It is
-not the serial station-frame monitor.
+not the serial station-frame monitor, and it is not a sensor-disabled mode. GPS
+and IMU status remain visible in the manual-control USBDBG/status display when
+available, but they do not gate manual motor output.
 
 ```bash
 bash scripts/run_physical_path_planner.sh manual-control \

@@ -19,6 +19,7 @@ Modes:
   station-hw-diagnose   Read-only physical station hardware link diagnostic.
   station-hw-manual     Deprecated serial-frame monitor; use manual-control for PPM.
   usb-pulse-test        Laptop USB bounded A/B pulse motor validation.
+  usb-drive-live        Continuous laptop USB A/B setpoint drive.
   tune-motion           Interactive visual/IMU-assisted motion calibration.
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
@@ -48,6 +49,10 @@ Examples:
   bash scripts/run_physical_path_planner.sh usb-pulse-test \
     --print-command true \
     --out-dir outputs/physical_path_planning/usb_pulse_test_print
+
+  bash scripts/run_physical_path_planner.sh usb-drive-live \
+    --a 0.30 --b 0.00 --duration-s 2 \
+    --out-dir outputs/physical_path_planning/usb_drive_forward
 
   bash scripts/run_physical_path_planner.sh tune-motion \
     --primitive forward \
@@ -208,7 +213,8 @@ Usage:
   scripts/run_physical_path_planner.sh manual-control [options]
 
 PPM physical manual control. Uploads/monitors firmware using OpenRB D6:
-CH1 steering, CH2 throttle, CH5 manual/auto mode.
+CH1 steering, CH2 throttle, CH5 manual/auto mode. GPS/IMU status remains
+visible as telemetry and does not gate manual drive.
 
 Options:
   --port PORT              OpenRB USB debug port; auto-detected when omitted.
@@ -256,7 +262,7 @@ mode_needs_port() {
     diagnose)
       [[ "$FROM_LOG" != "true" ]]
       ;;
-    calibrate-turn|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
+    calibrate-turn|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|station-drive|station-manual|guarded-pulse-ready)
       [[ "$PRINT_CMD" != "true" ]]
       ;;
     tune-motion)
@@ -297,6 +303,12 @@ flash_guarded_crawl_firmware() {
 -DUSB_PULSE_TEST_MAX_ABS_A=${MAX_ABS_A} \
 -DUSB_PULSE_TEST_MAX_ABS_B=${MAX_ABS_B} \
 -DUSB_PULSE_TEST_MAX_MS=${MAX_MS} \
+-DUSB_DRIVE_LIVE_ENABLE=1 \
+-DUSB_DRIVE_LIVE_IGNORE_RC_INPUT=1 \
+-DUSB_DRIVE_LIVE_MAX_ABS_A=${MAX_ABS_A} \
+-DUSB_DRIVE_LIVE_MAX_ABS_B=${MAX_ABS_B} \
+-DUSB_DRIVE_LIVE_MAX_DURATION_MS=3000 \
+-DUSB_DRIVE_LIVE_UPDATE_TIMEOUT_MS=350 \
 -DIMU_ENABLE=1 \
 -DIMU_YAW_DIAG=1 \
 -DPHYSICAL_PATH_FOLLOWING_ENABLE=0 \
@@ -336,7 +348,7 @@ resolve_post_upload_port() {
 }
 
 case "$MODE" in
-  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|tune-motion|station-drive|station-manual|guarded-pulse-ready)
+  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
     exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
     ;;
   run|execute-plan)

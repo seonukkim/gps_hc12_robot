@@ -184,6 +184,27 @@ def approved_calibration_entry(
     return entry
 
 
+def opposite_sign_transient(primitive: str, rows: Sequence[dict[str, str]]) -> bool:
+    """Detect a motor-trace sign reversal for forward/backward tuning trials."""
+    normalized = normalize_primitive(primitive)
+    if normalized not in {"forward", "backward"}:
+        return False
+    expected_sign = 1.0 if normalized == "forward" else -1.0
+    for row in rows:
+        if telemetry._parse_bool(row.get("motor_write_called")) is not True:
+            continue
+        physical_a = telemetry._optional_float(row.get("physical_a_cmd"))
+        if physical_a is not None and physical_a * expected_sign < -1e-4:
+            return True
+        final_left = telemetry._optional_float(row.get("final_left_cmd"))
+        final_right = telemetry._optional_float(row.get("final_right_cmd"))
+        if final_left is not None and final_right is not None:
+            inferred_a = (final_left + final_right) * 0.5
+            if inferred_a * expected_sign < -1e-4:
+                return True
+    return False
+
+
 def save_approved_calibration(
     path: Path,
     candidate: dict[str, object],
