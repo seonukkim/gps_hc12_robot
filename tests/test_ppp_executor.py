@@ -67,6 +67,22 @@ def test_send_pulse_writes_arm_command_stop_in_order() -> None:
     ]
 
 
+def test_send_pulse_can_suppress_raw_console(capsys) -> None:
+    handle = FakeSerial(
+        [
+            b"event=ARM\n",
+            b"event=ACK\n",
+            b"event=HEARTBEAT stage20_cmd_state=ACTIVE\n",
+            b"event=PULSE_COMPLETE\n",
+            b"event=STOP final_left_cmd=0.0 final_right_cmd=0.0\n",
+        ]
+    )
+    raw_lines: list[str] = []
+    executor.send_pulse(handle, PLANNED, raw_lines, event_timeout_s=2.0, verbose_raw=False)
+    assert "HEARTBEAT" in "\n".join(raw_lines)
+    assert capsys.readouterr().out == ""
+
+
 def test_send_pulse_stop_command_follows_pulse_complete() -> None:
     handle = FakeSerial(
         [b"event=ARM\n", b"event=ACK\n", b"event=PULSE_DONE\n", b"event=STOP\n"]

@@ -111,6 +111,7 @@ def pulse_correction(
     yaw: float | None,
     start_yaw_deg: float | None,
     is_connector: bool = False,
+    base_b_cmd: float = 0.0,
     connector_b_cmd: float = 0.0,
 ) -> dict[str, float]:
     """Compute the per-pulse steering correction (B axis only).
@@ -130,6 +131,8 @@ def pulse_correction(
         b_cmd = float(connector_b_cmd)
         b_heading = 0.0
         b_cte = 0.0
+    else:
+        b_cmd = geometry.clamp(float(base_b_cmd) + b_cmd, -0.08, 0.08)
     return {
         "current_heading_deg": heading,
         "heading_error_deg": heading_error,
@@ -408,6 +411,7 @@ def run_controller(
             calibration_source = str(connector["calibration_source"])
             connector_mode = str(connector["connector_mode"])
             connector_b = float(connector["b_cmd"])
+            base_b = 0.0
         else:
             motion = geometry._motion_calibrated(
                 resolved_calibration, str(segment["expected_motion_direction"])
@@ -417,6 +421,7 @@ def run_controller(
             calibration_source = str(motion.get("calibration_source", "unknown"))
             connector_mode = "lane"
             connector_b = 0.0
+            base_b = float(motion.get("b_cmd", 0.0))
 
         for _ in range(budget):
             primitive_index += 1
@@ -460,6 +465,7 @@ def run_controller(
                     yaw=yaw,
                     start_yaw_deg=start_yaw_deg,
                     is_connector=is_connector,
+                    base_b_cmd=base_b,
                     connector_b_cmd=connector_b,
                 )
                 planned = planned_pulse(

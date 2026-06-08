@@ -1,7 +1,7 @@
 """Physical motion/turn calibration resolver and calibrated-primitive accessors.
 
-Reads the four calibration JSON sources (fine motion, turn twitch, turn angle,
-smooth connector) in priority order and produces a normalized schema with a
+Reads the calibration JSON sources (interactive motion, fine motion, turn twitch,
+turn angle, smooth connector) in priority order and produces a normalized schema with a
 ``connector_mode_effective`` plus ``ready_*`` flags. ``ready_for_full_path_following``
 is always False.
 """
@@ -17,6 +17,7 @@ DEFAULT_FINE_CALIBRATION = Path("outputs/stage20_physical_ab_probe/calibration/p
 DEFAULT_TURN_CALIBRATION = Path("outputs/stage23_turn_calibration/calibration/physical_ab_turn_twitch_calibration.json")
 DEFAULT_TURN_ANGLE_CALIBRATION = Path("outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json")
 DEFAULT_SMOOTH_TURN_CALIBRATION = Path("outputs/stage36_smooth_turn_connector/calibration/smooth_turn_connector_calibration.json")
+DEFAULT_MOTION_CALIBRATION = Path("outputs/physical_path_planning/calibration/motion_calibration.json")
 
 DEFAULT_FORWARD_A_CMD = 0.30
 DEFAULT_FORWARD_MS = 800
@@ -90,6 +91,48 @@ def _primitive(
     source: str,
 ) -> dict[str, object]:
     return {"a": round(a, 3), "b": round(b, 3), "ms": int(ms), "source": source}
+
+
+def _approved_entry(data: dict[str, object], key: str) -> dict[str, object] | None:
+    entry = data.get(key)
+    if not isinstance(entry, dict) or not _parse_bool(entry.get("approved_by_user")):
+        return None
+    a = _optional_float(entry.get("a_cmd", entry.get("a")))
+    b = _optional_float(entry.get("b_cmd", entry.get("b")))
+    ms = _optional_int(entry.get("pulse_ms", entry.get("ms")))
+    if a is None or b is None or ms is None:
+        return None
+    return entry
+
+
+def _interactive_motion_override(
+    data: dict[str, object],
+    source_name: str | None,
+    key: str,
+    fallback: dict[str, object],
+) -> dict[str, object]:
+    entry = _approved_entry(data, key)
+    if entry is None:
+        return fallback
+    a = _optional_float(entry.get("a_cmd", entry.get("a")))
+    b = _optional_float(entry.get("b_cmd", entry.get("b")))
+    ms = _optional_int(entry.get("pulse_ms", entry.get("ms")))
+    if a is None or b is None or ms is None:
+        return fallback
+    if key == "forward":
+        a = abs(a)
+    elif key == "backward":
+        a = -abs(a)
+    elif key == "left":
+        b = abs(b)
+    elif key == "right":
+        b = -abs(b)
+    return _primitive(
+        a=a,
+        b=b,
+        ms=ms,
+        source=source_name or "interactive_motion_calibration",
+    )
 
 
 def _motion_primitive(
@@ -217,6 +260,39 @@ def _angle_turn_entry(data: dict[str, object], source_name: str | None, key: str
     }
 
 
+def _interactive_angle_turn_entry(
+    data: dict[str, object],
+    source_name: str | None,
+    key: str,
+    fallback: dict[str, object],
+) -> dict[str, object]:
+    entry = _approved_entry(data, key)
+    if entry is None:
+        return fallback
+    a = _optional_float(entry.get("a_cmd", entry.get("a")))
+    b = _optional_float(entry.get("b_cmd", entry.get("b")))
+    ms = _optional_int(entry.get("pulse_ms", entry.get("ms")))
+    yaw = _optional_float(entry.get("last_imu_yaw_delta_deg", entry.get("imu_yaw_delta_deg")))
+    target = _optional_float(entry.get("target_angle_deg"))
+    if a is None or b is None or ms is None:
+        return fallback
+    if key == "turn_left_90":
+        b = abs(b)
+    else:
+        b = -abs(b)
+    return {
+        "available": True,
+        "a": round(a, 3),
+        "b": round(b, 3),
+        "ms": ms,
+        "target_angle_deg": target if target is not None else 90.0,
+        "imu_yaw_delta_deg": None if yaw is None else round(yaw, 3),
+        "visual_confirmation": str(entry.get("visual_confirmation", "approved")),
+        "ready": True,
+        "source": source_name or "interactive_motion_calibration",
+    }
+
+
 def _smooth_turn_entry(data: dict[str, object], source_name: str | None, *, direction: str, allow_uncalibrated: bool) -> dict[str, object]:
     prefix = "smooth_left" if direction == "left" else "smooth_right"
     default_b = 0.20 if direction == "left" else -0.08
@@ -241,6 +317,7 @@ def _smooth_turn_entry(data: dict[str, object], source_name: str | None, *, dire
 
 def resolve_physical_calibration(
     *,
+    motion_calibration_json: Path | None = None,
     fine_calibration_json: Path | None = DEFAULT_FINE_CALIBRATION,
     turn_calibration_json: Path | None = DEFAULT_TURN_CALIBRATION,
     turn_angle_calibration_json: Path | None = DEFAULT_TURN_ANGLE_CALIBRATION,
@@ -250,13 +327,18 @@ def resolve_physical_calibration(
     left_fixed_pulses: int = DEFAULT_LEFT_FIXED_PULSES,
     right_fixed_pulses: int = DEFAULT_RIGHT_FIXED_PULSES,
 ) -> dict[str, object]:
+    motion, motion_source = _load_json_if_present(motion_calibration_json)
     fine, fine_source = _load_json_if_present(fine_calibration_json)
     turn, turn_source = _load_json_if_present(turn_calibration_json)
     angle, angle_source = _load_json_if_present(turn_angle_calibration_json)
     smooth, smooth_source = _load_json_if_present(smooth_turn_calibration_json)
 
-    left_90 = _angle_turn_entry(angle, angle_source, "turn_left_90")
-    right_90 = _angle_turn_entry(angle, angle_source, "turn_right_90")
+    left_90 = _interactive_angle_turn_entry(
+        motion, motion_source, "turn_left_90", _angle_turn_entry(angle, angle_source, "turn_left_90")
+    )
+    right_90 = _interactive_angle_turn_entry(
+        motion, motion_source, "turn_right_90", _angle_turn_entry(angle, angle_source, "turn_right_90")
+    )
     angle_ready = bool(left_90.get("available")) and bool(right_90.get("available"))
     smooth_left = _smooth_turn_entry(smooth, smooth_source, direction="left", allow_uncalibrated=allow_uncalibrated_smooth)
     smooth_right = _smooth_turn_entry(smooth, smooth_source, direction="right", allow_uncalibrated=allow_uncalibrated_smooth)
@@ -287,10 +369,18 @@ def resolve_physical_calibration(
         raise ValueError(f"unsupported calibration_mode: {calibration_mode}")
 
     return {
-        "forward": _motion_primitive(fine, fine_source, direction="forward"),
-        "backward": _motion_primitive(fine, fine_source, direction="backward"),
-        "turn_left": _turn_primitive(turn, turn_source, direction="left"),
-        "turn_right": _turn_primitive(turn, turn_source, direction="right"),
+        "forward": _interactive_motion_override(
+            motion, motion_source, "forward", _motion_primitive(fine, fine_source, direction="forward")
+        ),
+        "backward": _interactive_motion_override(
+            motion, motion_source, "backward", _motion_primitive(fine, fine_source, direction="backward")
+        ),
+        "turn_left": _interactive_motion_override(
+            motion, motion_source, "left", _turn_primitive(turn, turn_source, direction="left")
+        ),
+        "turn_right": _interactive_motion_override(
+            motion, motion_source, "right", _turn_primitive(turn, turn_source, direction="right")
+        ),
         "turn_left_90": left_90,
         "turn_right_90": right_90,
         "smooth_turn_left_90": smooth_left,
@@ -306,6 +396,7 @@ def resolve_physical_calibration(
         "left_fixed_pulses": int(left_fixed_pulses),
         "right_fixed_pulses": int(right_fixed_pulses),
         "calibration_files": {
+            "motion": str(motion_calibration_json) if motion_calibration_json else None,
             "fine": str(fine_calibration_json) if fine_calibration_json else None,
             "turn_twitch": str(turn_calibration_json) if turn_calibration_json else None,
             "turn_angle": str(turn_angle_calibration_json) if turn_angle_calibration_json else None,

@@ -1,10 +1,10 @@
 """Discrete guarded pulse execution: the ARM -> ACK -> STOP finite-state machine.
 
-This owns the serial-facing mechanics that were inlined in stage30: line-reading
+This owns the serial-facing mechanics: line-reading
 wait loops and the four-step pulse handshake. ``send_pulse`` issues exactly one
 guarded pulse (arm, command, await pulse-complete, stop) and returns the rows
-captured during that pulse window. Higher layers (stage30 today, the controller
-in Phase 2) own the reporting / IMU / GPS logic around each pulse.
+captured during that pulse window. Higher layers own the reporting / IMU / GPS
+logic around each pulse.
 
 The firmware still owns the real motor-output safety gate; this module only
 sequences commands and waits for the matching telemetry events.
@@ -38,13 +38,16 @@ def wait_for_row(
     raw_lines: list[str],
     predicate: Callable[[dict[str, str]], bool],
     timeout_s: float,
+    *,
+    verbose_raw: bool = True,
 ) -> dict[str, str] | None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         raw = handle.readline()  # type: ignore[attr-defined]
         if raw:
             line = raw.decode("utf-8", errors="replace").strip()
-            print(line)
+            if verbose_raw:
+                print(line)
             raw_lines.append(line)
             rows = serial_rows([line])
             row = rows[0] if rows else None
@@ -58,6 +61,8 @@ def wait_for_event(
     raw_lines: list[str],
     wanted: set[str],
     timeout_s: float,
+    *,
+    verbose_raw: bool = True,
 ) -> list[dict[str, str]]:
     deadline = time.monotonic() + timeout_s
     start_index = len(raw_lines)
@@ -65,7 +70,8 @@ def wait_for_event(
         raw = handle.readline()  # type: ignore[attr-defined]
         if raw:
             line = raw.decode("utf-8", errors="replace").strip()
-            print(line)
+            if verbose_raw:
+                print(line)
             raw_lines.append(line)
             rows = serial_rows(raw_lines, start_index)
             if any(telemetry.event(row) in wanted for row in rows):
@@ -79,6 +85,7 @@ def send_pulse(
     raw_lines: list[str],
     *,
     event_timeout_s: float,
+    verbose_raw: bool = True,
 ) -> list[dict[str, str]]:
     """Run one guarded pulse and return the telemetry rows from its window.
 
@@ -89,16 +96,22 @@ def send_pulse(
     """
     pulse_start = len(raw_lines)
     _write_line(handle, planned["arm_command_text"])
-    wait_for_event(handle, raw_lines, ARM_EVENTS, event_timeout_s)
-    _write_line(handle, planned["stage20_command_text"])
-    wait_for_event(handle, raw_lines, COMMAND_ACK_EVENTS, event_timeout_s)
+    wait_for_event(handle, raw_lines, ARM_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
+    command_text = (
+        planned.get("command_text")
+        or planned.get("station_drive_command_text")
+        or planned.get("stage20_command_text")
+    )
+    _write_line(handle, command_text)
+    wait_for_event(handle, raw_lines, COMMAND_ACK_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
     pulse_ms = int(planned["pulse_ms"])
     wait_for_event(
         handle,
         raw_lines,
         PULSE_COMPLETE_EVENTS,
         max(event_timeout_s, pulse_ms / 1000.0 + 1.0),
+        verbose_raw=verbose_raw,
     )
     _write_line(handle, planned["stop_command_text"])
-    wait_for_event(handle, raw_lines, STOP_CONFIRM_EVENTS, event_timeout_s)
+    wait_for_event(handle, raw_lines, STOP_CONFIRM_EVENTS, event_timeout_s, verbose_raw=verbose_raw)
     return serial_rows(raw_lines, pulse_start)

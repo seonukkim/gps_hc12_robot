@@ -19,6 +19,7 @@ Modes:
   station-hw-diagnose   Read-only physical station hardware link diagnostic.
   station-hw-manual     Deprecated serial-frame monitor; use manual-control for PPM.
   usb-pulse-test        Laptop USB bounded A/B pulse motor validation.
+  tune-motion           Interactive visual/IMU-assisted motion calibration.
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
   preview               Build + render a rectangle coverage plan. No motion.
@@ -47,6 +48,10 @@ Examples:
   bash scripts/run_physical_path_planner.sh usb-pulse-test \
     --print-command true \
     --out-dir outputs/physical_path_planning/usb_pulse_test_print
+
+  bash scripts/run_physical_path_planner.sh tune-motion \
+    --primitive forward \
+    --out-dir outputs/physical_path_planning/tune_forward
 
   bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
     --out-dir outputs/physical_path_planning/guarded_pulse_ready
@@ -90,6 +95,7 @@ MAX_ABS_B="0.35"
 MAX_MS="1000"
 PRINT_PLAN="false"
 PRINT_CMD="false"
+PRINT_CANDIDATE="false"
 FROM_LOG="false"
 PASSTHRU=()
 
@@ -126,6 +132,11 @@ while [[ $# -gt 0 ]]; do
     --print-command)
       PRINT_CMD="$2"
       PASSTHRU+=("--print-command" "$2")
+      shift 2
+      ;;
+    --print-candidate)
+      PRINT_CANDIDATE="$2"
+      PASSTHRU+=("--print-candidate" "$2")
       shift 2
       ;;
     --from-log)
@@ -248,6 +259,9 @@ mode_needs_port() {
     calibrate-turn|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
       [[ "$PRINT_CMD" != "true" ]]
       ;;
+    tune-motion)
+      [[ "$PRINT_CANDIDATE" != "true" ]]
+      ;;
     run|execute-plan)
       [[ "$PRINT_PLAN" != "true" ]]
       ;;
@@ -322,7 +336,7 @@ resolve_post_upload_port() {
 }
 
 case "$MODE" in
-  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
+  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|tune-motion|station-drive|station-manual|guarded-pulse-ready)
     exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
     ;;
   run|execute-plan)

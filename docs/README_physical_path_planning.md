@@ -15,6 +15,7 @@ Modes:
 - `station-hw-diagnose` — read-only physical station hardware link diagnostic.
 - `station-hw-manual` — deprecated serial-frame monitor; use `manual-control` for the current PPM controller.
 - `usb-pulse-test` — laptop USB bounded A/B pulse motor validation.
+- `tune-motion` — interactive visual/IMU-assisted motion calibration using USB pulses.
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
 - `preview` — build + render a rectangle coverage plan without motor output.
@@ -43,6 +44,10 @@ bash scripts/run_physical_path_planner.sh station-hw-diagnose \
 
 bash scripts/run_physical_path_planner.sh usb-pulse-test \
   --out-dir outputs/physical_path_planning/usb_pulse_test
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive forward \
+  --out-dir outputs/physical_path_planning/tune_forward
 
 bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
   --out-dir outputs/physical_path_planning/guarded_pulse_ready
@@ -126,6 +131,49 @@ heartbeat ready, command sent, ACK/ACTIVE/STOP, final zero, and observed motion.
 Raw firmware telemetry is saved to `raw_usbdbg.log`; add `--verbose-raw true`
 only when debugging the serial stream. By default usb-pulse-test does not require
 receiver input, so `RC_INPUT_ABSENT` does not block bounded station pulse testing.
+
+## Interactive Motion Tuning
+
+Use `tune-motion` after `usb-pulse-test` has confirmed bounded A/B commands move
+the rover. The tool runs one candidate USB pulse at a time, reads IMU yaw
+telemetry when available, asks for simple visual feedback, and adjusts the next
+candidate automatically. It does not ask for manually measured distance.
+
+```bash
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive forward \
+  --out-dir outputs/physical_path_planning/tune_forward
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive backward \
+  --out-dir outputs/physical_path_planning/tune_backward
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive turn-left-90 \
+  --out-dir outputs/physical_path_planning/tune_turn_left_90
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive turn-right-90 \
+  --out-dir outputs/physical_path_planning/tune_turn_right_90
+```
+
+Operator feedback is one of:
+
+```text
+good weak strong too_short too_long left right none retry approve abort
+```
+
+Entering `approve` saves the current candidate to:
+
+```text
+outputs/physical_path_planning/calibration/motion_calibration.json
+```
+
+`execute-plan` and `run` load that file by default. Approved forward/backward
+entries become the straight-pulse base, with IMU heading hold applying only a
+small clamped B correction. Approved `turn_left_90` and `turn_right_90` entries
+become the preferred connector commands; repeated small turn pulses remain a
+fallback when approved 90-degree turn calibration is missing.
 
 If `manual-rc` reports `reason=RC_INPUT_ABSENT`, all receiver channel inputs are
 zero or absent. Check receiver power, transmitter binding, receiver signal wiring,

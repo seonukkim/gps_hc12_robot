@@ -31,7 +31,7 @@ from urllib.parse import unquote
 from pathlib import Path
 from typing import Sequence
 
-from tools.physical_path_planning import calibration, checks, controller, executor, preview, safety, telemetry
+from tools.physical_path_planning import calibration, checks, controller, executor, preview, safety, telemetry, tuning
 
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
@@ -755,6 +755,7 @@ def resolve_calibration(args: argparse.Namespace) -> dict[str, object]:
     """
     kwargs: dict[str, object] = {"calibration_mode": args.calibration_mode}
     for flag, key in (
+        ("motion_calibration_json", "motion_calibration_json"),
         ("fine_calibration_json", "fine_calibration_json"),
         ("turn_calibration_json", "turn_calibration_json"),
         ("turn_angle_calibration_json", "turn_angle_calibration_json"),
@@ -2001,6 +2002,294 @@ def cmd_usb_pulse_test(args: argparse.Namespace) -> int:
     return 0 if success else 2
 
 
+def tune_motion_planned_command(candidate: dict[str, object], *, seq: int) -> dict[str, object]:
+    a_cmd = float(candidate["a"])
+    b_cmd = float(candidate["b"])
+    pulse_ms = int(candidate["ms"])
+    return {
+        "seq": seq,
+        "primitive": candidate["primitive"],
+        "a_cmd": a_cmd,
+        "b_cmd": b_cmd,
+        "pulse_ms": pulse_ms,
+        "arm_command_text": f"USB_PULSE_TEST_ARM seq={seq}",
+        "command_text": f"USB_PULSE_TEST_CMD seq={seq} a={a_cmd:.3f} b={b_cmd:.3f} ms={pulse_ms}",
+        "stop_command_text": f"USB_PULSE_TEST_STOP seq={seq}",
+    }
+
+
+def tune_motion_trial_row(
+    *,
+    trial_index: int,
+    candidate: dict[str, object],
+    feedback: str,
+    pulse_rows: Sequence[dict[str, str]],
+    invalid_reason: str | None,
+    yaw_delta_deg: float | None,
+) -> dict[str, object]:
+    last = pulse_rows[-1] if pulse_rows else {}
+    final_left = telemetry._optional_float(last.get("final_left_cmd")) if last else None
+    final_right = telemetry._optional_float(last.get("final_right_cmd")) if last else None
+    final_zero = (
+        final_left is not None
+        and final_right is not None
+        and abs(final_left) <= 1e-6
+        and abs(final_right) <= 1e-6
+    )
+    return {
+        "trial_index": trial_index,
+        "primitive": candidate["primitive"],
+        "a_cmd": f"{float(candidate['a']):.3f}",
+        "b_cmd": f"{float(candidate['b']):.3f}",
+        "pulse_ms": int(candidate["ms"]),
+        "target_angle_deg": candidate.get("target_angle_deg", "NA"),
+        "imu_yaw_delta_deg": "NA" if yaw_delta_deg is None else f"{yaw_delta_deg:.3f}",
+        "feedback": feedback,
+        "ack_seen": any(telemetry.event(row) == "ACK" for row in pulse_rows),
+        "active_seen": any(telemetry.event(row) == "ACTIVE" or _station_drive_latest_state(row) == "ACTIVE" for row in pulse_rows),
+        "stop_seen": any(telemetry.event(row) in safety.STOP_EVENTS for row in pulse_rows),
+        "reject_seen": any(telemetry.event(row) == "REJECT" for row in pulse_rows),
+        "final_left_cmd": last.get("final_left_cmd", "NA"),
+        "final_right_cmd": last.get("final_right_cmd", "NA"),
+        "final_zero": final_zero,
+        "valid_pulse": invalid_reason is None,
+        "invalid_reason": invalid_reason or "OK",
+        "ready_for_full_path_following": False,
+    }
+
+
+def tune_motion_summary(
+    rows: Sequence[dict[str, object]],
+    *,
+    primitive: str,
+    candidate: dict[str, object],
+    approved: bool,
+    reason: str,
+    calibration_out: Path,
+) -> dict[str, object]:
+    summary = {
+        "mode": "tune-motion",
+        "success": approved,
+        "reason": reason,
+        "primitive": primitive,
+        "trial_count": len(rows),
+        "approved_candidate": {
+            "a": round(float(candidate["a"]), 3),
+            "b": round(float(candidate["b"]), 3),
+            "ms": int(candidate["ms"]),
+            **(
+                {"target_angle_deg": float(candidate["target_angle_deg"])}
+                if "target_angle_deg" in candidate else {}
+            ),
+        },
+        "calibration_out": str(calibration_out),
+        "final_zero_required": True,
+        "observed_distance_m_required": False,
+        "next_recommended_action": (
+            "Use execute-plan or run; approved motion calibration will be loaded automatically."
+            if approved else
+            "Rerun tune-motion and approve only after ACK/ACTIVE/STOP/final-zero and visual behavior are acceptable."
+        ),
+        "ready_for_full_path_following": False,
+    }
+    return checks.assert_not_ready_for_full_path_following(summary)
+
+
+def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, title: str) -> int:
+    flags = usb_pulse_test_firmware_flags(max_abs_a=args.max_abs_a, max_abs_b=args.max_abs_b, max_ms=args.max_ms)
+    build_path = "/private/tmp/openrb-tune-motion" if title == "Tune Motion" else "/private/tmp/openrb-usb-pulse-test"
+    compile_cmd = [
+        "arduino-cli",
+        "compile",
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        build_path,
+        "--build-property",
+        f"compiler.cpp.extra_flags={flags}",
+        "firmware/openrb_robot_controller",
+    ]
+    upload_cmd = [
+        "arduino-cli",
+        "upload",
+        "-p",
+        str(args.port),
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        build_path,
+        "firmware/openrb_robot_controller",
+    ]
+    completed = subprocess.run(compile_cmd, check=False)
+    if completed.returncode != 0:
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "tune-motion",
+                "success": False,
+                "reason": "USB_PULSE_TEST_FIRMWARE_COMPILE_FAILED",
+                "returncode": completed.returncode,
+                "next_recommended_action": "Inspect Arduino compile output before retrying tune-motion.",
+                "ready_for_full_path_following": False,
+            },
+            title=title,
+        )
+        return completed.returncode
+    completed = subprocess.run(upload_cmd, check=False)
+    if completed.returncode != 0:
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "tune-motion",
+                "success": False,
+                "reason": "USB_PULSE_TEST_FIRMWARE_UPLOAD_FAILED",
+                "returncode": completed.returncode,
+                "next_recommended_action": "Check OpenRB port and upload mode before retrying tune-motion.",
+                "ready_for_full_path_following": False,
+            },
+            title=title,
+        )
+        return completed.returncode
+    return 0
+
+
+def cmd_tune_motion(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    primitive = tuning.normalize_primitive(args.primitive)
+    candidate = tuning.initial_candidate(primitive)
+    calibration_out = tuning.motion_calibration_path(args.calibration_out)
+    if args.print_candidate == "true":
+        summary = tune_motion_summary(
+            [],
+            primitive=primitive,
+            candidate=candidate,
+            approved=False,
+            reason="CANDIDATE_PRINTED",
+            calibration_out=calibration_out,
+        )
+        summary["success"] = True
+        _write_json(out_dir / "tune_motion_candidate.json", candidate)
+        write_summary_files(out_dir, summary, title="Tune Motion")
+        print(
+            f"{primitive}: A={float(candidate['a']):+0.3f} "
+            f"B={float(candidate['b']):+0.3f} ms={int(candidate['ms'])}"
+        )
+        return 0
+    if not ensure_port(args):
+        return 2
+    if args.upload in {"true", "auto"}:
+        uploaded = _upload_usb_pulse_test_firmware(args, out_dir, title="Tune Motion")
+        if uploaded != 0:
+            return uploaded
+
+    import serial
+
+    raw_lines: list[str] = []
+    trial_rows: list[dict[str, object]] = []
+    approved = False
+    reason = "NOT_APPROVED"
+    try:
+        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+            for trial_index in range(1, args.max_iterations + 1):
+                candidate = tuning.clamp_candidate(candidate)
+                print(
+                    f"candidate trial={trial_index} primitive={primitive} "
+                    f"A={float(candidate['a']):+0.3f} B={float(candidate['b']):+0.3f} ms={int(candidate['ms'])}"
+                )
+                if "target_angle_deg" in candidate:
+                    print(f"target_angle_deg={float(candidate['target_angle_deg']):.1f}")
+                heartbeat = executor.wait_for_row(
+                    handle,
+                    raw_lines,
+                    lambda row: telemetry.event(row) == "HEARTBEAT" and station_drive_compatible(row),
+                    args.heartbeat_timeout_s,
+                    verbose_raw=args.verbose_raw == "true",
+                )
+                print(f"heartbeat ready: {str(heartbeat is not None).lower()}")
+                if heartbeat is None:
+                    reason = "USB_PULSE_TEST_HEARTBEAT_MISSING"
+                    break
+                if args.require_enter == "true":
+                    response = input("Press Enter to send, or type abort: ").strip().lower()
+                    if response == "abort":
+                        reason = "USER_ABORTED"
+                        break
+                planned = tune_motion_planned_command(candidate, seq=trial_index)
+                print("command sent")
+                pulse_rows = executor.send_pulse(
+                    handle,
+                    planned,
+                    raw_lines,
+                    event_timeout_s=args.event_timeout_s,
+                    verbose_raw=args.verbose_raw == "true",
+                )
+                invalid_reason = controller.pulse_block_reason(pulse_rows)
+                yaw_delta = tuning.yaw_delta_from_rows(pulse_rows)
+                if yaw_delta is not None:
+                    print(f"imu_yaw_delta_deg={yaw_delta:.3f}")
+                if invalid_reason is not None:
+                    reason = invalid_reason
+                    trial_rows.append(
+                        tune_motion_trial_row(
+                            trial_index=trial_index,
+                            candidate=candidate,
+                            feedback="invalid",
+                            pulse_rows=pulse_rows,
+                            invalid_reason=invalid_reason,
+                            yaw_delta_deg=yaw_delta,
+                        )
+                    )
+                    break
+                feedback = input(
+                    "observed? [good/weak/strong/too_short/too_long/left/right/none/retry/approve/abort]: "
+                ).strip().lower() or "retry"
+                trial_rows.append(
+                    tune_motion_trial_row(
+                        trial_index=trial_index,
+                        candidate=candidate,
+                        feedback=feedback,
+                        pulse_rows=pulse_rows,
+                        invalid_reason=invalid_reason,
+                        yaw_delta_deg=yaw_delta,
+                    )
+                )
+                if feedback == "abort":
+                    reason = "USER_ABORTED"
+                    break
+                if feedback == "approve":
+                    tuning.save_approved_calibration(
+                        calibration_out,
+                        candidate,
+                        yaw_delta_deg=yaw_delta,
+                        heading_drift_deg=yaw_delta if primitive in {"forward", "backward"} else None,
+                    )
+                    approved = True
+                    reason = "APPROVED"
+                    break
+                candidate = tuning.adjust_candidate(candidate, feedback, yaw_delta_deg=yaw_delta)
+    except KeyboardInterrupt:
+        reason = "USER_ABORTED"
+    except OSError:
+        reason = "SERIAL_DISCONNECT"
+
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "tune_motion_trials.csv", trial_rows)
+    summary = tune_motion_summary(
+        trial_rows,
+        primitive=primitive,
+        candidate=candidate,
+        approved=approved,
+        reason=reason,
+        calibration_out=calibration_out,
+    )
+    write_summary_files(out_dir, summary, title="Tune Motion")
+    print(f"tune_motion_success={str(approved).lower()}")
+    print(f"reason={reason}")
+    print("ready_for_full_path_following=false")
+    return 0 if approved else 2
+
+
 def _station_hw_compile_upload_cmds(args: argparse.Namespace, *, diagnose_only: bool) -> tuple[list[str], list[str], str]:
     flags = station_hw_diagnose_firmware_flags() if diagnose_only else station_hw_manual_firmware_flags()
     build_path = "/private/tmp/openrb-station-hw-diagnose" if diagnose_only else "/private/tmp/openrb-station-hw-manual"
@@ -2443,6 +2732,7 @@ def _add_goal_arguments(parser: argparse.ArgumentParser, *, require_start: bool 
 
 def _add_calibration_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--calibration-mode", default="auto")
+    parser.add_argument("--motion-calibration-json", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
     parser.add_argument("--fine-calibration-json", default=None)
     parser.add_argument("--turn-calibration-json", default=None)
     parser.add_argument("--turn-angle-calibration-json", default=None)
@@ -2457,7 +2747,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,rc-input-diagnose,manual-rc,station-hw-diagnose,station-hw-manual,usb-pulse-test,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
+        metavar="{diagnose,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
     )
 
     preview_p = sub.add_parser("preview", help="build + render the plan (no serial, no motion)")
@@ -2624,6 +2914,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     station_drive_p.add_argument("--print-command", choices=["true", "false"], default="false")
     station_drive_p.set_defaults(handler=cmd_usb_pulse_test)
+
+    tune_p = sub.add_parser(
+        "tune-motion",
+        help="interactive visual/IMU-assisted USB pulse calibration",
+    )
+    tune_p.add_argument("--port", default=None)
+    tune_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    tune_p.add_argument(
+        "--primitive",
+        choices=["forward", "backward", "left", "right", "turn-left-90", "turn-right-90"],
+        required=True,
+    )
+    tune_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
+    tune_p.add_argument("--max-abs-a", type=float, default=tuning.MAX_ABS_A)
+    tune_p.add_argument("--max-abs-b", type=float, default=tuning.MAX_ABS_B)
+    tune_p.add_argument("--max-ms", type=int, default=tuning.MAX_MS)
+    tune_p.add_argument("--event-timeout-s", type=float, default=controller.DEFAULT_EVENT_TIMEOUT_S)
+    tune_p.add_argument("--heartbeat-timeout-s", type=float, default=controller.DEFAULT_HEARTBEAT_TIMEOUT_S)
+    tune_p.add_argument("--require-enter", choices=["true", "false"], default="true")
+    tune_p.add_argument("--max-iterations", type=int, default=12)
+    tune_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
+    tune_p.add_argument("--print-candidate", choices=["true", "false"], default="false")
+    tune_p.add_argument("--calibration-out", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
+    tune_p.add_argument("--out-dir", default="outputs/physical_path_planning/tune_motion")
+    tune_p.set_defaults(handler=cmd_tune_motion)
 
     def add_guarded_pulse_ready_parser(name: str) -> None:
         guarded_p = sub.add_parser(

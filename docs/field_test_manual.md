@@ -143,7 +143,40 @@ not RC manual passthrough, and not physical station hardware control. If
 `manual-rc` reports `RC_INPUT_ABSENT` but `usb-pulse-test` passes, the motor path
 works and the remaining issue is the RC receiver input path.
 
-## 5. Guarded Pulse Readiness
+## 6. Interactive Motion Tuning
+
+Run this after `usb-pulse-test` confirms that bounded A/B commands physically
+move the rover.
+
+```bash
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive forward \
+  --out-dir outputs/physical_path_planning/tune_forward
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive backward \
+  --out-dir outputs/physical_path_planning/tune_backward
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive turn-left-90 \
+  --out-dir outputs/physical_path_planning/tune_turn_left_90
+
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive turn-right-90 \
+  --out-dir outputs/physical_path_planning/tune_turn_right_90
+```
+
+For each trial, press Enter, observe the rover, then answer:
+
+```text
+good weak strong too_short too_long left right none retry approve abort
+```
+
+For turns, IMU yaw delta is recorded automatically. Enter `approve` to save the
+candidate to `outputs/physical_path_planning/calibration/motion_calibration.json`.
+No manually measured observed distance is required.
+
+## 7. Guarded Pulse Readiness
 
 ```bash
 bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
@@ -154,7 +187,7 @@ This uploads/checks IMU-enabled guarded pulse firmware and confirms the guarded
 pulse heartbeat, BMI160 yaw telemetry, RC OK, and neutral sticks. It is still not
 full path following.
 
-## 5. Turn Angle Calibration
+## 8. Turn Angle Calibration
 
 ```bash
 bash scripts/run_physical_path_planner.sh calibrate-turn \
@@ -165,7 +198,7 @@ bash scripts/run_physical_path_planner.sh calibrate-turn \
 
 This uses guarded pulse calibration with IMU yaw comparison.
 
-## 6. Preview
+## 9. Preview
 
 ```bash
 bash scripts/run_physical_path_planner.sh preview \
@@ -177,7 +210,7 @@ bash scripts/run_physical_path_planner.sh preview \
 Preview generates the rectangle coverage plan and images without motor output.
 A-B is the diagonal of the workspace rectangle.
 
-## 7. Execute A Reviewed Plan
+## 10. Execute A Reviewed Plan
 
 ```bash
 bash scripts/run_physical_path_planner.sh execute-plan \
@@ -188,6 +221,11 @@ bash scripts/run_physical_path_planner.sh execute-plan \
 Execution uses guarded pulse commands only. Abort conditions remain serial
 disconnect, `REJECT`, `RC_INVALID`, missing ACK/STOP, nonzero final commands after
 STOP, or output still active after STOP.
+
+Approved `motion_calibration.json` entries are loaded automatically. If approved
+90-degree turn commands exist, connectors use them before falling back to
+repeated small turn pulses. GPS degradation is not fatal under the default
+continue policy when IMU heading hold can continue.
 
 Every output must keep:
 

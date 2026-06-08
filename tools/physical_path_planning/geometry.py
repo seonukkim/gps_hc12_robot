@@ -15,6 +15,7 @@ from gps_coverage_core.geo import GeoPoint, LocalPoint, latlon_to_local, local_t
 from tools.physical_path_planning import calibration as calibration_resolver
 
 FALLBACK_RESOLVED_CALIBRATION = calibration_resolver.resolve_physical_calibration(
+    motion_calibration_json=None,
     fine_calibration_json=None,
     turn_calibration_json=None,
     turn_angle_calibration_json=None,

@@ -69,6 +69,10 @@ bash scripts/run_physical_path_planner.sh station-hw-diagnose \
 bash scripts/run_physical_path_planner.sh usb-pulse-test \
   --out-dir outputs/physical_path_planning/usb_pulse_test
 
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive forward \
+  --out-dir outputs/physical_path_planning/tune_forward
+
 bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
   --out-dir outputs/physical_path_planning/guarded_pulse_ready
 
@@ -93,6 +97,7 @@ Field modes:
 - `station-hw-diagnose` — read-only physical station hardware link diagnostic.
 - `station-hw-manual` — physical station hardware manual rover control.
 - `usb-pulse-test` — laptop USB bounded A/B rover pulse validation.
+- `tune-motion` — interactive visual/IMU-assisted motion calibration.
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
 - `preview` — build + render a rectangle coverage plan without motor output.
@@ -115,6 +120,12 @@ before expecting RC manual passthrough. If the separate station hardware is the
 operator control, use `station-hw-diagnose` and `station-hw-manual`. Motor/mapping
 validation can continue with `usb-pulse-test`, which does not use RC receiver
 input or station hardware input for command generation.
+
+After `usb-pulse-test` confirms motion, use `tune-motion` to approve calibrated
+forward/backward/turn commands from simple visual feedback and IMU yaw deltas.
+Approved entries are saved to
+`outputs/physical_path_planning/calibration/motion_calibration.json` and loaded
+automatically by `execute-plan` and `run`.
 
 For receiver-only diagnosis before manual passthrough:
 

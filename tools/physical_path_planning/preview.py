@@ -22,6 +22,7 @@ from tools.physical_path_planning import checks, geometry
 
 def resolve_preview_calibration(
     *,
+    motion_calibration_json: Path | None = None,
     fine_calibration_json: Path | None = None,
     turn_calibration_json: Path | None = None,
     turn_angle_calibration_json: Path | None = None,
@@ -36,6 +37,7 @@ def resolve_preview_calibration(
     repeated-pulses fallback instead of an error.
     """
     return calibration_resolver.resolve_physical_calibration(
+        motion_calibration_json=motion_calibration_json,
         fine_calibration_json=fine_calibration_json,
         turn_calibration_json=turn_calibration_json,
         turn_angle_calibration_json=turn_angle_calibration_json,
