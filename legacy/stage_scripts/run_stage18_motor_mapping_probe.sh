@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  scripts/run_stage18_motor_mapping_probe.sh \
+  legacy/stage_scripts/run_stage18_motor_mapping_probe.sh \
     --port /dev/ttyACM0 \
     --mode all \
     --cmd-list "0.04,0.06,0.08" \

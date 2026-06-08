@@ -8,7 +8,7 @@ from tools import stage22_straight_segment
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage22_straight_segment.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage22_straight_segment.sh"
 
 
 def _row(**overrides: object) -> dict[str, object]:

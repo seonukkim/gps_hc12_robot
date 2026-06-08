@@ -53,7 +53,7 @@ def _assert_standard_summary(out_dir: Path) -> dict[str, object]:
 
 def test_calibrate_turn_argv_always_enables_imu_angle_compare() -> None:
     argv = cli.build_calibrate_turn_argv(
-        script="scripts/run_stage20_physical_ab_probe.sh",
+        script="legacy/stage_scripts/run_stage20_physical_ab_probe.sh",
         port="/dev/ttyACM0",
         mode="turn_left",
         target_angle_deg=90.0,
@@ -73,7 +73,7 @@ def test_calibrate_turn_argv_always_enables_imu_angle_compare() -> None:
 
 def test_calibrate_turn_argv_accepts_direction_command_values() -> None:
     argv = cli.build_calibrate_turn_argv(
-        script="scripts/run_stage20_physical_ab_probe.sh",
+        script="legacy/stage_scripts/run_stage20_physical_ab_probe.sh",
         port="/dev/cu.usbmodem212101",
         mode="turn_left",
         b_cmd=0.22,
@@ -471,7 +471,7 @@ def test_docs_quickstart_uses_unified_launcher_only() -> None:
     field_manual = Path("docs/field_test_manual.md").read_text()
     for text in (readme, ppp_readme, field_manual):
         assert "scripts/run_physical_path_planner.sh" in text
-        assert "scripts/run_stage" not in text
+        assert "legacy/stage_scripts/run_stage" not in text
     assert "RC_INPUT_ABSENT" in ppp_readme
     assert "RC_INPUT_ABSENT" in field_manual
 

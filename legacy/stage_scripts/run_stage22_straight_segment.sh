@@ -80,7 +80,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  scripts/run_stage22_straight_segment.sh \
+  legacy/stage_scripts/run_stage22_straight_segment.sh \
     --port /dev/ttyACM0 \
     --path-package outputs/field_ab_serpentine_georef/latest/path_package.json \
     --fine-calibration-json outputs/stage20_physical_ab_probe/calibration/physical_ab_fine_motion_calibration.json \

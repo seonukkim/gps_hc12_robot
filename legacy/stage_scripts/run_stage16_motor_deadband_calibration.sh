@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  scripts/run_stage16_motor_deadband_calibration.sh \
+  legacy/stage_scripts/run_stage16_motor_deadband_calibration.sh \
     --port /dev/ttyACM0 \
     --mode forward \
     --cmd-list "0.015,0.020,0.025,0.030,0.035,0.040" \

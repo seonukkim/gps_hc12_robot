@@ -8,7 +8,7 @@ from tools import station_guarded_path_crawl
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage16_guarded_path_crawl.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage16_guarded_path_crawl.sh"
 
 
 def _georef_package() -> dict[str, object]:

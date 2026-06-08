@@ -155,7 +155,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  scripts/run_stage21_path_physical_ab_first_primitive.sh \
+  legacy/stage_scripts/run_stage21_path_physical_ab_first_primitive.sh \
     --port /dev/ttyACM0 \
     --path-package latest \
     --pose-mode manual_local \

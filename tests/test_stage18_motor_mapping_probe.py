@@ -8,7 +8,7 @@ from tools import stage18_motor_mapping_probe
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage18_motor_mapping_probe.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage18_motor_mapping_probe.sh"
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:

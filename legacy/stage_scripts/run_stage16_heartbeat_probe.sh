@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  scripts/run_stage16_heartbeat_probe.sh \
+  legacy/stage_scripts/run_stage16_heartbeat_probe.sh \
     --port /dev/ttyACM0 \
     [--duration-s 15] \
     [--out-dir outputs/stage16_heartbeat_probe/latest]

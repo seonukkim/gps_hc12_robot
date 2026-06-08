@@ -8,7 +8,7 @@ from tools import stage16_motor_deadband_calibration
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage16_motor_deadband_calibration.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage16_motor_deadband_calibration.sh"
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:

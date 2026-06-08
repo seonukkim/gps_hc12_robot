@@ -8,7 +8,7 @@ from tools import stage20_physical_ab_probe
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage20_physical_ab_probe.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage20_physical_ab_probe.sh"
 FIRMWARE = REPO / "firmware" / "openrb_robot_controller" / "openrb_robot_controller.ino"
 
 

@@ -9,7 +9,7 @@ from tools import station_first_primitive_crawl
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage17_first_primitive_crawl.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage17_first_primitive_crawl.sh"
 
 
 def _georef_package() -> dict[str, object]:

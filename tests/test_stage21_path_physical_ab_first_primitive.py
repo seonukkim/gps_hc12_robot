@@ -7,7 +7,7 @@ from tools import stage21_path_physical_ab_first_primitive as stage21
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "run_stage21_path_physical_ab_first_primitive.sh"
+SCRIPT = REPO / "legacy" / "stage_scripts" / "run_stage21_path_physical_ab_first_primitive.sh"
 
 
 def _georef_package() -> dict[str, object]:

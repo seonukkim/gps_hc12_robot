@@ -118,7 +118,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  scripts/run_stage20_physical_ab_probe.sh \
+  legacy/stage_scripts/run_stage20_physical_ab_probe.sh \
     --port /dev/ttyACM0 \
     --mode forward \
     --turn-profile left_twitch \
