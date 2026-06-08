@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -198,6 +200,21 @@ def test_shell_help_uses_functional_mode_names() -> None:
     assert "Stage16" not in help_text
     assert "Stage35" not in help_text
     assert "Stage36" not in help_text
+
+
+def test_shell_station_hw_subcommand_help_is_no_hardware() -> None:
+    for mode in ("station-hw-diagnose", "station-hw-manual"):
+        completed = subprocess.run(
+            ["bash", "scripts/run_physical_path_planner.sh", mode, "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0
+        assert f"scripts/run_physical_path_planner.sh {mode}" in completed.stdout
+        assert "resolved_port=" not in completed.stdout
+        assert "Stage20" not in completed.stdout
+        assert "Stage16" not in completed.stdout
 
 
 def test_guarded_pulse_ready_print_cmd_contains_imu_flags(
@@ -390,6 +407,24 @@ def test_station_hw_diagnose_classifies_absent_link() -> None:
     assert summary["ready_for_full_path_following"] is False
 
 
+def test_station_hw_diagnose_classifies_rx_count_parse_fail() -> None:
+    rows = [
+        {
+            "hc12_rx_count": "5",
+            "station_frame_count": "0",
+            "station_parse_ok_count": "0",
+            "station_parse_error_count": "5",
+            "station_manual_valid": "false",
+            "station_deadman": "false",
+            "station_estop": "false",
+        }
+    ]
+    summary = cli.evaluate_station_hw_rows(rows, mode="station-hw-diagnose")
+    assert summary["reason"] == "STATION_HW_FRAMES_PRESENT_PARSE_FAIL"
+    assert summary["station_link_seen"] is True
+    assert summary["station_parse_error_count"] == 5
+
+
 def test_station_hw_diagnose_classifies_deadman_false() -> None:
     rows = [
         {
@@ -446,6 +481,90 @@ def test_station_hw_manual_maps_forward_and_turn_to_physical_ab() -> None:
     assert summary["rc_input_required"] is False
 
 
+def test_station_hw_manual_pass_does_not_require_gps_imu_or_rc() -> None:
+    rows = [
+        {
+            "station_hw_manual_mode": "true",
+            "station_link_seen": "true",
+            "station_seq": "11",
+            "station_age_ms": "20",
+            "station_manual_valid": "true",
+            "station_deadman": "true",
+            "station_estop": "false",
+            "station_forward_cmd": "0.300",
+            "station_turn_cmd": "0.260",
+            "station_physical_a_cmd": "0.300",
+            "station_physical_b_cmd": "0.260",
+            "control_source": "STATION_HW_MANUAL",
+            "motor_write_called": "true",
+            "physical_output_active": "true",
+            "final_left_cmd": "0.100",
+            "final_right_cmd": "0.200",
+            "rc_ok": "false",
+            "gps_block_reason": "NO_LOCATION",
+            "imu_present": "false",
+        }
+    ]
+    summary = cli.evaluate_station_hw_rows(rows, mode="station-hw-manual")
+    assert summary["reason"] == "STATION_HW_MANUAL_PASS"
+    assert summary["success"] is True
+    assert summary["rc_input_required"] is False
+    assert summary["gps_required"] is False
+    assert summary["imu_required"] is False
+
+
+def test_station_hw_manual_classifies_valid_ab_without_motor_as_output_blocked() -> None:
+    rows = [
+        {
+            "station_hw_manual_mode": "true",
+            "station_link_seen": "true",
+            "station_seq": "9",
+            "station_age_ms": "30",
+            "station_manual_valid": "true",
+            "station_deadman": "true",
+            "station_estop": "false",
+            "station_forward_cmd": "0.300",
+            "station_turn_cmd": "0.260",
+            "station_physical_a_cmd": "0.300",
+            "station_physical_b_cmd": "0.260",
+            "control_source": "STATION_HW_MANUAL",
+            "motor_write_called": "false",
+            "physical_output_active": "false",
+            "final_left_cmd": "0.000",
+            "final_right_cmd": "0.000",
+        }
+    ]
+    manual_summary = cli.evaluate_station_hw_rows(rows, mode="station-hw-manual")
+    diagnose_summary = cli.evaluate_station_hw_rows(rows, mode="station-hw-diagnose")
+    assert manual_summary["reason"] == "STATION_HW_MANUAL_OUTPUT_BLOCKED"
+    assert manual_summary["success"] is False
+    assert diagnose_summary["reason"] == "STATION_HW_MANUAL_READY"
+    assert diagnose_summary["success"] is True
+
+
+def test_station_hw_status_line_contains_pipeline_fields() -> None:
+    rows = [
+        {
+            "hc12_rx_count": "3",
+            "station_seq": "9",
+            "station_age_ms": "25",
+            "station_manual_valid": "true",
+            "station_deadman": "true",
+            "station_estop": "false",
+            "station_physical_a_cmd": "0.300",
+            "station_physical_b_cmd": "0.260",
+        }
+    ]
+    line = cli.station_hw_status_line(rows, mode="station-hw-diagnose", elapsed_s=4.2)
+    assert "elapsed_s=4" in line
+    assert "station_link_seen=true" in line
+    assert "station_frame_count=3" in line
+    assert "station_deadman=true" in line
+    assert "station_physical_a_cmd=0.300" in line
+    assert "station_physical_b_cmd=0.260" in line
+    assert "reason_so_far=STATION_HW_MANUAL_READY" in line
+
+
 def test_station_hw_firmware_flags_enable_ab_mapping_and_hc12() -> None:
     flags = cli.station_hw_manual_firmware_flags()
     assert "STATION_HW_MANUAL_ENABLE=1" in flags
@@ -463,6 +582,69 @@ def test_station_hw_diagnose_print_command_writes_summary(
     assert "STATION HARDWARE DIAGNOSE" in out
     summary = _assert_standard_summary(tmp_path)
     assert summary["mode"] == "station-hw-diagnose"
+
+
+def test_station_hw_manual_default_duration_is_continuous() -> None:
+    parser = cli.build_parser()
+    manual_args = parser.parse_args(["station-hw-manual"])
+    diagnose_args = parser.parse_args(["station-hw-diagnose"])
+    assert manual_args.duration_s == 0.0
+    assert diagnose_args.duration_s > 0.0
+
+
+def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:
+    source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
+    assert "bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;" in source
+    assert "if (stationEstop) {" in source
+    assert "} else if (stationManualActive) {" in source
+    assert "currentControlSource = CONTROL_SOURCE_STATION_MANUAL;" in source
+    assert "applyStationManualCommand();" in source
+
+
+def test_station_hw_monitor_ctrl_c_writes_summary_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class FakeSerialHandle:
+        def __enter__(self) -> "FakeSerialHandle":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            raise KeyboardInterrupt
+
+    fake_serial = types.SimpleNamespace(
+        Serial=lambda *args, **kwargs: FakeSerialHandle(),
+        serialutil=types.SimpleNamespace(SerialException=Exception),
+    )
+    monkeypatch.setitem(sys.modules, "serial", fake_serial)
+    monkeypatch.setattr(cli, "ensure_port", lambda args: True)
+    args = types.SimpleNamespace(
+        out_dir=str(tmp_path),
+        from_log=None,
+        port="/dev/fake",
+        baud=115200,
+        duration_s=0.0,
+        upload="false",
+        verbose_raw="false",
+    )
+    rc = cli._read_station_hw_rows(
+        args,
+        title="Station Hardware Diagnose",
+        csv_name="station_hw_diagnose.csv",
+        summary_name="station_hw_diagnose_summary.json",
+        mode="station-hw-diagnose",
+    )
+    out = capsys.readouterr().out
+    assert rc == 130
+    assert "User aborted station hardware monitor" in out
+    assert "Traceback" not in out
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "USER_ABORTED"
+    assert summary["station_hw_result"] == "USER_ABORTED"
+    assert (tmp_path / "station_hw_diagnose.csv").exists()
+    assert (tmp_path / "raw_usbdbg.log").exists()
 
 
 def test_docs_quickstart_uses_unified_launcher_only() -> None:

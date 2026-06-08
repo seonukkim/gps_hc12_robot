@@ -139,6 +139,59 @@ done
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+PASSTHRU_HELP="false"
+for arg in "${PASSTHRU[@]}"; do
+  if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+    PASSTHRU_HELP="true"
+  fi
+done
+
+if [[ "$PASSTHRU_HELP" == "true" ]]; then
+  case "$MODE" in
+    station-hw-diagnose)
+      cat <<'USAGE'
+Usage:
+  scripts/run_physical_path_planner.sh station-hw-diagnose [options]
+
+Read-only physical station hardware link monitor. No motor commands are sent.
+
+Options:
+  --port PORT              OpenRB USB debug port; auto-detected when omitted.
+  --baud BAUD              OpenRB USB debug baudrate. Default: 115200.
+  --duration-s SECONDS     Monitor duration. Default: 20.
+  --upload true|false|auto Upload station hardware monitor firmware. Default: auto.
+  --from-log PATH          Parse an existing raw USB debug log instead of serial.
+  --verbose-raw true|false Print raw telemetry in addition to concise status.
+  --print-command true     Print firmware commands and exit.
+  --out-dir DIR            Output directory.
+USAGE
+      exit 0
+      ;;
+    station-hw-manual)
+      cat <<'USAGE'
+Usage:
+  scripts/run_physical_path_planner.sh station-hw-manual [options]
+
+Physical station hardware manual rover control. The rover listens continuously
+to station hardware frames and drives while frames are valid, deadman is active,
+and estop is not active.
+
+Options:
+  --port PORT              OpenRB USB debug port; auto-detected when omitted.
+  --baud BAUD              OpenRB USB debug baudrate. Default: 115200.
+  --duration-s SECONDS     Monitor duration; <=0 means continuous until Ctrl-C.
+                            Default: 0.
+  --upload true|false|auto Upload station hardware manual firmware. Default: auto.
+  --from-log PATH          Parse an existing raw USB debug log instead of serial.
+  --verbose-raw true|false Print raw telemetry in addition to concise status.
+  --print-command true     Print firmware commands and exit.
+  --out-dir DIR            Output directory.
+USAGE
+      exit 0
+      ;;
+  esac
+fi
+
 detect_openrb_port() {
   arduino-cli board list 2>/dev/null | awk '/OpenRB-150/ {print $1; exit}'
 }

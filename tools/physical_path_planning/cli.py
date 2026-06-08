@@ -252,16 +252,24 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
         or abs(telemetry._optional_float(row.get("final_left_cmd")) or 0.0) > 1e-6
         or abs(telemetry._optional_float(row.get("final_right_cmd")) or 0.0) > 1e-6
     ]
-    parse_ok_count = sum(
+    parsed_ok_rows = sum(
         1 for row in rows
         if telemetry._parse_bool(row.get("station_parse_ok")) is True
         or telemetry._parse_bool(row.get("station_manual_valid")) is True
     )
-    parse_error_count = sum(
+    parsed_error_rows = sum(
         1 for row in rows
         if telemetry._parse_bool(row.get("station_parse_error")) is True
     )
     last = link_rows[-1] if link_rows else (rows[-1] if rows else {})
+    parse_ok_count = max(
+        parsed_ok_rows,
+        int(telemetry._optional_float(last.get("station_parse_ok_count")) or 0),
+    )
+    parse_error_count = max(
+        parsed_error_rows,
+        int(telemetry._optional_float(last.get("station_parse_error_count")) or 0),
+    )
     station_frame_count = max(
         len(link_rows),
         int(telemetry._optional_float(last.get("station_frame_count")) or 0),
@@ -295,9 +303,17 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
         success = True
         next_action = "Station hardware manual control is passing; continue only with bounded supervised tests."
     elif station_physical_a_nonzero_seen or station_physical_b_nonzero_seen:
-        reason = "STATION_HW_MANUAL_READY"
-        success = mode == "station-hw-diagnose"
-        next_action = "Station hardware commands are valid. Run station-hw-manual to verify motor output if needed."
+        if mode == "station-hw-manual":
+            reason = "STATION_HW_MANUAL_OUTPUT_BLOCKED"
+            success = False
+            next_action = (
+                "Station hardware A/B commands changed but rover motor output did not respond; "
+                "compare against usb-pulse-test, then inspect station manual control-source gating."
+            )
+        else:
+            reason = "STATION_HW_MANUAL_READY"
+            success = True
+            next_action = "Station hardware commands are valid. Run station-hw-manual to verify motor output if needed."
     else:
         reason = "STATION_HW_MANUAL_VALID"
         success = mode == "station-hw-diagnose"
@@ -311,6 +327,8 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
         "station_frame_count": station_frame_count,
         "station_parse_ok_count": parse_ok_count,
         "station_parse_error_count": parse_error_count,
+        "station_link_port": "Serial2",
+        "station_link_baud": 9600,
         "station_last_frame_age_ms": last.get("station_age_ms", "NA"),
         "station_seq": last.get("station_seq", "NA"),
         "station_manual_valid": bool(manual_valid_rows),
@@ -347,6 +365,28 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
         "next_recommended_action": next_action,
         "ready_for_full_path_following": False,
     })
+
+
+def _station_hw_status_line(summary: dict[str, object], *, elapsed_s: float) -> str:
+    return (
+        f"elapsed_s={elapsed_s:.0f} "
+        f"station_link_seen={str(summary.get('station_link_seen', False)).lower()} "
+        f"station_frame_count={summary.get('station_frame_count', 0)} "
+        f"station_parse_ok_count={summary.get('station_parse_ok_count', 0)} "
+        f"station_parse_error_count={summary.get('station_parse_error_count', 0)} "
+        f"station_deadman={str(summary.get('station_deadman', False)).lower()} "
+        f"station_estop={str(summary.get('station_estop', False)).lower()} "
+        f"station_manual_valid={str(summary.get('station_manual_valid', False)).lower()} "
+        f"station_physical_a_cmd={summary.get('station_physical_a_cmd', 'NA')} "
+        f"station_physical_b_cmd={summary.get('station_physical_b_cmd', 'NA')} "
+        f"hc12_rx_count={summary.get('hc12_rx_count', 'NA')} "
+        f"hc12_last_rx_age_ms={summary.get('hc12_last_rx_age_ms', 'NA')} "
+        f"reason_so_far={summary.get('reason', 'NA')}"
+    )
+
+
+def station_hw_status_line(rows: Sequence[dict[str, str]], *, mode: str, elapsed_s: float) -> str:
+    return _station_hw_status_line(evaluate_station_hw_rows(rows, mode=mode), elapsed_s=elapsed_s)
 
 
 def arduino_cli_openrb_port() -> str | None:
@@ -1634,6 +1674,8 @@ def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_lines: list[str] = []
+    user_aborted = False
+    serial_error: str | None = None
     if args.from_log:
         raw_lines = Path(args.from_log).read_text(encoding="utf-8").splitlines()
     else:
@@ -1680,17 +1722,83 @@ def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str
         print(f"{mode}: monitoring physical station hardware frames")
         print("rc_receiver_required=false gps_required=false imu_required=false")
         print("station input mapping: throttle -> physical A, steering -> physical B")
-        deadline = time.monotonic() + args.duration_s
-        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
-            while time.monotonic() < deadline:
-                raw = handle.readline()
-                if raw:
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    raw_lines.append(line)
-                    if args.verbose_raw == "true":
-                        print(line)
+        print("station link: HC-12 frame protocol on old known-good rover station port Serial2 at 9600 baud")
+        duration_s = float(args.duration_s)
+        deadline = None if duration_s <= 0 else time.monotonic() + duration_s
+        started = time.monotonic()
+        next_status_s = 0.0
+        no_link_notice_printed = False
+        if deadline is None:
+            print("duration=continuous_until_ctrl_c")
+        try:
+            with serial.Serial(args.port, baudrate=args.baud, timeout=0.2) as handle:
+                while deadline is None or time.monotonic() < deadline:
+                    raw = handle.readline()
+                    if raw:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        raw_lines.append(line)
+                        if args.verbose_raw == "true":
+                            print(line)
+                    elapsed_s = time.monotonic() - started
+                    if elapsed_s >= next_status_s:
+                        rows_now = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+                        summary_now = evaluate_station_hw_rows(rows_now, mode=mode)
+                        print(_station_hw_status_line(summary_now, elapsed_s=elapsed_s))
+                        if (
+                            elapsed_s >= 3.0
+                            and not no_link_notice_printed
+                            and summary_now.get("station_link_seen") is not True
+                        ):
+                            print("No station hardware frames received yet.")
+                            no_link_notice_printed = True
+                        if summary_now.get("reason") == "STATION_HW_DEADMAN_NOT_ACTIVE":
+                            print("Station frames received, but deadman is not active.")
+                        elif summary_now.get("reason") == "STATION_HW_ESTOP_ACTIVE":
+                            print("Station estop active.")
+                        elif (
+                            summary_now.get("station_physical_a_nonzero_seen") is True
+                            or summary_now.get("station_physical_b_nonzero_seen") is True
+                        ):
+                            print(
+                                f"A={summary_now.get('station_physical_a_cmd', 'NA')} "
+                                f"B={summary_now.get('station_physical_b_cmd', 'NA')}"
+                            )
+                        if summary_now.get("motor_write_called_seen") is True or summary_now.get("physical_output_active_seen") is True:
+                            print(
+                                "motor_write_called="
+                                f"{str(summary_now.get('motor_write_called_seen', False)).lower()} "
+                                "physical_output_active="
+                                f"{str(summary_now.get('physical_output_active_seen', False)).lower()}"
+                            )
+                        next_status_s += 1.0
+        except KeyboardInterrupt:
+            user_aborted = True
+            print("User aborted station hardware monitor; writing summaries.")
+        except (OSError, serial.serialutil.SerialException) as exc:
+            serial_error = str(exc)
+            print(f"station hardware serial error: {exc}")
     rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
     summary = evaluate_station_hw_rows(rows, mode=mode)
+    if user_aborted:
+        summary = dict(summary)
+        summary["success"] = False
+        summary["station_hw_result_before_abort"] = summary.get("station_hw_result")
+        summary["reason_before_abort"] = summary.get("reason")
+        summary["reason"] = "USER_ABORTED"
+        summary["station_hw_result"] = "USER_ABORTED"
+        summary["user_aborted"] = True
+        summary["next_recommended_action"] = "Rerun station-hw-diagnose or station-hw-manual after checking the station hardware state."
+        summary = checks.assert_not_ready_for_full_path_following(summary)
+    elif serial_error is not None:
+        summary = dict(summary)
+        summary["success"] = False
+        summary["station_hw_result_before_serial_error"] = summary.get("station_hw_result")
+        summary["reason_before_serial_error"] = summary.get("reason")
+        summary["reason"] = "SERIAL_ERROR"
+        summary["station_hw_result"] = "SERIAL_ERROR"
+        summary["serial_error"] = serial_error
+        summary["next_recommended_action"] = "Check the OpenRB USB cable/port and rerun the station hardware monitor."
+        summary = checks.assert_not_ready_for_full_path_following(summary)
     _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
     _write_rows_csv(out_dir / csv_name, rows)
     _write_json(out_dir / summary_name, summary)
@@ -1698,6 +1806,8 @@ def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str
     print(f"station_link_seen={str(summary['station_link_seen']).lower()}")
     print(f"station_hw_result={summary['station_hw_result']}")
     print("ready_for_full_path_following=false")
+    if user_aborted:
+        return 130
     return 0 if summary["success"] is True else 2
 
 
@@ -2065,7 +2175,16 @@ def build_parser() -> argparse.ArgumentParser:
         )
         station_p.add_argument("--port", default=None)
         station_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
-        station_p.add_argument("--duration-s", type=float, default=20.0 if diagnose_only else 45.0)
+        station_p.add_argument(
+            "--duration-s",
+            type=float,
+            default=20.0 if diagnose_only else 0.0,
+            help=(
+                "monitor duration in seconds"
+                if diagnose_only else
+                "monitor duration in seconds; <=0 means continuous until Ctrl-C"
+            ),
+        )
         station_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
         station_p.add_argument("--from-log", default=None)
         station_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
