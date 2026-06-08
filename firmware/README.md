@@ -701,9 +701,9 @@ It uses the same PPM input pin and decoding style as
 
 - PPM input: OpenRB `D6`
 - channels printed: `ch1_us` through `ch8_us`
-- frame sync: pulse width greater than `4000 us`
-- interrupt edge: `FALLING` (matches the verified `firmware/rc_mix_test`
-  decoder)
+- frame sync: pulse width greater than `3000 us`
+- interrupt edge: `RISING` (matches the old integrated
+  `openrb_robot_controller.ino` baseline that physically moved)
 
 The probe does not attach Servo or motor outputs. It prints every `0.5` seconds:
 

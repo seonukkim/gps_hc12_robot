@@ -13,6 +13,7 @@ Usage:
 
 Modes:
   diagnose              Read-only telemetry summary. No motor commands.
+  gps-wait              Wait for usable GPS fix/cached start. No motor commands.
   rc-input-diagnose     Read-only receiver input/channel diagnostic. No motors.
   manual-rc             Upload and validate manual RC recovery.
   manual-control        Upload and monitor PPM physical manual control.
@@ -30,6 +31,10 @@ Modes:
 Examples:
   bash scripts/run_physical_path_planner.sh diagnose \
     --out-dir outputs/physical_path_planning/diagnose
+
+  bash scripts/run_physical_path_planner.sh gps-wait \
+    --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+    --out-dir outputs/physical_path_planning/gps_wait
 
   bash scripts/run_physical_path_planner.sh rc-input-diagnose \
     --out-dir outputs/physical_path_planning/rc_input_diagnose
@@ -262,7 +267,7 @@ resolve_port() {
 
 mode_needs_port() {
   case "$MODE" in
-    diagnose)
+    diagnose|gps-wait)
       [[ "$FROM_LOG" != "true" ]]
       ;;
     calibrate-turn|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|station-drive|station-manual|guarded-pulse-ready)
@@ -370,7 +375,7 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
+  preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
   run|execute-plan)

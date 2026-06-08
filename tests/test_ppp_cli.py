@@ -21,11 +21,11 @@ import pytest
 from tools.physical_path_planning import cli
 
 _HEARTBEAT = (
-    "STAGE20 event=HEARTBEAT stage20_physical_ab_guarded_crawl=true rc_ok=true "
+    "USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true rc_ok=true "
     "neutral_ok=true physical_output_active=false gps_block_reason=OK gps_sats=9 "
     "gps_hdop=1.20 imu_relative_yaw_deg=3.5"
 )
-_LOG = f"{_HEARTBEAT}\nSTAGE20 event=ACK\nSTAGE20 event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+_LOG = f"{_HEARTBEAT}\nUSB_PULSE_TEST event=ACK\nUSB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
 _RC_ABSENT_LOG = (
     "USBDBG manual_rc_recovery=true mode=FAILSAFE rc_ok=false auto_sw=false "
     "steer_us=0 throttle_us=0 mode_us=0 raw_ch1_us=0 raw_ch2_us=0 raw_ch3_us=0 raw_ch4_us=0 "
@@ -163,6 +163,7 @@ def test_missing_port_writes_summary_without_traceback(
 
 def test_help_uses_functional_mode_names() -> None:
     help_text = cli.build_parser().format_help()
+    assert "gps-wait" in help_text
     assert "rc-input-diagnose" in help_text
     assert "manual-rc" in help_text
     assert "manual-control" in help_text
@@ -186,6 +187,7 @@ def test_shell_help_uses_functional_mode_names() -> None:
     )
     assert completed.returncode == 0
     help_text = completed.stdout
+    assert "gps-wait" in help_text
     assert "rc-input-diagnose" in help_text
     assert "manual-rc" in help_text
     assert "manual-control" in help_text
@@ -259,7 +261,7 @@ def test_usb_pulse_test_raw_print_cmd_uses_usb_pulse_protocol(
     assert "USB_PULSE_TEST_ARM seq=1" in out
     assert "USB_PULSE_TEST_CMD seq=1 a=0.300 b=0.000 ms=800" in out
     assert "USB_PULSE_TEST_STOP seq=1" in out
-    assert "STAGE20" not in out
+    assert "USB_PULSE_TEST" in out
 
 
 def test_usb_pulse_test_plan_preserves_physical_ab_mapping() -> None:
@@ -348,7 +350,6 @@ def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
     assert "MODE_CHANNEL_INDEX=4" in flags
     assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
     assert "PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0" in flags
-    assert "STAGE20_PHYSICAL_AB_GUARDED_CRAWL=0" in flags
     assert "IMU_ENABLE=1" not in flags
 
 
@@ -365,11 +366,13 @@ def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
     assert "STAGE" not in flags
 
 
-def test_integrated_ppm_decoder_matches_verified_rc_mix_edge() -> None:
+def test_integrated_ppm_decoder_matches_old_moving_controller_edge() -> None:
     source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
-    assert "constexpr uint16_t PPM_SYNC_US = 4000;" in source
-    assert 'constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";' in source
-    assert "attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);" in source
+    assert "constexpr uint16_t PPM_SYNC_US = 3000;" in source
+    assert 'constexpr const char *PPM_INTERRUPT_EDGE_NAME = "RISING";' in source
+    assert "attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);" in source
+    assert "if (ppmIndex == 0 && width < PPM_CAPTURE_MIN_US)" in source
+    assert "constexpr bool MOTOR_TRACE_ENABLED" in source
 
 
 def test_manual_control_ppm_ch1_maps_to_physical_b() -> None:
@@ -434,6 +437,50 @@ def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
     assert summary["path_package_required"] is False
 
 
+def test_manual_control_unstable_ppm_does_not_pass_from_one_good_row() -> None:
+    rows = [
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "mode": "FAILSAFE",
+            "control_source": "STOP",
+            "rc_ok": "false",
+            "rc_input_detected": "true",
+            "steer_us": "180",
+            "throttle_us": "1493",
+            "mode_us": "1548",
+            "ppm_decode_reason": "OK",
+        }
+        for _ in range(8)
+    ]
+    rows.append(
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "mode": "MANUAL",
+            "control_source": "RC_MANUAL",
+            "rc_ok": "true",
+            "rc_input_detected": "true",
+            "steer_us": "1001",
+            "throttle_us": "1001",
+            "mode_us": "1001",
+            "physical_a_cmd": "0.300",
+            "physical_b_cmd": "0.260",
+            "final_left_cmd": "0.040",
+            "final_right_cmd": "0.560",
+            "motor_write_called": "true",
+            "physical_output_active": "true",
+            "ppm_decode_reason": "OK",
+        }
+    )
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert summary["manual_control_ok"] is False
+    assert summary["reason"] == "PPM_CHANNELS_PRESENT_BUT_INVALID"
+    assert summary["rc_ok_rows"] == 1
+    assert summary["rc_bad_rows"] == 8
+    assert summary["ppm_signal_stable"] is False
+
+
 def test_manual_control_all_zero_ppm_reports_absent() -> None:
     summary = cli.evaluate_manual_control_rows(cli.telemetry.parse_usbdbg_rows(_RC_ABSENT_LOG))
     assert summary["reason"] == "PPM_INPUT_ABSENT"
@@ -450,7 +497,7 @@ def test_manual_control_status_line_includes_full_telemetry_snapshot() -> None:
             "rc_ok": "true",
             "mode": "MANUAL",
             "auto_sw": "false",
-            "ppm_interrupt_edge": "FALLING",
+            "ppm_interrupt_edge": "RISING",
             "ppm_decode_reason": "OK",
             "ppm_frame_count": "12",
             "ppm_last_channel_count": "8",
@@ -485,7 +532,7 @@ def test_manual_control_status_line_includes_full_telemetry_snapshot() -> None:
         "auto_sw=false",
         "manual_switch=MANUAL",
         "mode_decode_reason=MODE_CHANNEL_MANUAL",
-        "ppm_interrupt_edge=FALLING",
+        "ppm_interrupt_edge=RISING",
         "ppm_decode_reason=OK",
         "ppm_frame_count=12",
         "ppm_last_channel_count=8",
@@ -1007,7 +1054,10 @@ def test_preview_diagonal_without_width_fails_cleanly(tmp_path: Path) -> None:
 def test_preview_captures_live_gps_start_from_log_when_omitted(tmp_path: Path) -> None:
     log = tmp_path / "gps.log"
     log.write_text(
-        "USBDBG event=HEARTBEAT current_lat=35.5709000 current_lon=129.1871000 "
+        "USBDBG event=HEARTBEAT gps_chars=120 gps_solution_valid=false gps_ready=false "
+        "last_rmc_status=V last_gga_fix_quality=0 gps_sats=0 current_lat=NA current_lon=NA\n"
+        "USBDBG event=HEARTBEAT gps_chars=840 gps_solution_valid=true gps_ready=true "
+        "current_lat=35.5709000 current_lon=129.1871000 "
         "gps_block_reason=OK gps_sats=7 gps_hdop=1.20\n"
     )
     rc = cli.main(
@@ -1036,6 +1086,8 @@ def test_preview_captures_live_gps_start_from_log_when_omitted(tmp_path: Path) -
     assert summary["current_lat"] == pytest.approx(35.5709)
     assert summary["current_lon"] == pytest.approx(129.1871)
     assert summary["gps_cached_used"] is False
+    assert summary["gps_ready"] is True
+    assert summary["best_sats"] == pytest.approx(7)
 
 
 def test_preview_uses_fresh_cached_gps_when_live_gps_missing(tmp_path: Path) -> None:
@@ -1099,6 +1151,43 @@ def test_preview_without_live_or_cached_gps_fails_cleanly(tmp_path: Path) -> Non
     assert "pass --start-lat and --start-lon" in summary["next_recommended_action"]
 
 
+def test_gps_wait_timeout_writes_best_observed_values(tmp_path: Path) -> None:
+    log = tmp_path / "gps.log"
+    log.write_text(
+        "USBDBG event=HEARTBEAT gps_chars=100 gps_solution_valid=false gps_ready=false "
+        "last_rmc_status=V last_gga_fix_quality=0 gps_sats=0 gps_hdop=NA current_lat=NA current_lon=NA\n"
+        "USBDBG event=HEARTBEAT gps_chars=700 gps_solution_valid=false gps_ready=false "
+        "last_rmc_status=V last_gga_fix_quality=0 gps_sats=3 gps_hdop=4.8 current_lat=NA current_lon=NA "
+        "imu_present=true imu_relative_yaw_deg=2.5\n"
+    )
+    rc = cli.main(["gps-wait", "--from-log", str(log), "--timeout-s", "300", "--out-dir", str(tmp_path)])
+    assert rc == 2
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "GPS_WAIT_TIMEOUT"
+    assert summary["best_sats"] == pytest.approx(3)
+    assert summary["best_hdop"] == pytest.approx(4.8)
+    assert summary["imu_present"] is True
+    assert (tmp_path / "gps_wait.csv").exists()
+
+
+def test_gps_wait_success_detects_delayed_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "DEFAULT_GPS_CACHE", tmp_path / "gps_cache" / "latest_start.json")
+    log = tmp_path / "gps.log"
+    log.write_text(
+        "USBDBG event=HEARTBEAT gps_chars=100 gps_solution_valid=false gps_ready=false "
+        "last_rmc_status=V last_gga_fix_quality=0 gps_sats=0 current_lat=NA current_lon=NA\n"
+        "USBDBG event=HEARTBEAT gps_chars=900 gps_solution_valid=true gps_ready=true "
+        "last_rmc_status=A last_gga_fix_quality=1 gps_sats=6 gps_hdop=1.8 "
+        "current_lat=35.5709000 current_lon=129.1871000 imu_present=true imu_relative_yaw_deg=3.0\n"
+    )
+    rc = cli.main(["gps-wait", "--from-log", str(log), "--timeout-s", "300", "--out-dir", str(tmp_path)])
+    assert rc == 0
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "GPS_READY"
+    assert summary["current_lat"] == pytest.approx(35.5709)
+    assert summary["current_lon"] == pytest.approx(129.1871)
+
+
 # --- run / execute-plan: --print-plan stays no-serial -------------------------
 
 
@@ -1112,6 +1201,42 @@ def test_run_print_plan_builds_without_opening_serial(tmp_path: Path) -> None:
     assert plan["segment_count"] >= 1
     summary = _assert_standard_summary(tmp_path)
     assert summary["reason"] == "PLAN_PRINTED"
+
+
+def test_run_print_plan_waits_for_gps_before_planning(tmp_path: Path) -> None:
+    log = tmp_path / "gps.log"
+    log.write_text(
+        "USBDBG event=HEARTBEAT gps_chars=100 gps_solution_valid=false gps_ready=false "
+        "last_rmc_status=V last_gga_fix_quality=0 gps_sats=0 current_lat=NA current_lon=NA\n"
+        "USBDBG event=HEARTBEAT gps_chars=900 gps_solution_valid=true gps_ready=true "
+        "last_rmc_status=A last_gga_fix_quality=1 gps_sats=6 gps_hdop=1.8 "
+        "current_lat=35.5709000 current_lon=129.1871000\n"
+    )
+    rc = cli.main(
+        [
+            "run",
+            "--from-log",
+            str(log),
+            "--goal-mode",
+            "relative_enu",
+            "--goal-east-m",
+            "4.0",
+            "--goal-north-m",
+            "-1.2",
+            "--workspace-width-m",
+            "1.2",
+            "--step-spacing-m",
+            "0.25",
+            "--print-plan",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "PLAN_PRINTED"
+    assert summary["start_source"] == "live_gps"
+    assert summary["gps_ready"] is True
 
 
 def test_execute_plan_is_an_alias_of_run(tmp_path: Path) -> None:

@@ -27,7 +27,20 @@ bash scripts/run_physical_path_planner.sh diagnose \
 
 This watches telemetry only. It sends no motor commands.
 
-## 2. Manual RC Recovery
+## 2. GPS Wait (Read Only)
+
+```bash
+bash scripts/run_physical_path_planner.sh gps-wait \
+  --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+  --out-dir outputs/physical_path_planning/gps_wait
+```
+
+This watches GPS and IMU telemetry only. It sends no motor commands. Use it when
+GPS characters are increasing but the solution is not valid yet; a cold/warm
+start can take several minutes outdoors. On success it saves a cached start
+coordinate for preview/run.
+
+## 3. Manual RC Recovery
 
 If manual RC telemetry shows all receiver channels at zero, run the receiver-only
 input diagnostic first:
@@ -72,7 +85,7 @@ bash scripts/run_physical_path_planner.sh manual-rc \
   --out-dir outputs/physical_path_planning/manual_rc_diagnose
 ```
 
-## 3. PPM Physical Manual Control
+## 4. PPM Physical Manual Control
 
 The current physical station/controller manual path is PPM into OpenRB D6. It is
 not the serial station-frame monitor, and it is not a sensor-disabled mode. GPS
@@ -96,7 +109,7 @@ missing. Check station/controller power, receiver binding, PPM output mode, and
 the D6 signal wire. GPS, IMU, path packages, and serial station frames are not
 required for this mode.
 
-## 4. Deprecated Serial Station-Frame Monitor
+## 5. Deprecated Serial Station-Frame Monitor
 
 ```bash
 bash scripts/run_physical_path_planner.sh station-hw-diagnose \
@@ -112,7 +125,7 @@ If station frames arrive but never parse, the result is
 `raw_station_frames_hex.txt` in the output directory; this means the station
 machine is transmitting a protocol the current rover parser does not match.
 
-## 5. USB Pulse Test
+## 6. USB Pulse Test
 
 ```bash
 bash scripts/run_physical_path_planner.sh usb-pulse-test \
@@ -145,7 +158,7 @@ not RC manual passthrough, and not physical station hardware control. If
 `manual-rc` reports `RC_INPUT_ABSENT` but `usb-pulse-test` passes, the motor path
 works and the remaining issue is the RC receiver input path.
 
-## 6. Interactive Motion Tuning
+## 7. Interactive Motion Tuning
 
 Run this after `usb-pulse-test` confirms that bounded A/B commands physically
 move the rover.
@@ -178,7 +191,7 @@ For turns, IMU yaw delta is recorded automatically. Enter `approve` to save the
 candidate to `outputs/physical_path_planning/calibration/motion_calibration.json`.
 No manually measured observed distance is required.
 
-## 7. Guarded Pulse Readiness
+## 8. Guarded Pulse Readiness
 
 ```bash
 bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
@@ -189,7 +202,7 @@ This uploads/checks IMU-enabled guarded pulse firmware and confirms the guarded
 pulse heartbeat, BMI160 yaw telemetry, RC OK, and neutral sticks. It is still not
 full path following.
 
-## 8. Turn Angle Calibration
+## 9. Turn Angle Calibration
 
 ```bash
 bash scripts/run_physical_path_planner.sh calibrate-turn \
@@ -200,7 +213,7 @@ bash scripts/run_physical_path_planner.sh calibrate-turn \
 
 This uses guarded pulse calibration with IMU yaw comparison.
 
-## 9. Preview
+## 10. Preview
 
 ```bash
 bash scripts/run_physical_path_planner.sh preview \
@@ -211,12 +224,12 @@ bash scripts/run_physical_path_planner.sh preview \
 
 Preview generates the rectangle coverage plan and images without motor output.
 A-B is the diagonal of the workspace rectangle. If `--start-lat` and
-`--start-lon` are omitted, preview captures the current rover GPS from OpenRB
-telemetry and falls back to a fresh cached GPS coordinate. If neither is
-available, the summary reports `reason=NO_USABLE_START_GPS`; wait outside longer
-for GPS or pass explicit start coordinates.
+`--start-lon` are omitted, preview waits up to 300 seconds for current rover GPS
+from OpenRB telemetry and falls back to a fresh cached GPS coordinate. If neither
+is available, the summary reports `reason=NO_USABLE_START_GPS`; wait outdoors
+longer for GPS or pass explicit start coordinates.
 
-## 10. Execute A Reviewed Plan
+## 11. Execute A Reviewed Plan
 
 ```bash
 bash scripts/run_physical_path_planner.sh execute-plan \

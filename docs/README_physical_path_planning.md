@@ -9,6 +9,7 @@ bash scripts/run_physical_path_planner.sh <mode> [options]
 Modes:
 
 - `diagnose` — read-only guarded pulse heartbeat, GPS, IMU, and RC telemetry.
+- `gps-wait` — wait for GPS cold/warm start without motor output.
 - `rc-input-diagnose` — read-only receiver input/channel diagnostic; no motors.
 - `manual-rc` — upload and validate manual RC recovery.
 - `manual-control` — upload and monitor PPM physical manual control on D6.
@@ -29,6 +30,10 @@ when auto-detection fails.
 ```bash
 bash scripts/run_physical_path_planner.sh diagnose \
   --out-dir outputs/physical_path_planning/diagnose
+
+bash scripts/run_physical_path_planner.sh gps-wait \
+  --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+  --out-dir outputs/physical_path_planning/gps_wait
 
 bash scripts/run_physical_path_planner.sh rc-input-diagnose \
   --out-dir outputs/physical_path_planning/rc_input_diagnose
@@ -83,11 +88,12 @@ inspection step after every run.
 diagonal, not a direct driving line. `--workspace-width-m` is the short side and
 must be shorter than the A-B diagonal. `--step-spacing-m` controls lane spacing.
 
-When `--start-lat` / `--start-lon` are omitted, `preview` captures the current
-rover GPS from OpenRB telemetry. It uses a fresh cached GPS coordinate if the
-current fix is temporarily unavailable. If neither is usable, the summary reports
-`reason=NO_USABLE_START_GPS`; move outside and wait longer for GPS, or pass
-explicit start coordinates.
+When `--start-lat` / `--start-lon` are omitted, `preview` waits for the current
+rover GPS from OpenRB telemetry. The default wait is up to 300 seconds so GPS
+cold/warm start can finish. It uses a fresh cached GPS coordinate if the current
+fix is temporarily unavailable. If neither is usable, the summary reports
+`reason=NO_USABLE_START_GPS`; move outdoors and wait longer, or pass explicit
+start coordinates.
 
 Use `--path-shape direct_line` only when a literal straight A-B plan is explicitly
 wanted.

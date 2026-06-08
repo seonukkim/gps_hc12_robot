@@ -8,11 +8,11 @@ constexpr uint8_t CHANNEL_COUNT = 8;
 constexpr uint32_t USB_BAUD = 115200;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 3000;
 constexpr uint32_t PRINT_PERIOD_MS = 500;
-constexpr uint16_t PPM_SYNC_US = 4000;
+constexpr uint16_t PPM_SYNC_US = 3000;
 constexpr uint16_t VALID_MIN_US = 800;
 constexpr uint16_t VALID_MAX_US = 2200;
 constexpr uint16_t CHANGE_THRESHOLD_US = 100;
-constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";
+constexpr const char *PPM_INTERRUPT_EDGE_NAME = "RISING";
 
 volatile uint16_t ppmChannels[CHANNEL_COUNT] = {0};
 volatile uint8_t ppmIndex = 0;
@@ -81,7 +81,7 @@ void setup() {
   Serial.println(F("Move one stick or switch at a time and record changed channels."));
 
   pinMode(PPM_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
 }
 
 void loop() {

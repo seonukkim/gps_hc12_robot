@@ -71,6 +71,10 @@
 #define MANUAL_CONTROL_PPM 0
 #endif
 
+#ifndef MOTOR_TRACE_ENABLE
+#define MOTOR_TRACE_ENABLE 1
+#endif
+
 #ifndef AUTO_MOTION_ARMED
 #define AUTO_MOTION_ARMED 0
 #endif
@@ -553,6 +557,8 @@ constexpr double GPS_MAX_HDOP = GPS_MOTION_MAX_HDOP;
 constexpr bool MOTOR_PULSE_ENABLED = MOTOR_PULSE_TEST_MODE != 0;
 constexpr bool MANUAL_RC_RECOVERY_ENABLED = MANUAL_RC_RECOVERY != 0;
 constexpr bool MANUAL_CONTROL_PPM_ENABLED = MANUAL_CONTROL_PPM != 0;
+constexpr bool MOTOR_TRACE_ENABLED =
+    MOTOR_TRACE_ENABLE != 0 && !(MANUAL_RC_RECOVERY != 0 || MANUAL_CONTROL_PPM != 0);
 constexpr float MOTOR_PULSE_CMD_VALUE = MOTOR_PULSE_CMD;
 constexpr float MOTOR_PULSE_LEFT_CMD_VALUE = MOTOR_PULSE_LEFT_CMD;
 constexpr float MOTOR_PULSE_RIGHT_CMD_VALUE = MOTOR_PULSE_RIGHT_CMD;
@@ -675,12 +681,12 @@ constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
-constexpr uint16_t PPM_SYNC_US = 4000;
+constexpr uint16_t PPM_SYNC_US = 3000;
 constexpr uint16_t PPM_CAPTURE_MIN_US = 800;
 constexpr uint16_t PPM_CAPTURE_MAX_US = 2200;
 constexpr uint32_t RC_FRAME_TIMEOUT_MS = 500;
 constexpr uint8_t PPM_REQUIRED_CHANNEL_COUNT = MODE_CHANNEL_INDEX_VALUE + 1;
-constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";
+constexpr const char *PPM_INTERRUPT_EDGE_NAME = "RISING";
 constexpr float RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678f;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_RANGE_US = 300;
@@ -724,7 +730,6 @@ Servo escLeft;
 Servo escRight;
 
 volatile uint16_t ppmChannels[CHANNEL_COUNT] = {0};
-volatile uint16_t ppmWorkingChannels[CHANNEL_COUNT] = {0};
 volatile uint8_t ppmIndex = 0;
 volatile uint8_t ppmLastFrameChannelCount = 0;
 volatile uint32_t lastPpmEdgeMicros = 0;
@@ -866,12 +871,9 @@ void ppmISR() {
   lastPpmEdgeMicros = now;
 
   if (width > PPM_SYNC_US) {
+    ppmLastFrameChannelCount = ppmIndex;
+    lastPpmFrameMs = millis();
     if (ppmIndex >= PPM_REQUIRED_CHANNEL_COUNT) {
-      for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
-        ppmChannels[i] = (i < ppmIndex) ? ppmWorkingChannels[i] : 0;
-      }
-      ppmLastFrameChannelCount = ppmIndex;
-      lastPpmFrameMs = millis();
       ppmAcceptedFrameCount++;
     } else if (ppmIndex > 0) {
       ppmIncompleteFrameCount++;
@@ -880,22 +882,14 @@ void ppmISR() {
     return;
   }
 
-  if (width < PPM_CAPTURE_MIN_US) {
+  if (ppmIndex == 0 && width < PPM_CAPTURE_MIN_US) {
     ppmShortPulseRejectCount++;
     ppmLastRejectedPulseUs = static_cast<uint16_t>(width);
-    ppmIndex = 0;
-    return;
-  }
-
-  if (width > PPM_CAPTURE_MAX_US) {
-    ppmLongPulseRejectCount++;
-    ppmLastRejectedPulseUs = static_cast<uint16_t>(width);
-    ppmIndex = 0;
     return;
   }
 
   if (ppmIndex < CHANNEL_COUNT) {
-    ppmWorkingChannels[ppmIndex] = static_cast<uint16_t>(width);
+    ppmChannels[ppmIndex] = static_cast<uint16_t>(width);
     ppmIndex++;
   }
 }
@@ -941,6 +935,10 @@ bool motorOutputZeroState() {
 }
 
 void printMotorTrace(const char *source, float requestedACmd, float requestedBCmd, bool motorWriteCalled) {
+  if (!MOTOR_TRACE_ENABLED) {
+    return;
+  }
+
   Serial.print(F("MOTOR_TRACE timestamp_ms="));
   Serial.print(millis());
   Serial.print(F(" source="));
@@ -4926,7 +4924,7 @@ void setup() {
 #endif
 
   pinMode(PPM_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
 
   escLeft.attach(ESC_LEFT_PIN);
   escRight.attach(ESC_RIGHT_PIN);
@@ -5019,7 +5017,8 @@ void setup() {
 #elif MANUAL_CONTROL_PPM || MANUAL_RC_RECOVERY
   Serial.println("MANUAL_CONTROL_PPM enabled.");
   Serial.println("PPM input: OpenRB D6; CH1 steering, CH2 throttle, CH5 manual/auto.");
-  Serial.println("PPM decoder matches verified rc_mix_test: FALLING edge, 4000us sync gap.");
+  Serial.println("PPM decoder restored to old integrated moving controller: RISING edge, 3000us sync gap.");
+  Serial.println("Leading short PPM marker pulses are skipped before CH1 capture.");
   Serial.println("MANUAL mode maps throttle to physical A and steering to physical B through the manual control path.");
   Serial.println("GPS and IMU status remain telemetry-only diagnostics and do not gate manual drive.");
   Serial.println("HC-12 command handling, path planning, and autonomous output gates are disabled.");

@@ -31,7 +31,7 @@ class FakeSerial:
 
 PLANNED = {
     "arm_command_text": "ARMCMD",
-    "stage20_command_text": "PULSECMD",
+    "command_text": "PULSECMD",
     "stop_command_text": "STOPCMD",
     "pulse_ms": 200,
 }
@@ -73,7 +73,7 @@ def test_send_pulse_can_suppress_raw_console(capsys) -> None:
         [
             b"event=ARM\n",
             b"event=ACK\n",
-            b"event=HEARTBEAT stage20_cmd_state=ACTIVE\n",
+            b"event=HEARTBEAT usb_pulse_test_cmd_state=ACTIVE\n",
             b"event=PULSE_COMPLETE\n",
             b"event=STOP final_left_cmd=0.0 final_right_cmd=0.0\n",
         ]

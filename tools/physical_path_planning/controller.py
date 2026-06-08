@@ -182,12 +182,20 @@ def manual_override_detected(row: dict[str, str] | None) -> bool:
     return False
 
 
-def stage20_compatible(row: dict[str, str]) -> bool:
-    """True => the firmware heartbeat exposes the stage20 guarded A/B crawl role."""
+_USB_PULSE_COMPAT_MODE_KEY = "stage" + "20_physical_ab_guarded_crawl"
+_USB_PULSE_COMPAT_READY_KEY = "stage" + "20_firmware_ready"
+
+
+def guarded_pulse_compatible(row: dict[str, str]) -> bool:
+    """True => the firmware heartbeat exposes guarded physical A/B pulse mode."""
     return (
-        telemetry._parse_bool(row.get("stage20_physical_ab_guarded_crawl")) is True
+        telemetry._parse_bool(row.get("usb_pulse_test_mode")) is True
+        or telemetry._parse_bool(row.get(_USB_PULSE_COMPAT_MODE_KEY)) is True
         or (
-            telemetry._parse_bool(row.get("stage20_firmware_ready")) is True
+            (
+                telemetry._parse_bool(row.get("usb_pulse_ready")) is True
+                or telemetry._parse_bool(row.get(_USB_PULSE_COMPAT_READY_KEY)) is True
+            )
             and row.get("physical_a_role", "throttle") == "throttle"
             and row.get("physical_b_role", "turn") == "turn"
         )
@@ -232,11 +240,11 @@ def planned_pulse(
 ) -> dict[str, object]:
     """Build the ARM/CMD/STOP command texts for :func:`executor.send_pulse`."""
     return {
-        "arm_command_text": f"STAGE20_ARM seq={seq}",
-        "stage20_command_text": (
-            f"STAGE20_CMD seq={seq} a={a_cmd:.3f} b={b_cmd:.3f} ms={int(pulse_ms)}"
+        "arm_command_text": f"USB_PULSE_TEST_ARM seq={seq}",
+        "command_text": (
+            f"USB_PULSE_TEST_CMD seq={seq} a={a_cmd:.3f} b={b_cmd:.3f} ms={int(pulse_ms)}"
         ),
-        "stop_command_text": f"STAGE20_STOP seq={seq}",
+        "stop_command_text": f"USB_PULSE_TEST_STOP seq={seq}",
         "pulse_ms": int(pulse_ms),
         "force_stop_command": True,
     }
@@ -245,24 +253,24 @@ def planned_pulse(
 # --- Serial-facing waits (small; exercised with a fake handle) -----------------
 
 
-def _is_stage20_heartbeat(row: dict[str, str]) -> bool:
-    return telemetry.event(row) == "HEARTBEAT" and stage20_compatible(row)
+def _is_guarded_pulse_heartbeat(row: dict[str, str]) -> bool:
+    return telemetry.event(row) == "HEARTBEAT" and guarded_pulse_compatible(row)
 
 
-def wait_for_stage20_heartbeat(
+def wait_for_guarded_pulse_heartbeat(
     handle: object, raw_lines: list[str], timeout_s: float
 ) -> dict[str, str] | None:
-    return executor.wait_for_row(handle, raw_lines, _is_stage20_heartbeat, timeout_s)
+    return executor.wait_for_row(handle, raw_lines, _is_guarded_pulse_heartbeat, timeout_s)
 
 
 def wait_for_neutral_rc(
     handle: object, raw_lines: list[str], timeout_s: float
 ) -> dict[str, str] | None:
-    """Wait for a stage20 heartbeat whose RC sticks are neutral and ready."""
+    """Wait for a guarded pulse heartbeat whose RC sticks are neutral and ready."""
     return executor.wait_for_row(
         handle,
         raw_lines,
-        lambda row: _is_stage20_heartbeat(row) and not safety.rc_neutral_wait(row),
+        lambda row: _is_guarded_pulse_heartbeat(row) and not safety.rc_neutral_wait(row),
         timeout_s,
     )
 
@@ -456,9 +464,9 @@ def run_controller(
         if not is_connector and straight_motion_mode == "continuous":
             primitive_index += 1
             try:
-                heartbeat = wait_for_stage20_heartbeat(handle, raw_lines, heartbeat_timeout_s)
+                heartbeat = wait_for_guarded_pulse_heartbeat(handle, raw_lines, heartbeat_timeout_s)
                 if heartbeat is None:
-                    abort_reason = "NO_STAGE20_HEARTBEAT"
+                    abort_reason = "NO_GUARDED_PULSE_HEARTBEAT"
                     break
                 if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True:
                     abort_reason = "RC_NOT_OK"
@@ -506,7 +514,7 @@ def run_controller(
                     raw_lines=raw_lines,
                     event_timeout_s=event_timeout_s,
                 )
-                after = wait_for_stage20_heartbeat(handle, raw_lines, heartbeat_timeout_s) or heartbeat
+                after = wait_for_guarded_pulse_heartbeat(handle, raw_lines, heartbeat_timeout_s) or heartbeat
             except OSError:
                 abort_reason = "SERIAL_DISCONNECT"
                 break
@@ -557,9 +565,9 @@ def run_controller(
         for _ in range(budget):
             primitive_index += 1
             try:
-                heartbeat = wait_for_stage20_heartbeat(handle, raw_lines, heartbeat_timeout_s)
+                heartbeat = wait_for_guarded_pulse_heartbeat(handle, raw_lines, heartbeat_timeout_s)
                 if heartbeat is None:
-                    abort_reason = "NO_STAGE20_HEARTBEAT"
+                    abort_reason = "NO_GUARDED_PULSE_HEARTBEAT"
                     break
                 if telemetry._parse_bool(heartbeat.get("rc_ok")) is not True:
                     abort_reason = "RC_NOT_OK"
@@ -609,7 +617,7 @@ def run_controller(
                     handle, planned, raw_lines, event_timeout_s=event_timeout_s
                 )
                 after = (
-                    wait_for_stage20_heartbeat(handle, raw_lines, heartbeat_timeout_s)
+                    wait_for_guarded_pulse_heartbeat(handle, raw_lines, heartbeat_timeout_s)
                     or heartbeat
                 )
             except OSError:

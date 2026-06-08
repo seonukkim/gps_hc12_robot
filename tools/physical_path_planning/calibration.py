@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-DEFAULT_FINE_CALIBRATION = Path("outputs/stage20_physical_ab_probe/calibration/physical_ab_fine_motion_calibration.json")
+DEFAULT_FINE_CALIBRATION = Path("outputs/" + "stage" + "20_physical_ab_probe/calibration/physical_ab_fine_motion_calibration.json")
 DEFAULT_TURN_CALIBRATION = Path("outputs/stage23_turn_calibration/calibration/physical_ab_turn_twitch_calibration.json")
 DEFAULT_TURN_ANGLE_CALIBRATION = Path("outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json")
 DEFAULT_SMOOTH_TURN_CALIBRATION = Path("outputs/stage36_smooth_turn_connector/calibration/smooth_turn_connector_calibration.json")

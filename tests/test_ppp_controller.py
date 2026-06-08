@@ -146,8 +146,8 @@ def test_connector_uses_repeated_pulses_fallback_without_angle_calibration() -> 
 
 def test_pulse_block_reason_orders_rc_invalid_first() -> None:
     rows = controller.telemetry.parse_usbdbg_rows(
-        "STAGE20 event=ACK\n"
-        "STAGE20 event=STOP stage20_reject_reason=RC_INVALID final_left_cmd=0.000 "
+        "USB_PULSE_TEST event=ACK\n"
+        "USB_PULSE_TEST event=STOP usb_pulse_test_reject_reason=RC_INVALID final_left_cmd=0.000 "
         "final_right_cmd=0.000 physical_output_active=false\n"
     )
     assert controller.pulse_block_reason(rows) == "RC_INVALID"
@@ -155,8 +155,8 @@ def test_pulse_block_reason_orders_rc_invalid_first() -> None:
 
 def test_pulse_block_reason_none_for_clean_pulse() -> None:
     rows = controller.telemetry.parse_usbdbg_rows(
-        "STAGE20 event=ACK\n"
-        "STAGE20 event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+        "USB_PULSE_TEST event=ACK\n"
+        "USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
     )
     assert controller.pulse_block_reason(rows) is None
 
@@ -227,7 +227,7 @@ class FakeSerial:
 
 def _heartbeat(lat: float, lon: float) -> bytes:
     return (
-        f"STAGE20 event=HEARTBEAT stage20_physical_ab_guarded_crawl=true rc_ok=true "
+        f"USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true rc_ok=true "
         f"neutral_ok=true physical_output_active=false gps_block_reason=OK "
         f"gps_lat={lat:.7f} gps_lon={lon:.7f} imu_relative_yaw_deg=0.0\n"
     ).encode("ascii")
@@ -237,10 +237,10 @@ def test_run_controller_completes_one_clean_lane_pulse() -> None:
     handle = FakeSerial(
         [
             _heartbeat(35.0, 129.0),  # pre-pulse heartbeat (neutral, fresh GPS)
-            b"STAGE20 event=ARM\n",
-            b"STAGE20 event=ACK\n",
-            b"STAGE20 event=PULSE_COMPLETE\n",
-            b"STAGE20 event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            b"USB_PULSE_TEST event=ARM\n",
+            b"USB_PULSE_TEST event=ACK\n",
+            b"USB_PULSE_TEST event=PULSE_COMPLETE\n",
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
             _heartbeat(35.0000050, 129.0),  # post-pulse heartbeat
         ]
     )
@@ -265,19 +265,19 @@ def test_run_controller_completes_one_clean_lane_pulse() -> None:
     assert row["gps_degraded"] is False
     assert row["ready_for_full_path_following"] is False
     # The guarded pulse issued ARM, the forward command, then STOP in order.
-    assert handle.writes[0].startswith("STAGE20_ARM")
-    assert handle.writes[1].startswith("STAGE20_CMD") and "a=0.300" in handle.writes[1]
-    assert handle.writes[2].startswith("STAGE20_STOP")
+    assert handle.writes[0].startswith("USB_PULSE_TEST_ARM")
+    assert handle.writes[1].startswith("USB_PULSE_TEST_CMD") and "a=0.300" in handle.writes[1]
+    assert handle.writes[2].startswith("USB_PULSE_TEST_STOP")
 
 
 def test_run_controller_aborts_on_rc_invalid_during_pulse() -> None:
     handle = FakeSerial(
         [
             _heartbeat(35.0, 129.0),
-            b"STAGE20 event=ARM\n",
-            b"STAGE20 event=ACK\n",
-            b"STAGE20 event=PULSE_COMPLETE\n",
-            b"STAGE20 event=STOP stage20_reject_reason=RC_INVALID final_left_cmd=0.000 "
+            b"USB_PULSE_TEST event=ARM\n",
+            b"USB_PULSE_TEST event=ACK\n",
+            b"USB_PULSE_TEST event=PULSE_COMPLETE\n",
+            b"USB_PULSE_TEST event=STOP usb_pulse_test_reject_reason=RC_INVALID final_left_cmd=0.000 "
             b"final_right_cmd=0.000 physical_output_active=false\n",
             _heartbeat(35.0, 129.0),
         ]
@@ -312,5 +312,5 @@ def test_run_controller_aborts_when_no_heartbeat() -> None:
         event_timeout_s=0.2,
         heartbeat_timeout_s=0.2,
     )
-    assert abort_reason == "NO_STAGE20_HEARTBEAT"
+    assert abort_reason == "NO_GUARDED_PULSE_HEARTBEAT"
     assert rows == []

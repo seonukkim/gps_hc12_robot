@@ -92,6 +92,7 @@ If station hardware frames arrive but no parser matches, the result is
 Field modes:
 
 - `diagnose` — read-only guarded pulse heartbeat, GPS, IMU, and RC telemetry.
+- `gps-wait` — wait for GPS cold/warm start without motor output.
 - `rc-input-diagnose` — read-only receiver input/channel diagnostic; no motors.
 - `manual-rc` — upload and validate manual RC recovery.
 - `station-hw-diagnose` — read-only physical station hardware link diagnostic.
@@ -107,6 +108,11 @@ Field modes:
 straight line; `--workspace-width-m` is the short side and must be shorter than the
 diagonal. Use `--path-shape direct_line` only for an explicitly requested straight
 A→B plan.
+
+If preview/run start coordinates are omitted, the planner waits for live GPS and
+can fall back to a fresh cached GPS coordinate. If GPS is still unavailable, the
+summary reports `reason=NO_USABLE_START_GPS`; move outdoors and wait longer, or
+pass `--start-lat` / `--start-lon`.
 
 Safety posture is unchanged: physical execution uses guarded pulse firmware with
 full path following disabled, and every summary carries

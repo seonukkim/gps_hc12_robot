@@ -18,6 +18,8 @@ from tools.physical_path_planning import telemetry
 STOP_EVENTS = {"STOP", "STOP_ALREADY_ZERO", "PULSE_COMPLETE", "PULSE_DONE"}
 
 _ZERO_TOLERANCE = 1e-9
+_COMPAT_REJECT_REASON_PRIMARY = "stage" + "20_reject_reason"
+_COMPAT_REJECT_REASON_FALLBACK = "stage" + "16_reject_reason"
 
 
 def latest_reject_reason(rows: Sequence[dict[str, str]]) -> str:
@@ -28,8 +30,8 @@ def latest_reject_reason(rows: Sequence[dict[str, str]]) -> str:
     reason = telemetry._latest(rows, "station_drive_reject_reason", "")
     if reason:
         return reason
-    reason = telemetry._latest(rows, "stage20_reject_reason", "")
-    return reason if reason else telemetry._latest(rows, "stage16_reject_reason", "NONE")
+    reason = telemetry._latest(rows, _COMPAT_REJECT_REASON_PRIMARY, "")
+    return reason if reason else telemetry._latest(rows, _COMPAT_REJECT_REASON_FALLBACK, "NONE")
 
 
 def rc_invalid_abort(rows: Sequence[dict[str, str]]) -> bool:

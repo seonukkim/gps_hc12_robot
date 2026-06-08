@@ -18,17 +18,17 @@ def _heartbeat(**overrides: str) -> dict[str, str]:
 
 
 def test_rc_invalid_abort() -> None:
-    assert safety.rc_invalid_abort([{"stage20_reject_reason": "RC_INVALID"}]) is True
-    assert safety.rc_invalid_abort([{"stage20_reject_reason": "NONE"}]) is False
+    assert safety.rc_invalid_abort([{"usb_pulse_test_reject_reason": "RC_INVALID"}]) is True
+    assert safety.rc_invalid_abort([{"usb_pulse_test_reject_reason": "NONE"}]) is False
     assert safety.rc_invalid_abort([]) is False
-    # stage16 fallback channel is consulted when stage20 reason is blank.
-    assert safety.rc_invalid_abort([{"stage16_reject_reason": "RC_INVALID"}]) is True
+    # Compatibility fallback channel is still consulted when current reason is blank.
+    assert safety.rc_invalid_abort([{"station_drive_reject_reason": "RC_INVALID"}]) is True
 
 
-def test_latest_reject_reason_prefers_stage20_then_stage16() -> None:
-    rows = [{"stage16_reject_reason": "FOO"}, {"stage20_reject_reason": "BAR"}]
+def test_latest_reject_reason_prefers_current_then_compatibility() -> None:
+    rows = [{"station_drive_reject_reason": "FOO"}, {"usb_pulse_test_reject_reason": "BAR"}]
     assert safety.latest_reject_reason(rows) == "BAR"
-    assert safety.latest_reject_reason([{"stage16_reject_reason": "FOO"}]) == "FOO"
+    assert safety.latest_reject_reason([{"station_drive_reject_reason": "FOO"}]) == "FOO"
     assert safety.latest_reject_reason([]) == "NONE"
 
 

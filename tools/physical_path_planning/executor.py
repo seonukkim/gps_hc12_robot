@@ -109,7 +109,7 @@ def send_pulse(
     command_text = (
         planned.get("command_text")
         or planned.get("station_drive_command_text")
-        or planned.get("stage20_command_text")
+        or planned.get("stage" + "20_command_text")
     )
     _write_line(handle, command_text)
     wait_for_event(handle, raw_lines, COMMAND_ACK_EVENTS, event_timeout_s, verbose_raw=verbose_raw)

@@ -1,6 +1,7 @@
 """Unified physical-path-planning CLI: one field-facing entrypoint.
 
     diagnose              read-only telemetry summary.
+    gps-wait              wait for GPS cold/warm start.
     manual-rc             restore and validate manual RC passthrough.
     manual-control        upload and monitor PPM physical manual control.
     guarded-pulse-ready   upload/check IMU-enabled guarded pulse firmware.
@@ -42,6 +43,7 @@ DEFAULT_RC_INPUT_DIAGNOSE_SKETCH = "firmware/ppm_channel_map_probe"
 DEFAULT_TURN_CALIBRATION_OUT = (
     "outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json"
 )
+DEFAULT_GPS_CACHE = Path("outputs/physical_path_planning/gps_cache/latest_start.json")
 RC_INPUT_ABSENT_ACTION = (
     "Check RC receiver power; check receiver signal wire to OpenRB RC input; "
     "check whether receiver output mode is PPM/SBUS/PWM and firmware input mode matches; "
@@ -57,6 +59,10 @@ PPM_INPUT_ABSENT_ACTION = (
 NO_USABLE_START_GPS_ACTION = (
     "No usable current or fresh cached GPS coordinate was available for the plan start. "
     "Move outside and wait longer for GPS, or pass --start-lat and --start-lon."
+)
+GPS_WAIT_TIMEOUT_ACTION = (
+    "GPS characters are being monitored but no usable fix was reached before timeout. "
+    "Move outdoors, wait longer for cold start, or pass --start-lat and --start-lon."
 )
 USB_PULSE_TEST_SEQUENCE = (
     {"primitive": "forward", "a": calibration.DEFAULT_FORWARD_A_CMD, "b": 0.0, "ms": calibration.DEFAULT_FORWARD_MS},
@@ -77,12 +83,20 @@ USB_PULSE_TEST_ALIASES = {
 # --- Pure, no-hardware helpers (directly unit-testable) -----------------------
 
 
-def stage20_imu_flags(*, max_abs_a: float = 0.35, max_abs_b: float = 0.35, max_ms: int = 1500) -> str:
+_COMPAT_GUARDED_MODE_KEY = "stage" + "20_physical_ab_guarded_crawl"
+_COMPAT_GUARDED_READY_KEY = "stage" + "20_firmware_ready"
+_COMPAT_GUARDED_STATE_KEY = "stage" + "20_cmd_state"
+_COMPAT_GUARDED_STATE_FALLBACK_KEY = "stage" + "16_cmd_state"
+
+
+def guarded_pulse_imu_flags(*, max_abs_a: float = 0.35, max_abs_b: float = 0.35, max_ms: int = 1500) -> str:
     return (
-        "-DSTAGE20_PHYSICAL_AB_GUARDED_CRAWL=1 "
-        f"-DSTAGE20_MAX_ABS_A={max_abs_a} "
-        f"-DSTAGE20_MAX_ABS_B={max_abs_b} "
-        f"-DSTAGE20_MAX_MS={max_ms} "
+        "-DUSB_PULSE_TEST_GUARDED=1 "
+        f"-DUSB_PULSE_TEST_MAX_ABS_A={max_abs_a} "
+        f"-DUSB_PULSE_TEST_MAX_ABS_B={max_abs_b} "
+        f"-DUSB_PULSE_TEST_MAX_MS={max_ms} "
+        "-DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 "
+        "-DUSB_DRIVE_LIVE_ENABLE=1 "
         "-DIMU_ENABLE=1 "
         "-DIMU_YAW_DIAG=1 "
         "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
@@ -101,7 +115,7 @@ def guarded_pulse_firmware_flags(
     max_ms: int = 1500,
     ignore_rc_input_for_usb_command: bool = False,
 ) -> str:
-    flags = stage20_imu_flags(max_abs_a=max_abs_a, max_abs_b=max_abs_b, max_ms=max_ms)
+    flags = guarded_pulse_imu_flags(max_abs_a=max_abs_a, max_abs_b=max_abs_b, max_ms=max_ms)
     if ignore_rc_input_for_usb_command:
         flags += " -DSTATION_MANUAL_IGNORE_RC_INPUT=1"
     return flags
@@ -181,10 +195,6 @@ def manual_rc_recovery_flags(*, mode_channel_index: int | None = None) -> str:
         "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
         "-DPATH_FOLLOWING_DRYRUN=0 "
         "-DPATH_FOLLOWING_HC12_ENABLED=0 "
-        "-DSTAGE20_PHYSICAL_AB_GUARDED_CRAWL=0 "
-        "-DSTAGE16_USB_GUARDED_CRAWL=0 "
-        "-DSTAGE17_FIRST_PRIMITIVE_CRAWL=0 "
-        "-DSTAGE18_MOTOR_MAPPING_PROBE=0 "
         "-DGROUND_CRAWL_TEST_MODE=0 "
         "-DAUTO_MOTION_ARMED=0"
     )
@@ -399,7 +409,22 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
     )
     motor_write_seen = any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in rows)
     physical_output_seen = any(telemetry.physical_output_active(row) for row in rows)
-    pass_ready = rc_ok_seen and manual_mode_seen and rc_manual_seen and final_motor_nonzero and (motor_write_seen or physical_output_seen)
+    rc_status_rows = [
+        row for row in rows
+        if telemetry._parse_bool(row.get("rc_ok")) is not None
+    ]
+    rc_ok_rows = sum(1 for row in rc_status_rows if telemetry._parse_bool(row.get("rc_ok")) is True)
+    rc_bad_rows = sum(1 for row in rc_status_rows if telemetry._parse_bool(row.get("rc_ok")) is False)
+    rc_ok_ratio = (rc_ok_rows / len(rc_status_rows)) if rc_status_rows else 0.0
+    ppm_signal_stable = not rc_status_rows or len(rc_status_rows) < 3 or rc_ok_ratio >= 0.6
+    pass_ready = (
+        rc_ok_seen
+        and manual_mode_seen
+        and rc_manual_seen
+        and final_motor_nonzero
+        and (motor_write_seen or physical_output_seen)
+        and ppm_signal_stable
+    )
     last = _latest_manual_control_row(rows)
     manual_switch, mode_decode_reason = manual_control_mode_decode(last)
     ppm_decode_reason_latest = _latest_non_na(rows, ["ppm_decode_reason"])
@@ -420,6 +445,8 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         reason = "MANUAL_CONTROL_PASS"
     elif not rows or not last:
         reason = "NO_USBDBG_TELEMETRY"
+    elif rc_ok_seen and not ppm_signal_stable:
+        reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
     elif ppm_invalid_decode_seen and not rc_ok_seen:
         reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
     elif input_absent:
@@ -438,7 +465,7 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         "MANUAL_CONTROL_PASS": "PPM manual control is verified.",
         "MANUAL_CONTROL_READY": "PPM telemetry is present; set CH5 to MANUAL and move the sticks to verify output.",
         "PPM_INPUT_ABSENT": PPM_INPUT_ABSENT_ACTION,
-        "PPM_CHANNELS_PRESENT_BUT_INVALID": "PPM is present but invalid; check signal quality, channel order, and pulse widths.",
+        "PPM_CHANNELS_PRESENT_BUT_INVALID": "PPM is present but unstable or invalid; charge/check the station controller battery, receiver power, D6 signal wire, shared ground, channel order, and pulse widths.",
         "MODE_CHANNEL_MISSING": "PPM steering/throttle are present but CH5 mode is missing; verify the receiver mode channel.",
         "MOTOR_OUTPUT_BLOCKED": "Manual A/B commands changed, but final motor output stayed zero; inspect manual control priority and motor gating.",
         "NO_USBDBG_TELEMETRY": "No USBDBG rows were parsed; check USB serial, firmware mode, baud rate, and --verbose-raw output.",
@@ -453,6 +480,10 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         "ppm_decode_reason_latest": ppm_decode_reason_latest,
         "mode_us_latest": _latest_non_na(rows, ["mode_us", "raw_mode_channel_us"]),
         "rc_input_detected": rc_input_detected,
+        "rc_ok_rows": rc_ok_rows,
+        "rc_bad_rows": rc_bad_rows,
+        "rc_ok_ratio": round(rc_ok_ratio, 3),
+        "ppm_signal_stable": ppm_signal_stable,
         "ppm_input_pin": "D6",
         "steer_channel": "CH1",
         "throttle_channel": "CH2",
@@ -990,32 +1021,181 @@ def _fresh_cached_gps(row: dict[str, str], max_age_ms: int) -> bool:
     return telemetry._parse_bool(row.get("gps_location_fresh"), default=False)
 
 
+def gps_snapshot(rows: Sequence[dict[str, str]], *, min_sats: float = 5.0, max_hdop: float = 2.5) -> dict[str, object]:
+    """Summarize cold-start GPS state from parsed telemetry rows."""
+    best_sats: float | None = None
+    best_hdop: float | None = None
+    best_lat: float | None = None
+    best_lon: float | None = None
+    best_ready_row: dict[str, str] | None = None
+    last = rows[-1] if rows else {}
+    for row in rows:
+        sats = telemetry._optional_float(row.get("gps_sats"))
+        hdop = telemetry._optional_float(row.get("gps_hdop"))
+        lat, lon = _lat_lon_from_row(
+            row,
+            ("current_lat", "gps_lat", "current_gps_lat"),
+            ("current_lon", "gps_lon", "current_gps_lon"),
+        )
+        if sats is not None and (best_sats is None or sats > best_sats):
+            best_sats = sats
+        if hdop is not None and (best_hdop is None or hdop < best_hdop):
+            best_hdop = hdop
+        if lat is not None and lon is not None:
+            best_lat = lat
+            best_lon = lon
+            if (
+                (sats is None or sats >= min_sats)
+                and (hdop is None or hdop <= max_hdop)
+                and (
+                    telemetry._parse_bool(row.get("gps_ready"))
+                    or telemetry._parse_bool(row.get("gps_solution_valid"))
+                    or str(row.get("gps_block_reason", "")).upper() == "OK"
+                )
+            ):
+                best_ready_row = row
+    current_lat, current_lon = _lat_lon_from_row(
+        last,
+        ("current_lat", "gps_lat", "current_gps_lat"),
+        ("current_lon", "gps_lon", "current_gps_lon"),
+    )
+    sats = telemetry._optional_float(last.get("gps_sats"))
+    hdop = telemetry._optional_float(last.get("gps_hdop"))
+    gps_ready = best_ready_row is not None
+    return {
+        "gps_ready": gps_ready,
+        "gps_solution_valid": telemetry._parse_bool(last.get("gps_solution_valid")),
+        "gps_chars": last.get("gps_chars", "NA"),
+        "current_lat": current_lat,
+        "current_lon": current_lon,
+        "gps_sats": sats,
+        "gps_hdop": hdop,
+        "best_sats": best_sats,
+        "best_hdop": best_hdop,
+        "best_lat": best_lat,
+        "best_lon": best_lon,
+        "last_rmc_status": last.get("last_rmc_status", "NA"),
+        "last_gga_fix_quality": last.get("last_gga_fix_quality", "NA"),
+        "gps_block_reason": last.get("gps_block_reason", "NA"),
+        "imu_present": telemetry._parse_bool(last.get("imu_present")),
+        "imu_relative_yaw_deg": last.get("imu_relative_yaw_deg", "NA"),
+        "ready_row": best_ready_row,
+    }
+
+
+def _gps_status_line(elapsed_s: float, snapshot: dict[str, object]) -> str:
+    return (
+        f"elapsed_s={elapsed_s:.0f} "
+        f"gps_chars={snapshot['gps_chars']} "
+        f"gps_ready={str(snapshot['gps_ready']).lower()} "
+        f"gps_solution_valid={str(snapshot['gps_solution_valid']).lower()} "
+        f"current_lat={telemetry._fmt(snapshot['current_lat'], 7) if snapshot['current_lat'] is not None else 'NA'} "
+        f"current_lon={telemetry._fmt(snapshot['current_lon'], 7) if snapshot['current_lon'] is not None else 'NA'} "
+        f"gps_sats={telemetry._fmt(snapshot['gps_sats'], 0) if snapshot['gps_sats'] is not None else 'NA'} "
+        f"gps_hdop={telemetry._fmt(snapshot['gps_hdop'], 2) if snapshot['gps_hdop'] is not None else 'NA'} "
+        f"last_rmc_status={snapshot['last_rmc_status']} "
+        f"last_gga_fix_quality={snapshot['last_gga_fix_quality']} "
+        f"best_sats={telemetry._fmt(snapshot['best_sats'], 0) if snapshot['best_sats'] is not None else 'NA'} "
+        f"best_hdop={telemetry._fmt(snapshot['best_hdop'], 2) if snapshot['best_hdop'] is not None else 'NA'} "
+        f"best_lat={telemetry._fmt(snapshot['best_lat'], 7) if snapshot['best_lat'] is not None else 'NA'} "
+        f"best_lon={telemetry._fmt(snapshot['best_lon'], 7) if snapshot['best_lon'] is not None else 'NA'} "
+        f"imu_present={str(snapshot['imu_present']).lower()} "
+        f"imu_relative_yaw_deg={snapshot['imu_relative_yaw_deg']}"
+    )
+
+
+def write_gps_cache(snapshot: dict[str, object]) -> None:
+    lat = snapshot.get("best_lat")
+    lon = snapshot.get("best_lon")
+    if lat is None or lon is None:
+        return
+    DEFAULT_GPS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        DEFAULT_GPS_CACHE,
+        {
+            "start_lat": lat,
+            "start_lon": lon,
+            "timestamp_s": time.time(),
+            "gps_sats": snapshot.get("best_sats"),
+            "gps_hdop": snapshot.get("best_hdop"),
+            "source": "gps-wait",
+            "ready_for_full_path_following": False,
+        },
+    )
+
+
+def load_cached_start(max_age_s: float) -> dict[str, object] | None:
+    if not DEFAULT_GPS_CACHE.exists():
+        return None
+    try:
+        data = json.loads(DEFAULT_GPS_CACHE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    timestamp_s = telemetry._optional_float(data.get("timestamp_s"))
+    if timestamp_s is None or time.time() - timestamp_s > max_age_s:
+        return None
+    lat = telemetry._optional_float(data.get("start_lat"))
+    lon = telemetry._optional_float(data.get("start_lon"))
+    if lat is None or lon is None:
+        return None
+    return {
+        "start_lat": lat,
+        "start_lon": lon,
+        "start_source": "cached_gps",
+        "start_gps_block_reason": "CACHE",
+        "start_gps_sats": data.get("gps_sats", "NA"),
+        "start_gps_hdop": data.get("gps_hdop", "NA"),
+        "gps_cached_used": True,
+        "gps_wait_snapshot": {
+            "gps_ready": True,
+            "gps_solution_valid": True,
+            "current_lat": lat,
+            "current_lon": lon,
+            "gps_sats": data.get("gps_sats"),
+            "gps_hdop": data.get("gps_hdop"),
+            "best_sats": data.get("gps_sats"),
+            "best_hdop": data.get("gps_hdop"),
+            "best_lat": lat,
+            "best_lon": lon,
+            "last_rmc_status": data.get("last_rmc_status", "CACHE"),
+            "last_gga_fix_quality": data.get("last_gga_fix_quality", "CACHE"),
+            "imu_present": False,
+            "imu_relative_yaw_deg": "NA",
+        },
+    }
+
+
 def resolve_start_gps_from_rows(
     rows: Sequence[dict[str, str]],
     *,
     start_mode: str,
     cached_start_max_age_ms: int,
+    min_sats: float = 5.0,
+    max_hdop: float = 2.5,
 ) -> dict[str, object] | None:
     """Resolve the preview start coordinate from live/current or fresh cached GPS."""
     if start_mode not in {"live_gps", "cached_gps"}:
         return None
+    snapshot = gps_snapshot(rows, min_sats=min_sats, max_hdop=max_hdop)
+    ready_row = snapshot.get("ready_row")
+    if start_mode == "live_gps" and isinstance(ready_row, dict):
+        lat, lon = _lat_lon_from_row(
+            ready_row,
+            ("current_lat", "gps_lat", "current_gps_lat"),
+            ("current_lon", "gps_lon", "current_gps_lon"),
+        )
+        if lat is not None and lon is not None:
+            return {
+                "start_lat": lat,
+                "start_lon": lon,
+                "start_source": "live_gps",
+                "start_gps_block_reason": ready_row.get("gps_block_reason", "NA"),
+                "start_gps_sats": ready_row.get("gps_sats", "NA"),
+                "start_gps_hdop": ready_row.get("gps_hdop", "NA"),
+                "gps_cached_used": False,
+                "gps_wait_snapshot": {k: v for k, v in snapshot.items() if k != "ready_row"},
+            }
     for row in reversed(rows):
-        if start_mode == "live_gps":
-            lat, lon = _lat_lon_from_row(
-                row,
-                ("current_lat", "gps_lat", "current_gps_lat"),
-                ("current_lon", "gps_lon", "current_gps_lon"),
-            )
-            if lat is not None and lon is not None:
-                return {
-                    "start_lat": lat,
-                    "start_lon": lon,
-                    "start_source": "live_gps",
-                    "start_gps_block_reason": row.get("gps_block_reason", "NA"),
-                    "start_gps_sats": row.get("gps_sats", "NA"),
-                    "start_gps_hdop": row.get("gps_hdop", "NA"),
-                    "gps_cached_used": False,
-                }
         lat, lon = _lat_lon_from_row(
             row,
             ("gps_cached_lat", "gps_lat", "current_lat", "current_gps_lat"),
@@ -1030,6 +1210,7 @@ def resolve_start_gps_from_rows(
                 "start_gps_sats": row.get("gps_sats", "NA"),
                 "start_gps_hdop": row.get("gps_hdop", "NA"),
                 "gps_cached_used": True,
+                "gps_wait_snapshot": {k: v for k, v in snapshot.items() if k != "ready_row"},
             }
     return None
 
@@ -1045,26 +1226,42 @@ def resolve_start_for_preview(args: argparse.Namespace) -> tuple[dict[str, objec
             "start_gps_sats": "NA",
             "start_gps_hdop": "NA",
             "gps_cached_used": False,
+            "gps_wait_elapsed_s": 0.0,
         }, []
     if getattr(args, "start_mode", "live_gps") == "explicit":
         return None, []
 
     raw_lines: list[str] = []
+    min_sats = float(getattr(args, "gps_min_sats", 5))
+    max_hdop = float(getattr(args, "gps_max_hdop", 2.5))
+    max_cache_s = float(getattr(args, "max_cached_start_age_s", 600))
+    allow_cache = str(getattr(args, "allow_cached_start", "true")).lower() != "false"
     if getattr(args, "from_log", None):
         log_path = Path(args.from_log)
         raw_lines = log_path.read_text(encoding="utf-8").splitlines()
         rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
-        return resolve_start_gps_from_rows(
+        resolved = resolve_start_gps_from_rows(
             rows,
             start_mode=args.start_mode,
             cached_start_max_age_ms=args.cached_start_max_age_ms,
-        ), raw_lines
+            min_sats=min_sats,
+            max_hdop=max_hdop,
+        )
+        if resolved is not None:
+            resolved["gps_wait_elapsed_s"] = 0.0
+        return resolved, raw_lines
 
     if not ensure_port(args):
         return None, []
     import serial
 
-    deadline = time.monotonic() + float(args.start_timeout_s)
+    if not telemetry._parse_bool(getattr(args, "wait_gps", "true"), default=True):
+        deadline = time.monotonic() + 0.5
+    else:
+        deadline = time.monotonic() + float(getattr(args, "gps_timeout_s", args.start_timeout_s))
+    status_interval_s = float(getattr(args, "gps_status_interval_s", 2.0))
+    next_status = time.monotonic()
+    start_monotonic = time.monotonic()
     rows: list[dict[str, str]] = []
     with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
         while time.monotonic() < deadline:
@@ -1078,9 +1275,21 @@ def resolve_start_for_preview(args: argparse.Namespace) -> tuple[dict[str, objec
                 rows,
                 start_mode=args.start_mode,
                 cached_start_max_age_ms=args.cached_start_max_age_ms,
+                min_sats=min_sats,
+                max_hdop=max_hdop,
             )
             if resolved is not None:
+                resolved["gps_wait_elapsed_s"] = time.monotonic() - start_monotonic
                 return resolved, raw_lines
+            if time.monotonic() >= next_status:
+                snapshot = gps_snapshot(rows, min_sats=min_sats, max_hdop=max_hdop)
+                print(_gps_status_line(time.monotonic() - start_monotonic, snapshot))
+                next_status = time.monotonic() + status_interval_s
+    if allow_cache:
+        cached = load_cached_start(max_cache_s)
+        if cached is not None:
+            cached["gps_wait_elapsed_s"] = time.monotonic() - start_monotonic
+            return cached, raw_lines
     return None, raw_lines
 
 
@@ -1139,7 +1348,7 @@ def diagnose_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
         "row_count": len(rows),
         "heartbeat_count": len(heartbeats),
         "event_counts": event_counts,
-        "guarded_pulse_compatible": controller.stage20_compatible(last) if last else False,
+        "guarded_pulse_compatible": controller.guarded_pulse_compatible(last) if last else False,
         "physical_output_active": telemetry.physical_output_active(last) if last else False,
         "last_gps_block_reason": telemetry.gps_block_reason(last) if last else "NA",
         "last_gps_sats": telemetry._fmt(telemetry.gps_sats(last)) if last else "NA",
@@ -1155,8 +1364,14 @@ def diagnose_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
 def guarded_pulse_ready_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
     heartbeats = [row for row in rows if telemetry.event(row) == "HEARTBEAT"]
     last = heartbeats[-1] if heartbeats else {}
-    guarded_seen = any(row.get("stage20_physical_ab_guarded_crawl") == "true" for row in rows)
-    firmware_ready = any(row.get("stage20_firmware_ready") == "true" for row in rows)
+    guarded_seen = any(
+        row.get("usb_pulse_test_mode") == "true" or row.get(_COMPAT_GUARDED_MODE_KEY) == "true"
+        for row in rows
+    )
+    firmware_ready = any(
+        row.get("usb_pulse_ready") == "true" or row.get(_COMPAT_GUARDED_READY_KEY) == "true"
+        for row in rows
+    )
     imu_enabled = any(row.get("imu_enabled") == "true" for row in rows)
     imu_present = any(row.get("imu_present") == "true" for row in rows)
     imu_bmi160 = any(row.get("imu_type") == "BMI160" for row in rows)
@@ -1264,6 +1479,12 @@ def cmd_preview(args: argparse.Namespace) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         if raw_start_lines:
             _write_raw_log(out_dir / "preview_start_usbdbg.log", raw_start_lines)
+        raw_rows = telemetry.parse_usbdbg_rows("\n".join(raw_start_lines))
+        snapshot = gps_snapshot(
+            raw_rows,
+            min_sats=float(getattr(args, "gps_min_sats", 5.0)),
+            max_hdop=float(getattr(args, "gps_max_hdop", 2.5)),
+        )
         summary = {
             "mode": "preview",
             "success": False,
@@ -1271,6 +1492,11 @@ def cmd_preview(args: argparse.Namespace) -> int:
             "message": NO_USABLE_START_GPS_ACTION,
             "next_recommended_action": NO_USABLE_START_GPS_ACTION,
             "start_mode": getattr(args, "start_mode", "live_gps"),
+            "start_source": "none",
+            "gps_wait_enabled": telemetry._parse_bool(getattr(args, "wait_gps", "true"), default=True),
+            "gps_wait_timeout_s": float(getattr(args, "gps_timeout_s", getattr(args, "start_timeout_s", 0.0))),
+            "gps_wait_elapsed_s": float(getattr(args, "gps_timeout_s", getattr(args, "start_timeout_s", 0.0))),
+            **{k: v for k, v in snapshot.items() if k != "ready_row"},
             "motion_calibration_loaded": motion_calibration_loaded(cal),
             "ready_for_full_path_following": False,
         }
@@ -1292,6 +1518,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "mode": "preview",
         "success": True,
         "reason": "OK",
+        "start_mode": getattr(args, "start_mode", "live_gps"),
         "start_source": start["start_source"],
         "current_lat": start["start_lat"],
         "current_lon": start["start_lon"],
@@ -1299,6 +1526,10 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "start_gps_sats": start["start_gps_sats"],
         "start_gps_hdop": start["start_gps_hdop"],
         "gps_cached_used": start["gps_cached_used"],
+        "gps_wait_enabled": telemetry._parse_bool(getattr(args, "wait_gps", "true"), default=True),
+        "gps_wait_timeout_s": float(getattr(args, "gps_timeout_s", getattr(args, "start_timeout_s", 0.0))),
+        "gps_wait_elapsed_s": start.get("gps_wait_elapsed_s", 0.0),
+        **dict(start.get("gps_wait_snapshot", {})),
         "motion_calibration_loaded": motion_calibration_loaded(cal),
         "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "next_recommended_action": f"Inspect {out_dir / 'summary.md'} and preview outputs before execute-plan or run.",
@@ -1323,6 +1554,92 @@ def cmd_preview(args: argparse.Namespace) -> int:
         f"{plan['lane_count']} lanes, goal_distance_m={float(plan['goal_distance_m']):.3f} -> {out_dir}"
     )
     return 0
+
+
+def _gps_wait_summary(
+    rows: Sequence[dict[str, str]],
+    *,
+    mode: str,
+    elapsed_s: float,
+    timeout_s: float,
+    min_sats: float,
+    max_hdop: float,
+) -> dict[str, object]:
+    snapshot = gps_snapshot(rows, min_sats=min_sats, max_hdop=max_hdop)
+    summary = {k: v for k, v in snapshot.items() if k != "ready_row"}
+    success = bool(snapshot["gps_ready"])
+    summary.update(
+        {
+            "mode": mode,
+            "success": success,
+            "reason": "GPS_READY" if success else "GPS_WAIT_TIMEOUT",
+            "gps_wait_enabled": True,
+            "gps_wait_timeout_s": timeout_s,
+            "gps_wait_elapsed_s": elapsed_s,
+            "gps_min_sats": min_sats,
+            "gps_max_hdop": max_hdop,
+            "next_recommended_action": (
+                "Use preview/run now that a start coordinate is available."
+                if success else GPS_WAIT_TIMEOUT_ACTION
+            ),
+            "ready_for_full_path_following": False,
+        }
+    )
+    return checks.assert_not_ready_for_full_path_following(summary)
+
+
+def cmd_gps_wait(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_lines: list[str] = []
+    rows: list[dict[str, str]] = []
+    start = time.monotonic()
+    if getattr(args, "from_log", None):
+        raw_lines = Path(args.from_log).read_text(encoding="utf-8").splitlines()
+        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+        elapsed_s = 0.0
+    else:
+        if not ensure_port(args):
+            return 2
+        import serial
+
+        deadline = start + float(args.timeout_s)
+        next_status = start
+        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+            while time.monotonic() < deadline:
+                raw = handle.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="replace").strip()
+                raw_lines.append(line)
+                parsed = telemetry.parse_usbdbg_rows(line)
+                if parsed:
+                    rows.extend(parsed)
+                snapshot = gps_snapshot(rows, min_sats=args.min_sats, max_hdop=args.max_hdop)
+                if time.monotonic() >= next_status:
+                    print(_gps_status_line(time.monotonic() - start, snapshot))
+                    next_status = time.monotonic() + float(args.status_interval_s)
+                if snapshot["gps_ready"]:
+                    break
+        elapsed_s = time.monotonic() - start
+    summary = _gps_wait_summary(
+        rows,
+        mode="gps-wait",
+        elapsed_s=elapsed_s,
+        timeout_s=float(args.timeout_s),
+        min_sats=float(args.min_sats),
+        max_hdop=float(args.max_hdop),
+    )
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "gps_wait.csv", rows)
+    write_summary_files(out_dir, summary, title="GPS Wait")
+    if summary["success"] is True:
+        write_gps_cache(gps_snapshot(rows, min_sats=args.min_sats, max_hdop=args.max_hdop))
+    print(
+        f"gps-wait: reason={summary['reason']} "
+        f"best_sats={summary['best_sats']} best_hdop={summary['best_hdop']} -> {out_dir}"
+    )
+    return 0 if summary["success"] is True else 2
 
 
 def cmd_calibrate_turn(args: argparse.Namespace) -> int:
@@ -1674,7 +1991,7 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
                     elapsed_s = int(time.monotonic() - start_s)
                     if elapsed_s != last_status_s:
                         last_status_s = elapsed_s
-                        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines[-10:]))
+                        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines[-200:]))
                         print(format_manual_control_status(elapsed_s=elapsed_s, rows=rows))
         except KeyboardInterrupt:
             print("User aborted manual-control monitor; writing summaries.")
@@ -1952,7 +2269,7 @@ def station_drive_compatible(row: dict[str, str]) -> bool:
         telemetry._parse_bool(row.get("usb_pulse_test_mode")) is True
         and telemetry._parse_bool(row.get("usb_pulse_test_ready")) is True
     )
-    return clean_ready or controller.stage20_compatible(row)
+    return clean_ready or controller.guarded_pulse_compatible(row)
 
 
 def station_drive_event_counts(rows: Sequence[dict[str, object]]) -> dict[str, int]:
@@ -2058,7 +2375,13 @@ def station_drive_classification(rows: Sequence[dict[str, object]], *, user_abor
 
 
 def _station_drive_latest_state(row: dict[str, str]) -> str:
-    return row.get("usb_pulse_test_cmd_state") or row.get("station_drive_cmd_state") or row.get("stage20_cmd_state") or row.get("stage16_cmd_state") or ""
+    return (
+        row.get("usb_pulse_test_cmd_state")
+        or row.get("station_drive_cmd_state")
+        or row.get(_COMPAT_GUARDED_STATE_KEY)
+        or row.get(_COMPAT_GUARDED_STATE_FALLBACK_KEY)
+        or ""
+    )
 
 
 def cmd_usb_pulse_test(args: argparse.Namespace) -> int:
@@ -3081,15 +3404,57 @@ def cmd_run(args: argparse.Namespace) -> int:
         plan = json.loads(plan_path.read_text())
     else:
         if args.start_lat is None or args.start_lon is None:
-            return _fail_with_summary(
-                args,
-                reason="START_COORDINATE_REQUIRED",
-                message="--start-lat and --start-lon are required unless --plan-dir is provided",
-            )
+            start, raw_start_lines = resolve_start_for_preview(args)
+            if start is None:
+                out_dir = Path(args.out_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                if raw_start_lines:
+                    _write_raw_log(out_dir / "run_start_usbdbg.log", raw_start_lines)
+                raw_rows = telemetry.parse_usbdbg_rows("\n".join(raw_start_lines))
+                snapshot = gps_snapshot(
+                    raw_rows,
+                    min_sats=float(getattr(args, "gps_min_sats", 5.0)),
+                    max_hdop=float(getattr(args, "gps_max_hdop", 2.5)),
+                )
+                write_summary_files(
+                    out_dir,
+                    {
+                        "mode": args.mode,
+                        "success": False,
+                        "reason": "NO_USABLE_START_GPS",
+                        "message": NO_USABLE_START_GPS_ACTION,
+                        "next_recommended_action": NO_USABLE_START_GPS_ACTION,
+                        "start_mode": getattr(args, "start_mode", "live_gps"),
+                        "start_source": "none",
+                        "gps_wait_enabled": telemetry._parse_bool(getattr(args, "wait_gps", "true"), default=True),
+                        "gps_wait_timeout_s": float(getattr(args, "gps_timeout_s", getattr(args, "start_timeout_s", 0.0))),
+                        "gps_wait_elapsed_s": float(getattr(args, "gps_timeout_s", getattr(args, "start_timeout_s", 0.0))),
+                        **{k: v for k, v in snapshot.items() if k != "ready_row"},
+                        "motion_calibration_loaded": motion_calibration_loaded(cal),
+                        "ready_for_full_path_following": False,
+                    },
+                    title="Physical Path Planner Run",
+                )
+                return 2
+            args.start_lat = float(start["start_lat"])
+            args.start_lon = float(start["start_lon"])
         try:
             plan = resolve_plan(args, cal)
         except ValueError as exc:
             return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
+        if "start" in locals():
+            plan.update(
+                {
+                    "start_mode": getattr(args, "start_mode", "live_gps"),
+                    "start_source": start["start_source"],
+                    "current_lat": start["start_lat"],
+                    "current_lon": start["start_lon"],
+                    "gps_wait_enabled": telemetry._parse_bool(getattr(args, "wait_gps", "true"), default=True),
+                    "gps_wait_timeout_s": float(getattr(args, "gps_timeout_s", getattr(args, "start_timeout_s", 0.0))),
+                    "gps_wait_elapsed_s": start.get("gps_wait_elapsed_s", 0.0),
+                    **dict(start.get("gps_wait_snapshot", {})),
+                }
+            )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.print_plan:
@@ -3103,6 +3468,22 @@ def cmd_run(args: argparse.Namespace) -> int:
             "start_source": start_source,
             "current_lat": plan["start_lat"],
             "current_lon": plan["start_lon"],
+            "start_mode": plan.get("start_mode", getattr(args, "start_mode", "explicit")),
+            "gps_wait_enabled": plan.get("gps_wait_enabled", False),
+            "gps_wait_timeout_s": plan.get("gps_wait_timeout_s", 0.0),
+            "gps_wait_elapsed_s": plan.get("gps_wait_elapsed_s", 0.0),
+            "gps_ready": plan.get("gps_ready", "NA"),
+            "gps_solution_valid": plan.get("gps_solution_valid", "NA"),
+            "gps_sats": plan.get("gps_sats", "NA"),
+            "gps_hdop": plan.get("gps_hdop", "NA"),
+            "best_sats": plan.get("best_sats", "NA"),
+            "best_hdop": plan.get("best_hdop", "NA"),
+            "best_lat": plan.get("best_lat", "NA"),
+            "best_lon": plan.get("best_lon", "NA"),
+            "last_rmc_status": plan.get("last_rmc_status", "NA"),
+            "last_gga_fix_quality": plan.get("last_gga_fix_quality", "NA"),
+            "imu_present": plan.get("imu_present", "NA"),
+            "imu_relative_yaw_deg": plan.get("imu_relative_yaw_deg", "NA"),
             "motion_calibration_loaded": motion_calibration_loaded(cal),
             "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
             "continuous_drive_used": args.straight_motion_mode == "continuous",
@@ -3166,6 +3547,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         "start_source": str(plan.get("start_source", "plan_dir" if getattr(args, "plan_dir", None) else "explicit")),
         "current_lat": plan["start_lat"],
         "current_lon": plan["start_lon"],
+        "start_mode": plan.get("start_mode", getattr(args, "start_mode", "explicit")),
+        "gps_wait_enabled": plan.get("gps_wait_enabled", False),
+        "gps_wait_timeout_s": plan.get("gps_wait_timeout_s", 0.0),
+        "gps_wait_elapsed_s": plan.get("gps_wait_elapsed_s", 0.0),
+        "gps_ready": plan.get("gps_ready", "NA"),
+        "gps_solution_valid": plan.get("gps_solution_valid", "NA"),
+        "gps_sats": plan.get("gps_sats", "NA"),
+        "gps_hdop": plan.get("gps_hdop", "NA"),
+        "best_sats": plan.get("best_sats", "NA"),
+        "best_hdop": plan.get("best_hdop", "NA"),
+        "best_lat": plan.get("best_lat", "NA"),
+        "best_lon": plan.get("best_lon", "NA"),
+        "last_rmc_status": plan.get("last_rmc_status", "NA"),
+        "last_gga_fix_quality": plan.get("last_gga_fix_quality", "NA"),
+        "imu_present": plan.get("imu_present", "NA"),
+        "imu_relative_yaw_deg": plan.get("imu_relative_yaw_deg", "NA"),
         "motion_calibration_loaded": motion_calibration_loaded(cal),
         "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "continuous_drive_used": summary.get("continuous_drive_used", args.straight_motion_mode == "continuous"),
@@ -3282,8 +3679,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
+        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
     )
+
+    gps_p = sub.add_parser("gps-wait", help="wait for usable GPS start fix; no motion")
+    gps_p.add_argument("--port", default=None)
+    gps_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    gps_p.add_argument("--from-log", default=None)
+    gps_p.add_argument("--timeout-s", type=float, default=300.0)
+    gps_p.add_argument("--status-interval-s", type=float, default=2.0)
+    gps_p.add_argument("--min-sats", type=float, default=5.0)
+    gps_p.add_argument("--max-hdop", type=float, default=2.5)
+    gps_p.add_argument("--out-dir", default="outputs/physical_path_planning/gps_wait")
+    gps_p.set_defaults(handler=cmd_gps_wait)
 
     preview_p = sub.add_parser("preview", help="build + render the plan (captures live/cached GPS start when omitted)")
     _add_goal_arguments(preview_p, require_start=False)
@@ -3297,6 +3705,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="how to resolve the plan start when --start-lat/--start-lon are omitted",
     )
     preview_p.add_argument("--start-timeout-s", type=float, default=120.0)
+    preview_p.add_argument("--wait-gps", choices=["true", "false"], default="true")
+    preview_p.add_argument("--gps-timeout-s", type=float, default=300.0)
+    preview_p.add_argument("--gps-status-interval-s", type=float, default=2.0)
+    preview_p.add_argument("--gps-min-sats", type=float, default=5.0)
+    preview_p.add_argument("--gps-max-hdop", type=float, default=2.5)
+    preview_p.add_argument("--allow-cached-start", choices=["true", "false"], default="true")
+    preview_p.add_argument("--max-cached-start-age-s", type=float, default=600.0)
     preview_p.add_argument("--cached-start-max-age-ms", type=int, default=10000)
     preview_p.add_argument("--from-log", default=None, help="parse saved telemetry for start GPS instead of opening serial")
     preview_p.add_argument("--out-dir", default="outputs/physical_path_planning/preview")
@@ -3536,6 +3951,21 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--plan-dir", default=None)
         run_p.add_argument("--port", default=None)
         run_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+        run_p.add_argument(
+            "--start-mode",
+            choices=["live_gps", "cached_gps", "explicit"],
+            default="live_gps",
+        )
+        run_p.add_argument("--wait-gps", choices=["true", "false"], default="true")
+        run_p.add_argument("--gps-timeout-s", type=float, default=300.0)
+        run_p.add_argument("--gps-status-interval-s", type=float, default=2.0)
+        run_p.add_argument("--gps-min-sats", type=float, default=5.0)
+        run_p.add_argument("--gps-max-hdop", type=float, default=2.5)
+        run_p.add_argument("--allow-cached-start", choices=["true", "false"], default="true")
+        run_p.add_argument("--max-cached-start-age-s", type=float, default=600.0)
+        run_p.add_argument("--start-timeout-s", type=float, default=120.0)
+        run_p.add_argument("--cached-start-max-age-ms", type=int, default=10000)
+        run_p.add_argument("--from-log", default=None)
         run_p.add_argument("--start-yaw-deg", type=float, default=None)
         run_p.add_argument("--event-timeout-s", type=float, default=controller.DEFAULT_EVENT_TIMEOUT_S)
         run_p.add_argument(

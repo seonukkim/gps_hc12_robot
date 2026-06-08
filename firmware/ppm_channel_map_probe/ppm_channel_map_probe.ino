@@ -22,14 +22,14 @@ constexpr uint32_t USB_BAUD = 115200;
 constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 3000;
 constexpr uint32_t SUMMARY_PERIOD_MS = 1000;
 
-constexpr uint16_t PPM_SYNC_US = 4000;    // Frame gap, matches main firmware.
+constexpr uint16_t PPM_SYNC_US = 3000;    // Frame gap, matches main firmware.
 constexpr uint16_t VALID_MIN_US = 800;    // Below this = out of range.
 constexpr uint16_t VALID_MAX_US = 2200;   // Above this = out of range.
 constexpr uint16_t LOW_MAX_US = 1300;     // < LOW_MAX_US -> LOW.
 constexpr uint16_t HIGH_MIN_US = 1700;    // > HIGH_MIN_US -> HIGH, else MID.
 constexpr uint32_t FRAME_STALE_MS = 100;  // Older than this = stale/failsafe.
 constexpr uint8_t STABLE_FRAMES = 3;      // Frames a state must hold to count.
-constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";
+constexpr const char *PPM_INTERRUPT_EDGE_NAME = "RISING";
 
 enum ChannelState { STATE_UNKNOWN = 0, STATE_LOW, STATE_MID, STATE_HIGH };
 
@@ -171,7 +171,7 @@ void setup() {
   Serial.println(F("PPMHDR A stable mode channel toggles cleanly between LOW and HIGH and holds."));
 
   pinMode(PPM_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
 }
 
 void loop() {

@@ -3,7 +3,8 @@
 Context:
 - Station controller: disassembled RadioLink transmitter integrated into the Jetson/station box
 - Receiver output: PPM into OpenRB D6
-- Verification sources: `firmware/rc_mix_test/rc_mix_test.ino` output and rover `USBDBG` logs
+- Verification sources: old integrated `openrb_robot_controller.ino`, safe PPM
+  probes, and rover `USBDBG` logs
 
 ## Station Integrated Controller Mapping
 
@@ -21,8 +22,8 @@ The station panel can physically look like `CH7`, but the firmware uses the rece
 - `STEERING_CHANNEL_INDEX = 0`
 - `THROTTLE_CHANNEL_INDEX = 1`
 - `MODE_CHANNEL_INDEX = 4`
-- PPM decoder edge/sync: `FALLING`, frame gap `>4000 us`, matching
-  `firmware/rc_mix_test/rc_mix_test.ino`
+- PPM decoder edge/sync: `RISING`, frame gap `>3000 us`, matching the old
+  integrated `openrb_robot_controller.ino` baseline that physically moved
 - `STEERING_CENTER_US = 1504`
 - `THROTTLE_CENTER_US = 1500`
 - `RC_DEADBAND_US = 80`

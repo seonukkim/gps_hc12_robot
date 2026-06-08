@@ -78,12 +78,19 @@ The probe uses the same PPM input pin and frame decoder style as
 
 - PPM input: OpenRB `D6`
 - channels: `ch1_us` through `ch8_us`
-- frame sync: pulse width greater than `4000 us`
-- interrupt edge: `FALLING` (matches the verified `firmware/rc_mix_test`
-  decoder; the wrong edge can show short invalid pulses such as about `200 us`)
+- frame sync: pulse width greater than `3000 us`
+- interrupt edge: `RISING` (restored to the old integrated
+  `openrb_robot_controller.ino` baseline that physically moved)
 
 It does not attach Servo or motor outputs. It prints current values, min/max
 observed values, and `changed_channels` every `0.5` seconds.
+
+If `manual-control` repeatedly shows `rc_ok=false`, `control_source=STOP`, a
+very low `ppm_frame_count`, `ppm_last_channel_count=0` or `1`, or invalid
+`steer_us` values such as `180`, `161`, `97`, or `751`, the rover is stopping
+because the PPM signal is unstable or mis-decoded. Before changing motor
+mapping, charge/check the station controller battery, receiver power, PPM signal
+wire on D6, shared ground, and run `firmware/rc_channel_probe`.
 
 Compile/upload/monitor on this macOS setup:
 
