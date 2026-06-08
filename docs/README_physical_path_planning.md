@@ -267,6 +267,48 @@ small clamped B correction. Approved `turn_left_90` and `turn_right_90` entries
 become the preferred connector commands; repeated small turn pulses remain a
 fallback when approved 90-degree turn calibration is missing.
 
+## Manual Motion Calibration Override
+
+When visual tuning is unstable for one primitive, use `set-motion-calibration`
+to write an approved manual preset or a single primitive override. This is a
+local file operation: it backs up the existing `motion_calibration.json`,
+preserves primitives that are not being overwritten, validates the A/B signs,
+and writes the updated calibration back to:
+
+```text
+outputs/physical_path_planning/calibration/motion_calibration.json
+```
+
+Field preset with strong forward/backward/left and softer right:
+
+```bash
+bash scripts/run_physical_path_planner.sh set-motion-calibration \
+  --preset field_manual_high_except_soft_right \
+  --out-dir outputs/physical_path_planning/calibration_manual_override
+```
+
+Explicit soft right-turn override:
+
+```bash
+bash scripts/run_physical_path_planner.sh set-motion-calibration \
+  --primitive turn-right-90 \
+  --a 0.0 --b -0.06 --ms 800 \
+  --target-angle-deg 90 \
+  --source manual_soft_right_test \
+  --out-dir outputs/physical_path_planning/recalib_turn_right_soft
+```
+
+Right-turn soft candidates for field testing:
+
+```text
+b=-0.06 ms=800
+b=-0.08 ms=1000
+b=-0.10 ms=1000
+```
+
+The physical mapping is unchanged: `A>0` forward, `A<0` backward, `B>0` left,
+and `B<0` right. `ready_for_full_path_following` remains `false`.
+
 To recalibrate from scratch without losing the prior values, back up first:
 
 ```bash

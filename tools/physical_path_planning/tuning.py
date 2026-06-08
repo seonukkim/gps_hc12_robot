@@ -60,6 +60,41 @@ CALIBRATION_KEYS = {
     "turn-right-90": "turn_right_90",
 }
 
+MANUAL_CALIBRATION_PRESETS: dict[str, dict[str, dict[str, object]]] = {
+    "field_manual_high_except_soft_right": {
+        "forward": {
+            "a": 0.30,
+            "b": 0.0,
+            "ms": 1000,
+            "approved_by_user": True,
+            "source": "manual_high_preset",
+        },
+        "backward": {
+            "a": -0.08,
+            "b": 0.0,
+            "ms": 350,
+            "approved_by_user": True,
+            "source": "manual_high_preset",
+        },
+        "turn_left_90": {
+            "a": 0.0,
+            "b": 0.26,
+            "ms": 2400,
+            "target_angle_deg": 90,
+            "approved_by_user": True,
+            "source": "manual_high_preset",
+        },
+        "turn_right_90": {
+            "a": 0.0,
+            "b": -0.08,
+            "ms": 1000,
+            "target_angle_deg": 90,
+            "approved_by_user": True,
+            "source": "manual_soft_right_preset",
+        },
+    },
+}
+
 
 def normalize_primitive(name: str) -> str:
     normalized = name.strip().lower().replace("_", "-")
@@ -71,6 +106,99 @@ def initial_candidate(primitive: str) -> dict[str, object]:
     if key not in INITIAL_CANDIDATES:
         raise ValueError(f"unsupported tune-motion primitive: {primitive}")
     return dict(INITIAL_CANDIDATES[key])
+
+
+def calibration_key_for_primitive(primitive: str) -> str:
+    key = normalize_primitive(primitive)
+    if key not in CALIBRATION_KEYS:
+        raise ValueError(f"unsupported motion calibration primitive: {primitive}")
+    return CALIBRATION_KEYS[key]
+
+
+def primitive_for_calibration_key(key: str) -> str:
+    normalized = key.strip().lower()
+    for primitive, calibration_key in CALIBRATION_KEYS.items():
+        if normalized == calibration_key:
+            return primitive
+    return normalize_primitive(normalized)
+
+
+def validate_manual_calibration_entry(primitive: str, entry: dict[str, object]) -> None:
+    """Validate A/B signs for the physical mapping before writing overrides."""
+    normalized = normalize_primitive(primitive_for_calibration_key(primitive))
+    a_cmd = float(entry["a"])
+    b_cmd = float(entry["b"])
+    ms = int(entry["ms"])
+    if ms <= 0 or ms > MAX_MS:
+        raise ValueError(f"{primitive} ms must be > 0 and <= {MAX_MS}")
+    if abs(a_cmd) > MAX_ABS_A or abs(b_cmd) > MAX_ABS_B:
+        raise ValueError(f"{primitive} exceeds max |A|={MAX_ABS_A} or |B|={MAX_ABS_B}")
+    if normalized == "forward" and a_cmd <= 0.0:
+        raise ValueError("forward calibration requires A > 0")
+    if normalized == "backward" and a_cmd >= 0.0:
+        raise ValueError("backward calibration requires A < 0")
+    if normalized in {"left", "turn-left-90"} and b_cmd <= 0.0:
+        raise ValueError("left/turn-left calibration requires B > 0")
+    if normalized in {"right", "turn-right-90"} and b_cmd >= 0.0:
+        raise ValueError("right/turn-right calibration requires B < 0")
+
+
+def manual_calibration_entry(
+    primitive: str,
+    *,
+    a: float,
+    b: float,
+    ms: int,
+    source: str,
+    target_angle_deg: float | None = None,
+) -> dict[str, object]:
+    normalized = normalize_primitive(primitive)
+    entry: dict[str, object] = {
+        "a": round(float(a), 3),
+        "b": round(float(b), 3),
+        "ms": int(ms),
+        "approved_by_user": True,
+        "source": source,
+    }
+    if normalized in {"turn-left-90", "turn-right-90"}:
+        entry["target_angle_deg"] = float(target_angle_deg if target_angle_deg is not None else TURN_TARGET_ANGLE_DEG)
+    elif target_angle_deg is not None:
+        entry["target_angle_deg"] = float(target_angle_deg)
+    validate_manual_calibration_entry(normalized, entry)
+    return entry
+
+
+def manual_calibration_preset(name: str) -> dict[str, dict[str, object]]:
+    if name not in MANUAL_CALIBRATION_PRESETS:
+        raise ValueError(f"unknown motion calibration preset: {name}")
+    preset = {
+        key: dict(value)
+        for key, value in MANUAL_CALIBRATION_PRESETS[name].items()
+    }
+    for key, entry in preset.items():
+        validate_manual_calibration_entry(key, entry)
+    return preset
+
+
+def apply_manual_calibration_updates(
+    path: Path,
+    updates: dict[str, dict[str, object]],
+    *,
+    timestamp: str | None = None,
+) -> tuple[dict[str, object], Path | None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_calibration(path, timestamp=timestamp)
+    if path.exists():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        data = loaded if isinstance(loaded, dict) else {}
+    else:
+        data = {}
+    for key, entry in updates.items():
+        validate_manual_calibration_entry(key, entry)
+        data[key] = dict(entry)
+    data["ready_for_full_path_following"] = False
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return data, backup_path
 
 
 def clamp_candidate(candidate: dict[str, object]) -> dict[str, object]:

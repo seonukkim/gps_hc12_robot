@@ -9,6 +9,7 @@
     station-hw-manual    physical station hardware manual rover control.
     usb-pulse-test       laptop USB bounded A/B rover pulse test.
     calibrate-turn        run guarded pulse turn-angle calibration.
+    set-motion-calibration write a manual calibration preset/override. No motion.
     preview               build + render the rectangle coverage plan.
     execute-plan / run    execute a planned path with guarded pulses.
 
@@ -3434,6 +3435,83 @@ def cmd_reset_motion_calibration(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set_motion_calibration(args: argparse.Namespace) -> int:
+    """Apply a manual motion-calibration preset or one explicit primitive override."""
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    calibration_out = tuning.motion_calibration_path(getattr(args, "calibration_out", None))
+    try:
+        if args.preset:
+            updates = tuning.manual_calibration_preset(args.preset)
+            change_source = args.preset
+        else:
+            if not args.primitive:
+                return _fail_with_summary(
+                    args,
+                    reason="MOTION_CALIBRATION_OVERRIDE_MISSING",
+                    message="Provide --preset or --primitive with --a --b --ms.",
+                )
+            missing = [
+                name for name in ("a", "b", "ms")
+                if getattr(args, name) is None
+            ]
+            if missing:
+                return _fail_with_summary(
+                    args,
+                    reason="MOTION_CALIBRATION_OVERRIDE_INCOMPLETE",
+                    message=f"Missing required override fields: {', '.join('--' + item for item in missing)}",
+                )
+            primitive = tuning.normalize_primitive(args.primitive)
+            key = tuning.calibration_key_for_primitive(primitive)
+            updates = {
+                key: tuning.manual_calibration_entry(
+                    primitive,
+                    a=float(args.a),
+                    b=float(args.b),
+                    ms=int(args.ms),
+                    target_angle_deg=args.target_angle_deg,
+                    source=args.source,
+                )
+            }
+            change_source = args.source
+        updated, backup_path = tuning.apply_manual_calibration_updates(calibration_out, updates)
+    except ValueError as exc:
+        return _fail_with_summary(
+            args,
+            reason="MOTION_CALIBRATION_OVERRIDE_INVALID",
+            message=str(exc),
+        )
+    changed = {
+        "mode": "set-motion-calibration",
+        "preset": args.preset or "NONE",
+        "source": change_source,
+        "calibration_path": str(calibration_out),
+        "backup_path": str(backup_path) if backup_path is not None else "NONE",
+        "updated_primitives": sorted(updates.keys()),
+        "updates": updates,
+        "ready_for_full_path_following": False,
+    }
+    summary = {
+        **changed,
+        "success": True,
+        "reason": "MOTION_CALIBRATION_SET",
+        "next_recommended_action": (
+            "Run calibration-check, then execute-plan/run. For softer right-turn testing, "
+            "try b=-0.06 ms=800, b=-0.08 ms=1000, or b=-0.10 ms=1000."
+        ),
+    }
+    summary = checks.assert_not_ready_for_full_path_following(summary)
+    _write_json(out_dir / "manual_motion_calibration_change.json", changed)
+    _write_json(out_dir / "motion_calibration_updated.json", updated)
+    _write_json(out_dir / "set_motion_calibration_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Set Motion Calibration")
+    print(f"set-motion-calibration: updated={','.join(sorted(updates.keys()))} -> {calibration_out}")
+    if backup_path is not None:
+        print(f"calibration backed up: {backup_path}")
+    print("ready_for_full_path_following=false")
+    return 0
+
+
 def cmd_tune_motion(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -5345,7 +5423,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,reset-motion-calibration,calibration-check,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
+        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,set-motion-calibration,reset-motion-calibration,calibration-check,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
     )
 
     gps_p = sub.add_parser("gps-wait", help="wait for usable GPS start fix; no motion")
@@ -5644,6 +5722,29 @@ def build_parser() -> argparse.ArgumentParser:
     reset_cal_p.add_argument("--calibration-out", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
     reset_cal_p.add_argument("--out-dir", default="outputs/physical_path_planning/reset_motion_calibration")
     reset_cal_p.set_defaults(handler=cmd_reset_motion_calibration)
+
+    set_cal_p = sub.add_parser(
+        "set-motion-calibration",
+        help="write a manual motion calibration preset or primitive override; no motion",
+    )
+    set_cal_p.add_argument(
+        "--preset",
+        choices=sorted(tuning.MANUAL_CALIBRATION_PRESETS.keys()),
+        default=None,
+    )
+    set_cal_p.add_argument(
+        "--primitive",
+        choices=["forward", "backward", "left", "right", "turn-left-90", "turn-right-90"],
+        default=None,
+    )
+    set_cal_p.add_argument("--a", type=float, default=None)
+    set_cal_p.add_argument("--b", type=float, default=None)
+    set_cal_p.add_argument("--ms", type=int, default=None)
+    set_cal_p.add_argument("--target-angle-deg", type=float, default=None)
+    set_cal_p.add_argument("--source", default="manual_override")
+    set_cal_p.add_argument("--calibration-out", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
+    set_cal_p.add_argument("--out-dir", required=True)
+    set_cal_p.set_defaults(handler=cmd_set_motion_calibration)
 
     cal_check_p = sub.add_parser(
         "calibration-check",

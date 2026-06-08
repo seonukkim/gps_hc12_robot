@@ -22,6 +22,7 @@ Modes:
   usb-pulse-test        Laptop USB bounded A/B pulse motor validation.
   usb-drive-live        Continuous laptop USB A/B setpoint drive.
   tune-motion           Interactive visual/IMU-assisted motion calibration.
+  set-motion-calibration  Write a manual motion calibration preset/override. No motion.
   reset-motion-calibration  Back up and clear approved motion calibration. No motion.
   calibration-check     Report motion-calibration completeness for stop_correct_go. No motion.
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
@@ -68,6 +69,15 @@ Examples:
   bash scripts/run_physical_path_planner.sh tune-motion \
     --primitive forward \
     --out-dir outputs/physical_path_planning/tune_forward
+
+  bash scripts/run_physical_path_planner.sh set-motion-calibration \
+    --preset field_manual_high_except_soft_right \
+    --out-dir outputs/physical_path_planning/calibration_manual_override
+
+  # Soft right-turn manual test candidates:
+  #   --primitive turn-right-90 --a 0.0 --b -0.06 --ms 800 --target-angle-deg 90 --source manual_soft_right_test
+  #   --primitive turn-right-90 --a 0.0 --b -0.08 --ms 1000 --target-angle-deg 90 --source manual_soft_right_test
+  #   --primitive turn-right-90 --a 0.0 --b -0.10 --ms 1000 --target-angle-deg 90 --source manual_soft_right_test
 
   bash scripts/run_physical_path_planner.sh reset-motion-calibration \
     --out-dir outputs/physical_path_planning/reset_motion_calibration
@@ -423,7 +433,7 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
+  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|set-motion-calibration|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
   run|execute-plan|auto-relative-run|align-heading)

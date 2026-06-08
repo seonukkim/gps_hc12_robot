@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.physical_path_planning import calibration, cli, controller, geometry, tuning
 
 
@@ -63,6 +65,7 @@ def test_tune_motion_has_no_observed_distance_option() -> None:
     parser = cli.build_parser()
     help_text = parser.format_help()
     assert "tune-motion" in help_text
+    assert "set-motion-calibration" in help_text
     assert "observed-distance" not in help_text
 
 
@@ -140,6 +143,156 @@ def test_motion_calibration_resolver_prefers_approved_values(tmp_path: Path) -> 
     assert resolved["fallback_to_repeated_pulses"] is False
     assert calibration.connector_primitive(resolved, "left")["pulse_ms"] == 1800
     assert resolved["ready_for_full_path_following"] is False
+
+
+def test_set_motion_calibration_preset_writes_manual_high_soft_right(tmp_path: Path) -> None:
+    cal_path = tmp_path / "cal" / "motion_calibration.json"
+    _write_json(
+        cal_path,
+        {
+            "forward": {"a": 0.25, "b": 0.0, "ms": 700, "approved_by_user": True},
+            "operator_note": "preserve me",
+            "ready_for_full_path_following": False,
+        },
+    )
+    out_dir = tmp_path / "manual_override"
+
+    rc = cli.main(
+        [
+            "set-motion-calibration",
+            "--preset",
+            "field_manual_high_except_soft_right",
+            "--calibration-out",
+            str(cal_path),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    updated = json.loads(cal_path.read_text())
+    assert updated["forward"] == {
+        "a": 0.30,
+        "b": 0.0,
+        "ms": 1000,
+        "approved_by_user": True,
+        "source": "manual_high_preset",
+    }
+    assert updated["backward"]["a"] == -0.08
+    assert updated["backward"]["ms"] == 350
+    assert updated["turn_left_90"]["b"] == 0.26
+    assert updated["turn_left_90"]["ms"] == 2400
+    assert updated["turn_right_90"]["b"] == -0.08
+    assert updated["turn_right_90"]["ms"] == 1000
+    assert updated["turn_right_90"]["source"] == "manual_soft_right_preset"
+    assert updated["operator_note"] == "preserve me"
+    assert updated["ready_for_full_path_following"] is False
+
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["mode"] == "set-motion-calibration"
+    assert summary["preset"] == "field_manual_high_except_soft_right"
+    assert summary["backup_path"] != "NONE"
+    assert Path(summary["backup_path"]).exists()
+    assert (out_dir / "manual_motion_calibration_change.json").exists()
+    assert (out_dir / "motion_calibration_updated.json").exists()
+    assert summary["ready_for_full_path_following"] is False
+
+
+def test_set_motion_calibration_explicit_override_preserves_other_primitives(tmp_path: Path) -> None:
+    cal_path = _write_json(
+        tmp_path / "cal" / "motion_calibration.json",
+        {
+            "forward": {
+                "a": 0.30,
+                "b": 0.0,
+                "ms": 1000,
+                "approved_by_user": True,
+                "source": "manual_high_preset",
+            },
+            "turn_right_90": {
+                "a": 0.0,
+                "b": -0.08,
+                "ms": 1000,
+                "target_angle_deg": 90,
+                "approved_by_user": True,
+                "source": "manual_soft_right_preset",
+            },
+            "ready_for_full_path_following": False,
+        },
+    )
+    out_dir = tmp_path / "right_soft"
+
+    rc = cli.main(
+        [
+            "set-motion-calibration",
+            "--primitive",
+            "turn-right-90",
+            "--a",
+            "0.0",
+            "--b",
+            "-0.06",
+            "--ms",
+            "800",
+            "--target-angle-deg",
+            "90",
+            "--source",
+            "manual_soft_right_test",
+            "--calibration-out",
+            str(cal_path),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    updated = json.loads(cal_path.read_text())
+    assert updated["forward"]["ms"] == 1000
+    assert updated["turn_right_90"] == {
+        "a": 0.0,
+        "b": -0.06,
+        "ms": 800,
+        "target_angle_deg": 90.0,
+        "approved_by_user": True,
+        "source": "manual_soft_right_test",
+    }
+    change = json.loads((out_dir / "manual_motion_calibration_change.json").read_text())
+    assert change["updated_primitives"] == ["turn_right_90"]
+
+
+def test_set_motion_calibration_rejects_wrong_turn_sign(tmp_path: Path) -> None:
+    out_dir = tmp_path / "bad"
+    rc = cli.main(
+        [
+            "set-motion-calibration",
+            "--primitive",
+            "turn-right-90",
+            "--a",
+            "0.0",
+            "--b",
+            "0.06",
+            "--ms",
+            "800",
+            "--target-angle-deg",
+            "90",
+            "--calibration-out",
+            str(tmp_path / "cal" / "motion_calibration.json"),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 2
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["reason"] == "MOTION_CALIBRATION_OVERRIDE_INVALID"
+    assert "B < 0" in summary["message"]
+    assert summary["ready_for_full_path_following"] is False
+
+
+def test_manual_calibration_sign_validation() -> None:
+    with pytest.raises(ValueError, match="forward calibration requires A > 0"):
+        tuning.manual_calibration_entry("forward", a=-0.30, b=0.0, ms=1000, source="bad")
+    with pytest.raises(ValueError, match="right/turn-right calibration requires B < 0"):
+        tuning.manual_calibration_entry("turn-right-90", a=0.0, b=0.08, ms=1000, source="bad")
 
 
 def test_mac_execute_plan_loads_approved_motion_calibration(tmp_path: Path) -> None:
