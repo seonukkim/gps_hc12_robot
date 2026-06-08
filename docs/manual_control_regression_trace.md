@@ -143,9 +143,26 @@ actually captures enough channels to know that the CH5 mode slot is missing.
 
 ## Minimal Restore Implemented
 
+Follow-up after the June 8 retry:
+
+- `old-working-ppm` flashed and monitored correctly, but the new log still
+  showed `ppm_frame_count=0`, `ppm_last_channel_count=0`, `steer_us=0`,
+  `throttle_us=0`, and `mode_us=0`.
+- That means the old moving May 30 profile did not currently capture PPM channel
+  intervals on D6. The rover correctly stayed stopped because `rc_ok=false`.
+- The older May 2 `firmware/rc_mix_test/rc_mix_test.ino` evidence uses
+  `FALLING` edge and `width > 4000` as sync. That commit is
+  `516f59e272391fc4549b2df17614055d71b50493`, dated
+  `2026-05-02T23:03:22+09:00`, so it is not a same-day/today success claim.
+
 `manual-control` now has named compile profiles:
 
-- `old-working-ppm` (default): exact moving-run flags:
+- `rc-mix-ppm` (default): May 30 movement signs plus the May 2 `rc_mix_test`
+  PPM decoder style, `FALLING` edge and `4000 us` sync. This profile also
+  enables `MANUAL_CONTROL_PPM=1`, GPS-on-Serial2 telemetry, and IMU diagnostic
+  telemetry so manual-control does not hide general rover status.
+- `old-working-ppm`: moving-run manual signs and the old integrated decoder
+  style, with the same full telemetry display enabled:
   `-DMANUAL_FORWARD_SIGN=-1 -DMANUAL_TURN_SIGN=1 -DMOTOR_OUTPUT_SWAP_LR=0 -DDRIVE_CALIBRATION_ENABLE=0`
   plus the explicit `MODE_CHANNEL_INDEX=4` override used by the current docs.
 - `full-telemetry-ppm`: preserves the newer `MANUAL_CONTROL_PPM=1`,
@@ -154,7 +171,7 @@ actually captures enough channels to know that the CH5 mode slot is missing.
 Default command:
 
 ```bash
-bash scripts/run_physical_path_planner.sh manual-control --profile old-working-ppm
+bash scripts/run_physical_path_planner.sh manual-control --profile rc-mix-ppm
 ```
 
 The restore does not change pin mappings, channel mappings, motor mapping,

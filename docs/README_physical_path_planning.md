@@ -20,10 +20,16 @@ Modes:
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
 - `preview` — build + render a rectangle coverage plan without motor output.
-- `execute-plan` / `run` — supervised guarded pulse execution.
+- `auto-relative-preview` — wait for GPS, resolve a relative A→B field, write the field config + preview without motor output.
+- `execute-plan` / `run` — supervised guarded pulse execution (default `--path-control-mode gps_imu_closed_loop`).
+- `auto-relative-run` — wait for GPS, then start closed-loop execution when the physical mode switch is set to AUTO.
 
 OpenRB-150 is auto-detected when `--port` is omitted. Use `--port "$PORT"` only
 when auto-detection fails.
+
+The closed-loop GPS/IMU 5 m experiment and the AUTO-switch relative run
+(`east=3 m, north=4 m`) are documented step by step in
+[field_test_manual.md](field_test_manual.md) (sections 12 and 13).
 
 ## Quickstart
 

@@ -2,9 +2,15 @@
 
 Context:
 - Station controller: disassembled RadioLink transmitter integrated into the Jetson/station box
-- Receiver output: PPM into OpenRB D6
+- Expected receiver output: combined PPM/SUM into OpenRB D6
 - Verification sources: old integrated `openrb_robot_controller.ino`, safe PPM
   probes, and rover `USBDBG` logs
+
+The station transmitter panel labels are not enough to validate this map. The
+rover-side receiver output mode and the signal wire going to OpenRB `D6` must
+also be correct. If USBDBG reports `PPM_SYNC_ONLY_NO_CHANNELS`, then `D6` is
+not receiving a usable combined PPM/SUM frame even if the station controller is
+powered and linked.
 
 ## Station Integrated Controller Mapping
 
@@ -85,6 +91,15 @@ truth table: A is throttle, B is turn, `A=(L+R)/2`, and `B=(R-L)/2`.
 3. Toggle the Manual/Auto switch and confirm `CH5` changes between low/high values.
 4. Confirm `CH7` may move independently, but it does not affect rover mode.
 5. Turn the transmitter off or break the RC link and confirm the rover returns to stop/failsafe behavior.
+
+Before interpreting channel numbers, confirm the PPM frame itself is valid:
+
+- `ppm_frame_count` should increase.
+- `ppm_last_channel_count` should be at least `5`.
+- `raw_ch1_us`, `raw_ch2_us`, and `raw_ch5_us` should be in the roughly
+  `900..2100 us` range.
+- If `ppm_edge_count` and `ppm_sync_count` increase but `ppm_frame_count=0`,
+  the receiver is not delivering combined PPM/SUM to `D6`.
 
 ## Final note on station physical switch label
 

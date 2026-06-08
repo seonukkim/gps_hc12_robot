@@ -665,3 +665,189 @@ def test_run_controller_aborts_when_no_heartbeat() -> None:
     )
     assert abort_reason == "NO_GUARDED_PULSE_HEARTBEAT"
     assert rows == []
+
+
+# --- heading reference auto-capture (the field "correction is dead" fix) -------
+
+
+def _fake_send_live_drive_uses_command(handle, *, seq, duration_s, update_hz, ttl_ms, command_fn, raw_lines, event_timeout_s, verbose_raw=True):
+    a_cmd, b_cmd = command_fn(None)
+    handle.write(
+        (
+            f"USB_DRIVE_LIVE_SET seq={seq} a={a_cmd:.3f} b={b_cmd:.3f} "
+            f"duration_ms={int(duration_s * 1000.0)} ttl_ms={ttl_ms}\n"
+        ).encode("ascii")
+    )
+    return controller.telemetry.parse_usbdbg_rows(
+        "USB_DRIVE_LIVE event=ACTIVE\n"
+        "USB_DRIVE_LIVE event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+    )
+
+
+def test_run_controller_auto_captures_reference_yaw_so_heading_correction_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No --start-yaw-deg (the field default). The first lane heartbeat yaw becomes
+    # the heading-hold reference, so a later yaw drift produces a nonzero B and a
+    # final_b_cmd that changes over time -- the bug was a permanently zero error.
+    monkeypatch.setattr(controller.executor, "send_live_drive", _fake_send_live_drive_uses_command)
+    handle = FakeSerial(
+        [
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, imu_yaw_deg=0.0),  # chunk1 ref capture
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, imu_yaw_deg=0.0),  # chunk1 post
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, imu_yaw_deg=8.0),  # chunk2 drift
+            _heartbeat(35.0, 129.0, usb_ignore_rc=True, imu_yaw_deg=8.0),  # chunk2 post
+        ]
+    )
+    cal = dict(geometry.FALLBACK_RESOLVED_CALIBRATION)
+    cal["forward"] = {"a": 0.30, "b": 0.0, "ms": 2, "source": "approved_test"}
+    rows, _raw, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=cal,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,  # <-- field default; reference must be auto-captured
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        straight_motion_mode="continuous",
+        live_update_hz=1000.0,
+        live_chunk_ms=1,
+        live_max_ms=1,
+        max_segment_chunks=2,
+    )
+    assert abort_reason == "NONE"
+    assert len(rows) == 2
+    # First chunk holds the captured reference (≈0 error); second chunk drifted.
+    assert abs(float(rows[1]["b_heading_correction"])) > 0.0
+    assert float(rows[0]["final_b_cmd"]) != float(rows[1]["final_b_cmd"])
+    assert rows[0]["heading_error_deg"] != "NA"
+
+
+REQUIRED_TRACE_COLUMNS = [
+    "segment_index", "chunk_index", "segment_type", "path_control_mode",
+    "gps_valid", "gps_degraded", "gps_reanchored", "current_lat", "current_lon",
+    "current_x_m", "current_y_m", "target_x_m", "target_y_m",
+    "segment_start_x_m", "segment_start_y_m", "segment_end_x_m", "segment_end_y_m",
+    "target_heading_deg", "imu_yaw_deg", "heading_error_deg", "cross_track_error_m",
+    "along_track_progress_m", "remaining_distance_m", "base_a_cmd", "b_trim",
+    "b_heading_correction", "b_cross_track_correction", "final_a_cmd", "final_b_cmd",
+    "correction_source", "ack_seen", "active_seen", "stop_seen", "final_zero",
+]
+
+
+def test_execution_row_contains_all_required_trace_columns() -> None:
+    seg = _east_lane()
+    cache: dict[str, object] = {"lat": 35.0, "lon": 129.0, "degraded": False}
+    gps = controller.dead_reckon_gps(
+        {"gps_lat": "35.0", "gps_lon": "129.0", "gps_block_reason": "OK"}, cache
+    )
+    corr = controller.pulse_correction(
+        segment=seg, x=0.1, y=0.05, target_heading_deg=90.0, yaw=5.0, start_yaw_deg=0.0
+    )
+    after = controller.telemetry.parse_usbdbg_rows(
+        "USB_PULSE_TEST event=HEARTBEAT imu_relative_yaw_deg=5.0 gps_lat=35.0 gps_lon=129.0"
+    )[0]
+    pulse_rows = controller.telemetry.parse_usbdbg_rows(
+        "USB_PULSE_TEST event=ACK\n"
+        "USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+    )
+    row = controller.build_execution_row(
+        segment=seg,
+        primitive_index=1,
+        after_row=after,
+        pulse_rows=pulse_rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.001,
+        goal_lon=129.0,
+        start_yaw_deg=0.0,
+        target_heading_deg=90.0,
+        a_cmd=0.30,
+        correction=corr,
+        pulse_ms=800,
+        gps=gps,
+        calibration_source="test",
+        connector_mode="lane",
+        pose={"x": 0.1, "y": 0.05, "gps_valid": True, "gps_reanchored": False},
+    )
+    for column in REQUIRED_TRACE_COLUMNS:
+        assert column in row, column
+
+
+# --- mode-switch + summary correction flags -----------------------------------
+
+
+def _heartbeat_with_mode(mode_switch: str) -> bytes:
+    return (
+        "USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true usb_drive_live_mode=true "
+        "rc_ok=false neutral_ok=false physical_output_active=false gps_block_reason=OK "
+        f"gps_lat=35.0000000 gps_lon=129.0000000 imu_relative_yaw_deg=0.0 "
+        f"mode_switch={mode_switch} mode_us={'1700' if mode_switch == 'AUTO' else '1100'} "
+        f"auto_sw={'true' if mode_switch == 'AUTO' else 'false'} mode_channel_present=true\n"
+    ).encode("ascii")
+
+
+def test_mode_switch_state_reads_auto_manual_absent() -> None:
+    auto = controller.telemetry.parse_usbdbg_rows(_heartbeat_with_mode("AUTO").decode())[0]
+    manual = controller.telemetry.parse_usbdbg_rows(_heartbeat_with_mode("MANUAL").decode())[0]
+    assert controller.mode_switch_state(auto) == "AUTO"
+    assert controller.mode_switch_state(manual) == "MANUAL"
+    assert controller.mode_switch_state({"event": "HEARTBEAT"}) == "ABSENT"
+
+
+def test_run_controller_aborts_when_mode_switch_returns_to_manual() -> None:
+    handle = FakeSerial([_heartbeat_with_mode("MANUAL")])
+    rows, _raw, abort_reason = controller.run_controller(
+        handle,
+        segments=[_east_lane()],
+        resolved_calibration=geometry.FALLBACK_RESOLVED_CALIBRATION,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=0.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        event_timeout_s=0.1,
+        heartbeat_timeout_s=0.1,
+        straight_motion_mode="continuous",
+        require_auto_switch=True,
+    )
+    assert abort_reason == controller.MANUAL_SWITCH_ABORT_REASON == "USER_SWITCHED_TO_MANUAL"
+    assert rows == []
+
+
+def test_controller_summary_reports_correction_enabled_and_applied() -> None:
+    applied = controller.build_controller_summary(
+        [
+            {
+                "row_type": "pulse",
+                "valid_pulse": True,
+                "path_control_mode": "gps_imu_closed_loop",
+                "b_heading_component": "-0.05",
+                "b_cte_component": "0.0",
+                "drive_mode": "continuous",
+            }
+        ],
+        start_lat=35.0, start_lon=129.0, goal_lat=35.001, goal_lon=129.0,
+        goal_distance_m=5.0, fallback_to_repeated_pulses=False,
+    )
+    assert applied["closed_loop_correction_enabled"] is True
+    assert applied["closed_loop_correction_applied"] is True
+
+    open_loop = controller.build_controller_summary(
+        [
+            {
+                "row_type": "pulse",
+                "valid_pulse": True,
+                "path_control_mode": "open_loop_chunks",
+                "b_heading_component": "0.0",
+                "b_cte_component": "0.0",
+            }
+        ],
+        start_lat=35.0, start_lon=129.0, goal_lat=35.001, goal_lon=129.0,
+        goal_distance_m=5.0, fallback_to_repeated_pulses=False,
+    )
+    assert open_loop["closed_loop_correction_enabled"] is False
+    assert open_loop["closed_loop_correction_applied"] is False

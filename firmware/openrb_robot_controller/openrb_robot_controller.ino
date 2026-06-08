@@ -71,6 +71,22 @@
 #define MANUAL_CONTROL_PPM 0
 #endif
 
+#ifndef PPM_INTERRUPT_EDGE_FALLING
+#define PPM_INTERRUPT_EDGE_FALLING 0
+#endif
+
+#ifndef PPM_SYNC_THRESHOLD_US
+#define PPM_SYNC_THRESHOLD_US 3000
+#endif
+
+#ifndef PPM_CAPTURE_MIN_US_VALUE
+#define PPM_CAPTURE_MIN_US_VALUE 800
+#endif
+
+#ifndef PPM_CAPTURE_MAX_US_VALUE
+#define PPM_CAPTURE_MAX_US_VALUE 2200
+#endif
+
 #ifndef MOTOR_TRACE_ENABLE
 #define MOTOR_TRACE_ENABLE 1
 #endif
@@ -685,12 +701,13 @@ constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
-constexpr uint16_t PPM_SYNC_US = 3000;
-constexpr uint16_t PPM_CAPTURE_MIN_US = 800;
-constexpr uint16_t PPM_CAPTURE_MAX_US = 2200;
+constexpr uint16_t PPM_SYNC_US = PPM_SYNC_THRESHOLD_US;
+constexpr uint16_t PPM_CAPTURE_MIN_US = PPM_CAPTURE_MIN_US_VALUE;
+constexpr uint16_t PPM_CAPTURE_MAX_US = PPM_CAPTURE_MAX_US_VALUE;
 constexpr uint32_t RC_FRAME_TIMEOUT_MS = 500;
 constexpr uint8_t PPM_REQUIRED_CHANNEL_COUNT = MODE_CHANNEL_INDEX_VALUE + 1;
-constexpr const char *PPM_INTERRUPT_EDGE_NAME = "RISING";
+constexpr bool PPM_INTERRUPT_EDGE_FALLING_ENABLED = PPM_INTERRUPT_EDGE_FALLING != 0;
+constexpr const char *PPM_INTERRUPT_EDGE_NAME = PPM_INTERRUPT_EDGE_FALLING_ENABLED ? "FALLING" : "RISING";
 constexpr float RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678f;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_RANGE_US = 300;
@@ -738,11 +755,17 @@ volatile uint8_t ppmIndex = 0;
 volatile uint8_t ppmLastFrameChannelCount = 0;
 volatile uint32_t lastPpmEdgeMicros = 0;
 volatile uint32_t lastPpmFrameMs = 0;
+volatile uint32_t lastPpmSyncMs = 0;
+volatile uint32_t ppmIsrEdgeCount = 0;
+volatile uint32_t ppmSyncPulseCount = 0;
 volatile uint32_t ppmAcceptedFrameCount = 0;
 volatile uint32_t ppmIncompleteFrameCount = 0;
 volatile uint32_t ppmShortPulseRejectCount = 0;
 volatile uint32_t ppmLongPulseRejectCount = 0;
 volatile uint16_t ppmLastRejectedPulseUs = 0;
+volatile uint16_t ppmLastWidthUs = 0;
+volatile uint16_t ppmMinWidthUs = 65535;
+volatile uint16_t ppmMaxWidthUs = 0;
 
 RobotMode currentMode = DISARMED;
 String hc12Line;
@@ -871,14 +894,30 @@ void printImuDiagFields();
 
 void ppmISR() {
   uint32_t now = micros();
+  ppmIsrEdgeCount++;
+  if (lastPpmEdgeMicros == 0) {
+    lastPpmEdgeMicros = now;
+    return;
+  }
   uint32_t width = now - lastPpmEdgeMicros;
   lastPpmEdgeMicros = now;
+  uint16_t widthUs = width > 65535UL ? 65535 : static_cast<uint16_t>(width);
+  ppmLastWidthUs = widthUs;
+  if (widthUs < ppmMinWidthUs) {
+    ppmMinWidthUs = widthUs;
+  }
+  if (widthUs > ppmMaxWidthUs) {
+    ppmMaxWidthUs = widthUs;
+  }
 
   if (width > PPM_SYNC_US) {
+    uint32_t nowMs = millis();
+    ppmSyncPulseCount++;
     ppmLastFrameChannelCount = ppmIndex;
-    lastPpmFrameMs = millis();
+    lastPpmSyncMs = nowMs;
     if (ppmIndex >= PPM_REQUIRED_CHANNEL_COUNT) {
       ppmAcceptedFrameCount++;
+      lastPpmFrameMs = nowMs;
     } else if (ppmIndex > 0) {
       ppmIncompleteFrameCount++;
     }
@@ -1880,6 +1919,7 @@ bool stage16RcInputRequiredForStationPulse() {
 }
 
 void printImuDiagFields();
+void printModeSwitchFields();
 
 void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
   uint32_t now = millis();
@@ -2023,6 +2063,7 @@ void stage16PrintStatus(const char *event, bool rcValid, bool neutralOk) {
       Serial.print(F("NA"));
     }
     printImuDiagFields();
+    printModeSwitchFields();
     Serial.print(F(" physical_path_following_enable=false allow_motor_output=false path_package_used=false hc12_used=false"));
     Serial.print(F(" ready_for_full_path_following=false"));
     Serial.println();
@@ -2733,37 +2774,55 @@ void debugPrintStatus() {
   uint16_t throttleUs = 0;
   uint16_t modeUs = 0;
   uint32_t ppmFrameMs = 0;
+  uint32_t ppmSyncMs = 0;
   uint8_t ppmFrameChannelCount = 0;
+  uint32_t ppmEdgeCount = 0;
+  uint32_t ppmSyncCount = 0;
   uint32_t ppmFrameCount = 0;
   uint32_t ppmIncompleteCount = 0;
   uint32_t ppmShortRejectCount = 0;
   uint32_t ppmLongRejectCount = 0;
   uint16_t ppmRejectedUs = 0;
+  uint16_t ppmLastWidth = 0;
+  uint16_t ppmMinWidth = 0;
+  uint16_t ppmMaxWidth = 0;
   uint16_t rawChannelUs[CHANNEL_COUNT] = {0};
   noInterrupts();
   for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
     rawChannelUs[i] = ppmChannels[i];
   }
   ppmFrameMs = lastPpmFrameMs;
+  ppmSyncMs = lastPpmSyncMs;
   ppmFrameChannelCount = ppmLastFrameChannelCount;
+  ppmEdgeCount = ppmIsrEdgeCount;
+  ppmSyncCount = ppmSyncPulseCount;
   ppmFrameCount = ppmAcceptedFrameCount;
   ppmIncompleteCount = ppmIncompleteFrameCount;
   ppmShortRejectCount = ppmShortPulseRejectCount;
   ppmLongRejectCount = ppmLongPulseRejectCount;
   ppmRejectedUs = ppmLastRejectedPulseUs;
+  ppmLastWidth = ppmLastWidthUs;
+  ppmMinWidth = ppmMinWidthUs == 65535 ? 0 : ppmMinWidthUs;
+  ppmMaxWidth = ppmMaxWidthUs;
   interrupts();
   bool rcInputDetected = ppmFrameMs != 0 && (now - ppmFrameMs) < RC_FRAME_TIMEOUT_MS;
+  bool ppmSyncRecent = ppmSyncMs != 0 && (now - ppmSyncMs) < RC_FRAME_TIMEOUT_MS;
+  bool ppmSyncOnly = ppmSyncRecent && ppmFrameCount == 0 && ppmFrameChannelCount == 0;
   bool ppmInvalidPulseSeen = ppmShortRejectCount > 0 || ppmLongRejectCount > 0;
   const char *ppmDecodeReason = "OK";
   if (!rcInputDetected) {
-    if (ppmFrameMs == 0 && ppmShortRejectCount > 0) {
+    if (ppmSyncOnly) {
+      ppmDecodeReason = "PPM_SYNC_ONLY_NO_CHANNELS";
+    } else if (ppmFrameMs == 0 && ppmShortRejectCount > 0) {
       ppmDecodeReason = "PPM_SHORT_PULSE_NO_VALID_FRAME";
     } else if (ppmFrameMs == 0 && ppmLongRejectCount > 0) {
       ppmDecodeReason = "PPM_LONG_PULSE_NO_VALID_FRAME";
     } else if (ppmFrameMs == 0 && ppmIncompleteCount > 0) {
       ppmDecodeReason = "PPM_INCOMPLETE_FRAME_NO_VALID_FRAME";
+    } else if (ppmEdgeCount > 0) {
+      ppmDecodeReason = "PPM_EDGES_NO_VALID_FRAME";
     } else if (ppmFrameMs == 0) {
-      ppmDecodeReason = "NO_PPM_FRAME";
+      ppmDecodeReason = "NO_PPM_EDGE";
     } else {
       ppmDecodeReason = "PPM_FRAME_STALE";
     }
@@ -2790,7 +2849,10 @@ void debugPrintStatus() {
       manualSwitch = "MANUAL";
       modeDecodeReason = "MODE_CHANNEL_MANUAL";
     }
-  } else if (ppmInvalidPulseSeen || ppmIncompleteCount > 0) {
+  } else if (ppmSyncOnly) {
+    manualSwitch = "UNKNOWN_PPM_SYNC_ONLY";
+    modeDecodeReason = ppmDecodeReason;
+  } else if (ppmInvalidPulseSeen || ppmIncompleteCount > 0 || ppmEdgeCount > 0) {
     manualSwitch = "UNKNOWN_PPM_INVALID";
     modeDecodeReason = ppmDecodeReason;
   }
@@ -2827,6 +2889,22 @@ void debugPrintStatus() {
   Serial.print(PPM_CAPTURE_MAX_US);
   Serial.print(F(" ppm_decode_reason="));
   Serial.print(ppmDecodeReason);
+  Serial.print(F(" ppm_edge_count="));
+  Serial.print(ppmEdgeCount);
+  Serial.print(F(" ppm_sync_count="));
+  Serial.print(ppmSyncCount);
+  Serial.print(F(" ppm_sync_age_ms="));
+  if (ppmSyncMs == 0) {
+    Serial.print(F("NA"));
+  } else {
+    Serial.print(now - ppmSyncMs);
+  }
+  Serial.print(F(" ppm_last_width_us="));
+  Serial.print(ppmLastWidth);
+  Serial.print(F(" ppm_min_width_us="));
+  Serial.print(ppmMinWidth);
+  Serial.print(F(" ppm_max_width_us="));
+  Serial.print(ppmMaxWidth);
   Serial.print(F(" rc_input_detected="));
   Serial.print(rcInputDetected ? F("true") : F("false"));
   Serial.print(F(" mode="));
@@ -4048,6 +4126,45 @@ void printImuDiagFields() {
 #endif
 }
 
+// Expose the physical PPM mode switch (CH5) inside the Mac USB-supervised
+// heartbeat so the host can watch for an AUTO selection (auto-relative-run)
+// without enabling manual RC drive. The PPM ISR runs in every build, so this
+// only reads the latest decoded channel widths -- it does not gate any motor
+// output. ``mode_channel_present=false`` means no usable PPM frame, which lets
+// the host fall back to a keyboard start.
+void printModeSwitchFields() {
+  uint16_t modeUs = 0;
+  uint32_t ppmFrameMs = 0;
+  uint32_t ppmFrameCount = 0;
+  noInterrupts();
+  modeUs = ppmChannels[MODE_CHANNEL_INDEX_VALUE];
+  ppmFrameMs = lastPpmFrameMs;
+  ppmFrameCount = ppmAcceptedFrameCount;
+  interrupts();
+  uint32_t now = millis();
+  bool ppmFresh = ppmFrameMs != 0 && (now - ppmFrameMs) < RC_FRAME_TIMEOUT_MS;
+  bool modePresent = ppmFresh && modeUs != 0 && rcPulseValid(modeUs);
+  bool autoSwitchOn = rcAutoSwitchOn(modeUs);
+  const char *modeSwitch = "UNKNOWN";
+  if (modePresent) {
+    modeSwitch = autoSwitchOn ? "AUTO" : "MANUAL";
+  }
+  Serial.print(F(" mode_switch="));
+  Serial.print(modeSwitch);
+  Serial.print(F(" mode_us="));
+  Serial.print(modeUs);
+  Serial.print(F(" auto_sw="));
+  Serial.print(autoSwitchOn ? F("true") : F("false"));
+  Serial.print(F(" mode_channel_present="));
+  Serial.print(modePresent ? F("true") : F("false"));
+  Serial.print(F(" mode_channel_index="));
+  Serial.print(MODE_CHANNEL_INDEX_VALUE);
+  Serial.print(F(" mode_channel_label=CH"));
+  Serial.print(MODE_CHANNEL_INDEX_VALUE + 1);
+  Serial.print(F(" ppm_frame_count="));
+  Serial.print(ppmFrameCount);
+}
+
 // ============== Path-following dry-run + guarded execution (Tasks E/F/G) ==============
 // Compiled only when PATH_FOLLOWING_DRYRUN=1. Self-contained and motor-safe by
 // default: physical output is impossible unless PATH_FOLLOWING_PHYSICAL_COMPILE_GATE
@@ -5009,7 +5126,11 @@ void setup() {
 #endif
 
   pinMode(PPM_PIN, INPUT_PULLUP);
+#if PPM_INTERRUPT_EDGE_FALLING
+  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);
+#else
   attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
+#endif
 
   escLeft.attach(ESC_LEFT_PIN);
   escRight.attach(ESC_RIGHT_PIN);

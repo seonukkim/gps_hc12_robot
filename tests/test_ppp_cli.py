@@ -371,40 +371,70 @@ def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
 
 
 def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
-    flags = cli.manual_control_firmware_flags(mode_channel_index=4)
-    assert "MANUAL_CONTROL_PPM=1" not in flags
+    flags = cli.manual_control_firmware_flags(
+        profile=cli.MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
+        mode_channel_index=4,
+    )
+    assert "MANUAL_CONTROL_PPM=1" in flags
     assert "MANUAL_RC_RECOVERY=1" not in flags
     assert "MODE_CHANNEL_INDEX=4" in flags
     assert "MANUAL_FORWARD_SIGN=-1" in flags
     assert "MANUAL_TURN_SIGN=1" in flags
     assert "MOTOR_OUTPUT_SWAP_LR=0" in flags
     assert "DRIVE_CALIBRATION_ENABLE=0" in flags
-    assert "IMU_ENABLE=1" not in flags
-    assert "IMU_YAW_DIAG=1" not in flags
+    assert "PPM_INTERRUPT_EDGE_FALLING=0" in flags
+    assert "PPM_SYNC_THRESHOLD_US=3000" in flags
+    assert "PPM_CAPTURE_MIN_US_VALUE=800" in flags
+    assert "IMU_ENABLE=0" in flags
+    assert "IMU_YAW_DIAG" not in flags
+    assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
     assert cli.manual_control_build_path(cli.MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE) == (
         "/private/tmp/openrb-manual-forward-neg-turn-pos"
     )
     assert "STAGE" not in flags
 
 
-def test_manual_control_full_telemetry_profile_keeps_new_sensor_flags() -> None:
+def test_manual_control_default_profile_uses_rc_mix_decoder() -> None:
+    flags = cli.manual_control_firmware_flags(mode_channel_index=4)
+    assert cli.MANUAL_CONTROL_DEFAULT_PROFILE == "rc-mix-ppm"
+    assert "MANUAL_FORWARD_SIGN=-1" in flags
+    assert "MANUAL_TURN_SIGN=1" in flags
+    assert "MOTOR_OUTPUT_SWAP_LR=0" in flags
+    assert "DRIVE_CALIBRATION_ENABLE=0" in flags
+    assert "PPM_INTERRUPT_EDGE_FALLING=1" in flags
+    assert "PPM_SYNC_THRESHOLD_US=4000" in flags
+    assert "PPM_CAPTURE_MIN_US_VALUE=0" in flags
+    assert "MODE_CHANNEL_INDEX=4" in flags
+    assert "MANUAL_CONTROL_PPM=1" in flags
+    assert "IMU_ENABLE=0" in flags
+    assert "IMU_YAW_DIAG" not in flags
+    assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
+    assert cli.manual_control_build_path(cli.MANUAL_CONTROL_RC_MIX_PPM_PROFILE) == (
+        "/private/tmp/openrb-manual-rc-mix-ppm"
+    )
+
+
+def test_manual_control_full_telemetry_profile_disables_imu_like_known_good() -> None:
     flags = cli.manual_control_firmware_flags(
         profile=cli.MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
         mode_channel_index=4,
     )
     assert "MANUAL_CONTROL_PPM=1" in flags
     assert "MODE_CHANNEL_INDEX=4" in flags
-    assert "IMU_ENABLE=1" in flags
-    assert "IMU_YAW_DIAG=1" in flags
+    assert "IMU_ENABLE=0" in flags
+    assert "IMU_YAW_DIAG" not in flags
     assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
 
 
 def test_integrated_ppm_decoder_matches_old_moving_controller_edge() -> None:
     source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
-    assert "constexpr uint16_t PPM_SYNC_US = 3000;" in source
-    assert 'constexpr const char *PPM_INTERRUPT_EDGE_NAME = "RISING";' in source
+    assert "#define PPM_SYNC_THRESHOLD_US 3000" in source
+    assert "constexpr uint16_t PPM_SYNC_US = PPM_SYNC_THRESHOLD_US;" in source
+    assert 'constexpr const char *PPM_INTERRUPT_EDGE_NAME = PPM_INTERRUPT_EDGE_FALLING_ENABLED ? "FALLING" : "RISING";' in source
+    assert "attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);" in source
     assert "attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);" in source
     assert "if (ppmIndex == 0 && width < PPM_CAPTURE_MIN_US)" in source
+    assert 'ppmDecodeReason = "PPM_SYNC_ONLY_NO_CHANNELS";' in source
     assert "constexpr bool MOTOR_TRACE_ENABLED" in source
 
 
@@ -551,6 +581,43 @@ def test_manual_control_no_frame_captured_does_not_report_missing_mode_channel()
     assert "mode_decode_reason=PPM_INPUT_ABSENT" in line
 
 
+def test_manual_control_sync_only_no_channels_is_precise_reason() -> None:
+    rows = [
+        {
+            "manual_control": "false",
+            "manual_control_ppm": "true",
+            "ppm_interrupt_edge": "FALLING",
+            "ppm_decode_reason": "PPM_SYNC_ONLY_NO_CHANNELS",
+            "ppm_edge_count": "62",
+            "ppm_sync_count": "61",
+            "ppm_last_width_us": "19980",
+            "ppm_min_width_us": "19970",
+            "ppm_max_width_us": "20010",
+            "rc_input_detected": "false",
+            "rc_ok": "false",
+            "mode": "FAILSAFE",
+            "manual_switch": "UNKNOWN_PPM_SYNC_ONLY",
+            "mode_decode_reason": "PPM_SYNC_ONLY_NO_CHANNELS",
+            "ppm_frame_count": "0",
+            "ppm_last_channel_count": "0",
+            "steer_us": "0",
+            "throttle_us": "0",
+            "mode_us": "0",
+            "control_source": "STOP",
+        }
+    ]
+    line = cli.format_manual_control_status(elapsed_s=3, rows=rows)
+    summary = cli.evaluate_manual_control_rows(rows, expected_ppm_interrupt_edge="FALLING")
+    assert summary["manual_control_ok"] is False
+    assert summary["reason"] == "PPM_SYNC_ONLY_NO_CHANNELS"
+    assert summary["manual_switch"] == "UNKNOWN_PPM_SYNC_ONLY"
+    assert summary["ppm_sync_only_seen"] is True
+    assert summary["rc_input_detected"] is False
+    assert summary["ppm_last_width_us_latest"] == "19980"
+    assert "ppm_sync_count=61" in line
+    assert "mode_decode_reason=PPM_SYNC_ONLY_NO_CHANNELS" in line
+
+
 def test_manual_control_mode_missing_requires_captured_mode_channel_slot() -> None:
     rows = [
         {
@@ -593,7 +660,7 @@ def test_manual_control_ppm_edge_mismatch_classifies_separately() -> None:
             "control_source": "STOP",
         }
     ]
-    summary = cli.evaluate_manual_control_rows(rows)
+    summary = cli.evaluate_manual_control_rows(rows, expected_ppm_interrupt_edge="RISING")
     assert summary["reason"] == "PPM_EDGE_MISMATCH"
     assert summary["manual_switch"] == "UNKNOWN_PPM_EDGE_MISMATCH"
     assert summary["ppm_edge_mismatch_seen"] is True
@@ -737,14 +804,17 @@ def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.
     rc = cli.main(["manual-control", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "manual_control_profile=old-working-ppm" in out
-    assert "MANUAL_CONTROL_PPM=1" not in out
-    assert "IMU_ENABLE=1" not in out
-    assert "/private/tmp/openrb-manual-forward-neg-turn-pos" in out
+    assert "manual_control_profile=rc-mix-ppm" in out
+    assert "PPM_INTERRUPT_EDGE_FALLING=1" in out
+    assert "PPM_SYNC_THRESHOLD_US=4000" in out
+    assert "MANUAL_CONTROL_PPM=1" in out
+    assert "IMU_ENABLE=0" in out
+    assert "IMU_YAW_DIAG" not in out
+    assert "/private/tmp/openrb-manual-rc-mix-ppm" in out
     assert "OpenRB D6" in out
     data = _assert_standard_summary(tmp_path)
     assert data["mode"] == "manual-control"
-    assert data["profile"] == "old-working-ppm"
+    assert data["profile"] == "rc-mix-ppm"
     assert data["ppm_input_pin"] == "D6"
 
 
@@ -1028,7 +1098,7 @@ def test_manual_control_default_duration_is_continuous() -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["manual-control"])
     assert args.duration_s == 0.0
-    assert args.profile == "old-working-ppm"
+    assert args.profile == "rc-mix-ppm"
 
 
 def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:
@@ -1545,6 +1615,17 @@ def test_execute_plan_is_an_alias_of_run(tmp_path: Path) -> None:
     )
     assert rc == 0
     assert (tmp_path / "plan.json").exists()
+
+
+def test_execute_plan_chunking_defaults_are_safe() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["execute-plan"])
+    assert args.live_chunk_ms == 700
+    assert args.max_segment_chunks == 20
+    assert args.max_ms == 1000
+    assert args.gps_degradation_policy == "continue"
+    assert args.imu_heading_hold == "true"
+    assert args.cross_track_correction == "true"
 
 
 def test_execute_plan_can_load_existing_plan_dir_without_start_coords(tmp_path: Path) -> None:

@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.physical_path_planning import cli
 
 
@@ -40,6 +42,35 @@ def test_relative_enu_field_config_resolves_a_origin_and_b_offset(tmp_path: Path
     assert field["expected_lane_count"] > 1
     assert (tmp_path / "planned_segments.csv").exists()
     assert (tmp_path / "planned_primitives.csv").exists()
+
+
+def test_preview_5m_relative_enu_resolves_a_origin_and_5m_east_goal(tmp_path: Path) -> None:
+    # The documented 5m field experiment: A=(0,0), B=(5,0), width 1.5m.
+    rc = cli.main(
+        [
+            "preview",
+            "--start-lat", "35.5709000",
+            "--start-lon", "129.1871000",
+            "--goal-mode", "relative_enu",
+            "--goal-east-m", "5.0",
+            "--goal-north-m", "0.0",
+            "--workspace-width-m", "1.5",
+            "--step-spacing-m", "0.30",
+            "--path-shape", "diagonal_rectangle_serpentine",
+            "--no-png",
+            "--out-dir", str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    field = json.loads((tmp_path / "field_config_resolved.json").read_text())
+    assert field["start_x_m"] == 0.0
+    assert field["start_y_m"] == 0.0
+    assert field["resolved_goal_x_m"] == pytest.approx(5.0)
+    assert field["resolved_goal_y_m"] == pytest.approx(0.0)
+    assert field["workspace_width_m"] == 1.5
+    assert field["step_spacing_m"] == 0.30
+    assert field["lane_count"] > 1
+    assert field["segment_count"] > 1
 
 
 def test_preview_summary_includes_resolved_field_config(tmp_path: Path) -> None:

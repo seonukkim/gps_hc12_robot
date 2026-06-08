@@ -49,6 +49,10 @@ _ZERO_TOLERANCE = 1e-9
 DEFAULT_PATH_CONTROL_MODE = "gps_imu_closed_loop"
 PATH_CONTROL_MODES = {"open_loop_chunks", "imu_heading", "gps_imu_closed_loop"}
 
+# Abort reason raised when the operator flips the physical mode switch back to
+# MANUAL during an AUTO-triggered run (auto-relative-run).
+MANUAL_SWITCH_ABORT_REASON = "USER_SWITCHED_TO_MANUAL"
+
 
 # --- Pure decision helpers (no serial; directly unit-testable) ----------------
 
@@ -60,6 +64,28 @@ def _row_lat_lon(row: dict[str, str] | None) -> tuple[float | None, float | None
     lat = telemetry._optional_float(row.get("current_lat", row.get("gps_lat")))
     lon = telemetry._optional_float(row.get("current_lon", row.get("gps_lon")))
     return lat, lon
+
+
+def mode_switch_state(row: dict[str, str] | None) -> str:
+    """Physical PPM mode switch state from a heartbeat row: AUTO / MANUAL / ABSENT.
+
+    Prefers the firmware's ``mode_switch=AUTO|MANUAL`` string; falls back to the
+    ``auto_sw`` boolean gated by ``mode_channel_present``. Returns ``ABSENT`` when
+    no usable mode channel is reported (no PPM receiver), which lets the caller
+    offer the keyboard-start fallback instead of waiting forever for a switch.
+    """
+    if row is None:
+        return "ABSENT"
+    label = str(row.get("mode_switch", "")).strip().upper()
+    if label in {"AUTO", "MANUAL"}:
+        return label
+    present_value = row.get("mode_channel_present")
+    if present_value is not None and not telemetry._parse_bool(present_value, default=False):
+        return "ABSENT"
+    auto_value = row.get("auto_sw")
+    if auto_value is None:
+        return "ABSENT"
+    return "AUTO" if telemetry._parse_bool(auto_value, default=False) else "MANUAL"
 
 
 def dead_reckon_gps(row: dict[str, str] | None, cache: dict[str, object]) -> dict[str, object]:
@@ -103,6 +129,34 @@ def current_heading_deg(
     if yaw is None or start_yaw_deg is None:
         return target_heading_deg
     return geometry.wrap_deg(target_heading_deg + geometry.wrap_deg(yaw - start_yaw_deg))
+
+
+def reference_yaw_for_segment(
+    heartbeat_row: dict[str, str] | None,
+    *,
+    provided_start_yaw: float | None,
+    use_provided: bool,
+) -> float | None:
+    """Resolve the IMU yaw reference a lane holds its heading against.
+
+    Heading-hold measures drift away from the orientation the robot had when it
+    started the lane, so the reference must be re-captured per lane (after each
+    connector turn the absolute yaw has changed by ~90 degrees).
+
+    * ``use_provided`` (the first lane) with an explicit ``--start-yaw-deg`` keeps
+      that operator-supplied reference.
+    * Otherwise the lane's first heartbeat yaw becomes the reference -- this is
+      what makes IMU heading correction live when no ``--start-yaw-deg`` is given
+      (the field default), instead of silently producing a zero heading error.
+    * When no IMU yaw is available the provided value (possibly ``None``) is used,
+      which disables heading correction for that lane rather than guessing.
+    """
+    if use_provided and provided_start_yaw is not None:
+        return provided_start_yaw
+    yaw = telemetry.imu_relative_yaw_deg(heartbeat_row) if heartbeat_row else None
+    if yaw is not None:
+        return yaw
+    return provided_start_yaw
 
 
 def pulse_correction(
@@ -473,8 +527,12 @@ def build_execution_row(
     pose = pose or {}
     current_x = float(pose.get("x", 0.0))
     current_y = float(pose.get("y", 0.0))
-    target_x = float(segment.get("end_x_m", 0.0))
-    target_y = float(segment.get("end_y_m", 0.0))
+    segment_start_x = float(segment.get("start_x_m", 0.0))
+    segment_start_y = float(segment.get("start_y_m", 0.0))
+    segment_end_x = float(segment.get("end_x_m", 0.0))
+    segment_end_y = float(segment.get("end_y_m", 0.0))
+    target_x = segment_end_x
+    target_y = segment_end_y
     return {
         "row_type": "pulse",
         "segment_index": segment["segment_index"],
@@ -500,6 +558,10 @@ def build_execution_row(
         "current_y_m": telemetry._fmt(current_y),
         "target_x_m": telemetry._fmt(target_x),
         "target_y_m": telemetry._fmt(target_y),
+        "segment_start_x_m": telemetry._fmt(segment_start_x),
+        "segment_start_y_m": telemetry._fmt(segment_start_y),
+        "segment_end_x_m": telemetry._fmt(segment_end_x),
+        "segment_end_y_m": telemetry._fmt(segment_end_y),
         "current_heading_deg": telemetry._fmt(correction["current_heading_deg"]),
         "target_heading_deg": telemetry._fmt(target_heading_deg),
         "heading_error_deg": telemetry._fmt(correction["heading_error_deg"]),
@@ -596,7 +658,10 @@ def build_controller_summary(
         if r.get("path_control_mode") not in (None, "", "NA")
     ]
     path_control_mode = path_control_modes[-1] if path_control_modes else DEFAULT_PATH_CONTROL_MODE
-    correction_enabled = any(
+    # "enabled" is the configured intent (closed-loop modes); "applied" is the
+    # runtime evidence that a nonzero steering correction actually reached B.
+    correction_enabled = path_control_mode in {"imu_heading", "gps_imu_closed_loop"}
+    correction_applied = any(
         abs(float(r.get("b_heading_component") or 0.0)) > _ZERO_TOLERANCE
         or abs(float(r.get("b_cte_component") or 0.0)) > _ZERO_TOLERANCE
         for r in pulse_rows
@@ -610,10 +675,11 @@ def build_controller_summary(
         "controller_mode": "continuous_motion",
         "path_control_mode": path_control_mode,
         "closed_loop_correction_enabled": correction_enabled,
+        "closed_loop_correction_applied": correction_applied,
         "closed_loop_correction_disabled_reason": (
             "OPEN_LOOP_CHUNKS"
             if path_control_mode == "open_loop_chunks"
-            else ("NO_NONZERO_HEADING_OR_CROSS_TRACK_ERROR" if not correction_enabled else "NONE")
+            else ("NO_NONZERO_HEADING_OR_CROSS_TRACK_ERROR" if not correction_applied else "NONE")
         ),
         "start_lat": start_lat,
         "start_lon": start_lon,
@@ -657,6 +723,41 @@ def build_controller_summary(
 
 
 # --- The continuous-motion loop -----------------------------------------------
+
+
+def correction_token(row: dict[str, object]) -> str:
+    """One-word correction summary for the per-chunk console line.
+
+    ``dead_reckon`` when GPS is degraded (pose came from IMU + calibrated
+    progress, not GPS); otherwise ``both`` / ``cross_track`` / ``heading`` for
+    whichever steering components are nonzero, or ``none`` when B was untouched
+    (open-loop chunks, or a chunk with zero error).
+    """
+    if row.get("gps_degraded") is True:
+        return "dead_reckon"
+    heading = abs(telemetry._optional_float(row.get("b_heading_correction")) or 0.0) > _ZERO_TOLERANCE
+    cross_track = abs(telemetry._optional_float(row.get("b_cross_track_correction")) or 0.0) > _ZERO_TOLERANCE
+    if heading and cross_track:
+        return "both"
+    if cross_track:
+        return "cross_track"
+    if heading:
+        return "heading"
+    return "none"
+
+
+def chunk_status_line(row: dict[str, object], *, a_cmd: float, b_cmd: float) -> str:
+    """Render the required one-line per-chunk status string for a built row."""
+    imu_ok = row.get("imu_relative_yaw_deg") not in (None, "", "NA")
+    return (
+        f"seg={row['segment_index']} chunk={row['chunk_index']} "
+        f"mode={row['path_control_mode']} "
+        f"gps={'DEGRADED' if row.get('gps_degraded') else 'OK'} "
+        f"imu={'OK' if imu_ok else 'NA'} "
+        f"heading_err={row['heading_error_deg']} cte={row['cross_track_error_m']} "
+        f"progress={row['along_track_progress_m']} remaining={row['remaining_distance_m']} "
+        f"A={a_cmd:.3f} B={b_cmd:.3f} correction={correction_token(row)}"
+    )
 
 
 def _segment_pulse_budget(
@@ -707,12 +808,18 @@ def run_controller(
     k_cross_track: float = 0.20,
     max_correction_b: float = 0.08,
     gps_reanchor: bool = True,
+    require_auto_switch: bool = False,
 ) -> tuple[list[dict[str, object]], list[str], str]:
     """Run the supervised pulse loop over ``segments``; return (rows, raw_lines, abort_reason).
 
     Never raises on the expected field faults (serial disconnect, RC invalid,
     GPS abort policy, missing heartbeat): each sets ``abort_reason`` and stops the
     loop cleanly so the caller can still write a guarded summary.
+
+    ``require_auto_switch`` makes the loop abort with ``USER_SWITCHED_TO_MANUAL``
+    if a heartbeat reports the physical mode switch back in MANUAL -- used by the
+    AUTO-switch-triggered ``auto-relative-run`` so flipping the switch stops the
+    rover safely (the final STOP/zero handshake still runs).
     """
     rows: list[dict[str, object]] = []
     raw_lines: list[str] = []
@@ -725,6 +832,11 @@ def run_controller(
     if path_control_mode not in PATH_CONTROL_MODES:
         path_control_mode = DEFAULT_PATH_CONTROL_MODE
     pose_state: dict[str, object] = {"x": 0.0, "y": 0.0, "source": "plan_start", "gps_degraded": False}
+    # Heading-hold reference: honor an explicit --start-yaw-deg for the first lane,
+    # then re-capture per lane from each lane's first heartbeat yaw so heading
+    # correction stays live without the operator supplying a start yaw.
+    provided_start_yaw = start_yaw_deg
+    first_lane_pending = True
     if path_control_mode == "open_loop_chunks":
         imu_heading_hold = False
         cross_track_correction = False
@@ -732,6 +844,7 @@ def run_controller(
         cross_track_correction = False
 
     for segment in segments:
+        segment_ref_yaw: float | None = None
         budget, is_connector, direction = _segment_pulse_budget(
             segment,
             resolved_calibration,
@@ -787,6 +900,16 @@ def run_controller(
                     ):
                         abort_reason = "MANUAL_OVERRIDE"
                         break
+                    if require_auto_switch and mode_switch_state(heartbeat) == "MANUAL":
+                        abort_reason = MANUAL_SWITCH_ABORT_REASON
+                        break
+                    if segment_ref_yaw is None:
+                        segment_ref_yaw = reference_yaw_for_segment(
+                            heartbeat,
+                            provided_start_yaw=provided_start_yaw,
+                            use_provided=first_lane_pending,
+                        )
+                        first_lane_pending = False
                     gps = dead_reckon_gps(heartbeat, gps_cache)
                     gps_action = geometry.gps_policy_action(bool(gps["gps_degraded"]), gps_degradation_policy)
                     if gps_action == "abort":
@@ -828,7 +951,7 @@ def run_controller(
                             y=float(latest_pose["y"]),
                             target_heading_deg=target_heading,
                             yaw=yaw,
-                            start_yaw_deg=start_yaw_deg,
+                            start_yaw_deg=segment_ref_yaw,
                             is_connector=False,
                             base_b_cmd=base_b,
                             imu_heading_hold=imu_heading_hold,
@@ -876,7 +999,7 @@ def run_controller(
                         y=float(pose_after["y"]),
                         target_heading_deg=target_heading,
                         yaw=telemetry.imu_relative_yaw_deg(after),
-                        start_yaw_deg=start_yaw_deg,
+                        start_yaw_deg=segment_ref_yaw,
                         is_connector=False,
                         base_b_cmd=base_b,
                         imu_heading_hold=imu_heading_hold,
@@ -919,21 +1042,7 @@ def run_controller(
                     b_trim=base_b,
                 )
                 rows.append(row)
-                print(
-                    "seg={segment} chunk={chunk} gps={gps} imu={imu} "
-                    "heading_err={heading} cte={cte} progress={progress} "
-                    "A={a_cmd:.3f} B={b_cmd:.3f}".format(
-                        segment=row["segment_index"],
-                        chunk=row["chunk_index"],
-                        gps="DEGRADED" if row["gps_degraded"] else "OK",
-                        imu="OK" if row["imu_relative_yaw_deg"] != "NA" else "NA",
-                        heading=row["heading_error_deg"],
-                        cte=row["cross_track_error_m"],
-                        progress=row["along_track_progress_m"],
-                        a_cmd=a_cmd,
-                        b_cmd=float(latest_correction["b_cmd"]),
-                    )
-                )
+                print(chunk_status_line(row, a_cmd=a_cmd, b_cmd=float(latest_correction["b_cmd"])))
                 if row["valid_pulse"] is not True:
                     abort_reason = str(row["invalid_reason"])
                     break
@@ -969,6 +1078,9 @@ def run_controller(
                 ):
                     abort_reason = "MANUAL_OVERRIDE"
                     break
+                if require_auto_switch and mode_switch_state(heartbeat) == "MANUAL":
+                    abort_reason = MANUAL_SWITCH_ABORT_REASON
+                    break
                 if not usb_supervised_rc_ignored and safety.rc_neutral_wait(heartbeat):
                     neutral = wait_for_neutral_rc(handle, raw_lines, rc_neutral_wait_s)
                     if neutral is None:
@@ -989,6 +1101,19 @@ def run_controller(
                 lat = float(gps["lat"]) if gps["lat"] is not None else start_lat
                 lon = float(gps["lon"]) if gps["lon"] is not None else start_lon
                 x, y = geometry.goal_to_local(start_lat, start_lon, lat, lon)
+                # Connectors hold against the global start yaw (the turn rotates the
+                # body); lanes hold against the per-lane captured reference.
+                if is_connector:
+                    effective_ref_yaw = provided_start_yaw
+                else:
+                    if segment_ref_yaw is None:
+                        segment_ref_yaw = reference_yaw_for_segment(
+                            heartbeat,
+                            provided_start_yaw=provided_start_yaw,
+                            use_provided=first_lane_pending,
+                        )
+                        first_lane_pending = False
+                    effective_ref_yaw = segment_ref_yaw
                 yaw = telemetry.imu_relative_yaw_deg(heartbeat)
                 correction = pulse_correction(
                     segment=segment,
@@ -996,7 +1121,7 @@ def run_controller(
                     y=y,
                     target_heading_deg=target_heading,
                     yaw=yaw,
-                    start_yaw_deg=start_yaw_deg,
+                    start_yaw_deg=effective_ref_yaw,
                     is_connector=is_connector,
                     base_b_cmd=base_b,
                     connector_b_cmd=connector_b,
@@ -1055,6 +1180,7 @@ def run_controller(
                 b_trim=base_b,
             )
             rows.append(row)
+            print(chunk_status_line(row, a_cmd=a_cmd, b_cmd=float(correction["b_cmd"])))
             if row["valid_pulse"] is not True:
                 abort_reason = str(row["invalid_reason"])
                 break

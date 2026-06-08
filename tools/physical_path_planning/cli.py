@@ -46,13 +46,17 @@ DEFAULT_TURN_CALIBRATION_OUT = (
 DEFAULT_GPS_CACHE = Path("outputs/physical_path_planning/gps_cache/latest_start.json")
 MAC_PHYSICAL_SUPERVISED_PROFILE = "MAC_PHYSICAL_SUPERVISED"
 MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE = "old-working-ppm"
+MANUAL_CONTROL_RC_MIX_PPM_PROFILE = "rc-mix-ppm"
 MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE = "full-telemetry-ppm"
 MANUAL_CONTROL_PROFILES = (
+    MANUAL_CONTROL_RC_MIX_PPM_PROFILE,
     MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
     MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
 )
+MANUAL_CONTROL_DEFAULT_PROFILE = MANUAL_CONTROL_RC_MIX_PPM_PROFILE
 MANUAL_CONTROL_OLD_WORKING_LOG = "outputs/logs/manual_forward_neg_turn_pos_20260530_141846.log"
 MANUAL_CONTROL_OLD_WORKING_BUILD_PATH = "/private/tmp/openrb-manual-forward-neg-turn-pos"
+MANUAL_CONTROL_RC_MIX_BUILD_PATH = "/private/tmp/openrb-manual-rc-mix-ppm"
 MANUAL_CONTROL_FULL_TELEMETRY_BUILD_PATH = "/private/tmp/openrb-manual-control-ppm"
 RC_INPUT_ABSENT_ACTION = (
     "Check RC receiver power; check receiver signal wire to OpenRB RC input; "
@@ -229,15 +233,44 @@ def manual_rc_recovery_flags(*, mode_channel_index: int | None = None) -> str:
 
 def manual_control_firmware_flags(
     *,
-    profile: str = MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
+    profile: str = MANUAL_CONTROL_DEFAULT_PROFILE,
     mode_channel_index: int | None = 4,
 ) -> str:
-    if profile == MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE:
+    if profile == MANUAL_CONTROL_RC_MIX_PPM_PROFILE:
         flags = (
+            "-DMANUAL_CONTROL_PPM=1 "
             "-DMANUAL_FORWARD_SIGN=-1 "
             "-DMANUAL_TURN_SIGN=1 "
             "-DMOTOR_OUTPUT_SWAP_LR=0 "
-            "-DDRIVE_CALIBRATION_ENABLE=0"
+            "-DDRIVE_CALIBRATION_ENABLE=0 "
+            "-DPPM_INTERRUPT_EDGE_FALLING=1 "
+            "-DPPM_SYNC_THRESHOLD_US=4000 "
+            "-DPPM_CAPTURE_MIN_US_VALUE=0 "
+            "-DIMU_ENABLE=0 "
+            "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+            "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+            "-DPATH_FOLLOWING_DRYRUN=0 "
+            "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+            "-DGROUND_CRAWL_TEST_MODE=0 "
+            "-DAUTO_MOTION_ARMED=0"
+        )
+    elif profile == MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE:
+        flags = (
+            "-DMANUAL_CONTROL_PPM=1 "
+            "-DMANUAL_FORWARD_SIGN=-1 "
+            "-DMANUAL_TURN_SIGN=1 "
+            "-DMOTOR_OUTPUT_SWAP_LR=0 "
+            "-DDRIVE_CALIBRATION_ENABLE=0 "
+            "-DPPM_INTERRUPT_EDGE_FALLING=0 "
+            "-DPPM_SYNC_THRESHOLD_US=3000 "
+            "-DPPM_CAPTURE_MIN_US_VALUE=800 "
+            "-DIMU_ENABLE=0 "
+            "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+            "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+            "-DPATH_FOLLOWING_DRYRUN=0 "
+            "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+            "-DGROUND_CRAWL_TEST_MODE=0 "
+            "-DAUTO_MOTION_ARMED=0"
         )
     elif profile == MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE:
         flags = (
@@ -246,8 +279,7 @@ def manual_control_firmware_flags(
             "-DMANUAL_TURN_SIGN=1 "
             "-DMOTOR_OUTPUT_SWAP_LR=0 "
             "-DDRIVE_CALIBRATION_ENABLE=0 "
-            "-DIMU_ENABLE=1 "
-            "-DIMU_YAW_DIAG=1 "
+            "-DIMU_ENABLE=0 "
             "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
             "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
             "-DPATH_FOLLOWING_DRYRUN=0 "
@@ -263,11 +295,19 @@ def manual_control_firmware_flags(
 
 
 def manual_control_build_path(profile: str) -> str:
+    if profile == MANUAL_CONTROL_RC_MIX_PPM_PROFILE:
+        return MANUAL_CONTROL_RC_MIX_BUILD_PATH
     if profile == MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE:
         return MANUAL_CONTROL_OLD_WORKING_BUILD_PATH
     if profile == MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE:
         return MANUAL_CONTROL_FULL_TELEMETRY_BUILD_PATH
     raise ValueError(f"unknown manual-control profile: {profile}")
+
+
+def manual_control_expected_ppm_edge(profile: str) -> str:
+    if profile == MANUAL_CONTROL_RC_MIX_PPM_PROFILE:
+        return "FALLING"
+    return "RISING"
 
 
 def manual_control_mapping(
@@ -313,6 +353,8 @@ def _row_input_nonzero(row: dict[str, str]) -> bool:
 
 
 def _row_rc_input_detected(row: dict[str, str]) -> bool:
+    if _row_ppm_sync_only(row) or _row_no_ppm_frame_capture(row):
+        return False
     return telemetry._parse_bool(row.get("rc_input_detected"), default=False) or _row_input_nonzero(row)
 
 
@@ -323,9 +365,25 @@ def _row_optional_int(row: dict[str, str], key: str) -> int | None:
     return int(value)
 
 
-def _row_ppm_edge_mismatch(row: dict[str, str]) -> bool:
+def _row_ppm_edge_mismatch(row: dict[str, str], expected_ppm_interrupt_edge: str | None = None) -> bool:
+    if not expected_ppm_interrupt_edge:
+        return False
     edge = _row_value(row, ["ppm_interrupt_edge"], default="")
-    return bool(edge and edge.upper() != "RISING")
+    return bool(edge and edge.upper() != expected_ppm_interrupt_edge.upper())
+
+
+def _row_ppm_sync_only(row: dict[str, str]) -> bool:
+    decode_reason = _row_value(row, ["ppm_decode_reason", "mode_decode_reason"], default="")
+    if decode_reason == "PPM_SYNC_ONLY_NO_CHANNELS":
+        return True
+    sync_count = _row_optional_int(row, "ppm_sync_count")
+    frame_count = _row_optional_int(row, "ppm_frame_count")
+    last_channel_count = _row_optional_int(row, "ppm_last_channel_count")
+    return (
+        (sync_count is not None and sync_count > 0)
+        and (frame_count is None or frame_count <= 0)
+        and (last_channel_count is None or last_channel_count <= 0)
+    )
 
 
 def _row_no_ppm_frame_capture(row: dict[str, str]) -> bool:
@@ -355,8 +413,8 @@ def _row_mode_channel_capture_known(row: dict[str, str]) -> bool:
 def manual_control_mode_decode(row: dict[str, str]) -> tuple[str, str]:
     if not row:
         return "UNKNOWN_NO_USBDBG_TELEMETRY", "NO_USBDBG_TELEMETRY"
-    if _row_ppm_edge_mismatch(row):
-        return "UNKNOWN_PPM_EDGE_MISMATCH", "PPM_EDGE_MISMATCH"
+    if _row_ppm_sync_only(row):
+        return "UNKNOWN_PPM_SYNC_ONLY", "PPM_SYNC_ONLY_NO_CHANNELS"
     if _row_no_ppm_frame_capture(row):
         return "UNKNOWN_PPM_ABSENT", "PPM_INPUT_ABSENT"
     row_manual_switch = _row_value(row, ["manual_switch"], default="")
@@ -394,6 +452,12 @@ def _latest_manual_control_row(rows: Sequence[dict[str, str]]) -> dict[str, str]
         *[f"raw_ch{i}_us" for i in range(1, 9)],
         "ppm_interrupt_edge",
         "ppm_decode_reason",
+        "ppm_edge_count",
+        "ppm_sync_count",
+        "ppm_sync_age_ms",
+        "ppm_last_width_us",
+        "ppm_min_width_us",
+        "ppm_max_width_us",
         "ppm_frame_count",
         "ppm_last_channel_count",
         "ppm_short_rejects",
@@ -448,6 +512,12 @@ def format_manual_control_status(*, elapsed_s: int, rows: Sequence[dict[str, str
         "mode_decode_reason": mode_decode_reason,
         "ppm_interrupt_edge": last.get("ppm_interrupt_edge", "NA"),
         "ppm_decode_reason": last.get("ppm_decode_reason", "NA"),
+        "ppm_edge_count": last.get("ppm_edge_count", "NA"),
+        "ppm_sync_count": last.get("ppm_sync_count", "NA"),
+        "ppm_sync_age_ms": last.get("ppm_sync_age_ms", "NA"),
+        "ppm_last_width_us": last.get("ppm_last_width_us", "NA"),
+        "ppm_min_width_us": last.get("ppm_min_width_us", "NA"),
+        "ppm_max_width_us": last.get("ppm_max_width_us", "NA"),
         "ppm_frame_count": last.get("ppm_frame_count", "NA"),
         "ppm_last_channel_count": last.get("ppm_last_channel_count", "NA"),
         "ppm_short_rejects": last.get("ppm_short_rejects", "NA"),
@@ -475,7 +545,11 @@ def format_manual_control_status(*, elapsed_s: int, rows: Sequence[dict[str, str
     return " ".join(f"{key}={value}" for key, value in fields.items())
 
 
-def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, object]:
+def evaluate_manual_control_rows(
+    rows: Sequence[dict[str, str]],
+    *,
+    expected_ppm_interrupt_edge: str | None = None,
+) -> dict[str, object]:
     rows_with_input = [
         row for row in rows
         if any(
@@ -507,7 +581,8 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
     rc_bad_rows = sum(1 for row in rc_status_rows if telemetry._parse_bool(row.get("rc_ok")) is False)
     rc_ok_ratio = (rc_ok_rows / len(rc_status_rows)) if rc_status_rows else 0.0
     ppm_signal_stable = not rc_status_rows or len(rc_status_rows) < 3 or rc_ok_ratio >= 0.6
-    ppm_edge_mismatch_seen = any(_row_ppm_edge_mismatch(row) for row in rows)
+    ppm_edge_mismatch_seen = any(_row_ppm_edge_mismatch(row, expected_ppm_interrupt_edge) for row in rows)
+    ppm_sync_only_seen = any(_row_ppm_sync_only(row) for row in rows)
     no_ppm_frame_capture_seen = any(_row_no_ppm_frame_capture(row) for row in rows)
     pass_ready = (
         rc_ok_seen
@@ -533,12 +608,17 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         rows,
         ["imu_present", "imu_relative_yaw_deg", "imu_heading_block_reason"],
     ) != "NA"
+    if ppm_edge_mismatch_seen:
+        manual_switch = "UNKNOWN_PPM_EDGE_MISMATCH"
+        mode_decode_reason = "PPM_EDGE_MISMATCH"
     if pass_ready:
         reason = "MANUAL_CONTROL_PASS"
     elif not rows or not last:
         reason = "NO_USBDBG_TELEMETRY"
     elif ppm_edge_mismatch_seen:
         reason = "PPM_EDGE_MISMATCH"
+    elif ppm_sync_only_seen:
+        reason = "PPM_SYNC_ONLY_NO_CHANNELS"
     elif rc_ok_seen and not ppm_signal_stable:
         reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
     elif ppm_invalid_decode_seen and not rc_ok_seen:
@@ -555,12 +635,14 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         reason = "MOTOR_OUTPUT_BLOCKED"
     else:
         reason = "MANUAL_CONTROL_READY"
+    expected_edge_label = expected_ppm_interrupt_edge or "the selected profile"
     next_action = {
         "MANUAL_CONTROL_PASS": "PPM manual control is verified.",
         "MANUAL_CONTROL_READY": "PPM telemetry is present; set CH5 to MANUAL and move the sticks to verify output.",
         "PPM_INPUT_ABSENT": PPM_INPUT_ABSENT_ACTION,
+        "PPM_SYNC_ONLY_NO_CHANNELS": "D6 is seeing sync-like pulses but no CH1/CH2/CH5 PPM channel intervals. This usually means the receiver is not outputting combined PPM on D6, the signal wire is on a single PWM output, or the edge/sync decoder profile is wrong. Rebuild with --profile rc-mix-ppm; if this reason remains, check receiver output mode/wiring.",
         "PPM_CHANNELS_PRESENT_BUT_INVALID": "PPM is present but unstable or invalid; charge/check the station controller battery, receiver power, D6 signal wire, shared ground, channel order, and pulse widths.",
-        "PPM_EDGE_MISMATCH": "Firmware is not using the old moving PPM decoder edge. Rebuild manual-control with --profile old-working-ppm, which uses RISING edge capture.",
+        "PPM_EDGE_MISMATCH": f"Firmware PPM edge does not match the selected profile; expected {expected_edge_label}. Rebuild/upload manual-control with the intended --profile.",
         "MODE_CHANNEL_MISSING": "PPM steering/throttle are present but CH5 mode is missing; verify the receiver mode channel.",
         "MOTOR_OUTPUT_BLOCKED": "Manual A/B commands changed, but final motor output stayed zero; inspect manual control priority and motor gating.",
         "NO_USBDBG_TELEMETRY": "No USBDBG rows were parsed; check USB serial, firmware mode, baud rate, and --verbose-raw output.",
@@ -574,8 +656,14 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         "mode_decode_reason": mode_decode_reason,
         "ppm_decode_reason_latest": ppm_decode_reason_latest,
         "ppm_interrupt_edge_latest": _latest_non_na(rows, ["ppm_interrupt_edge"]),
-        "expected_ppm_interrupt_edge": "RISING",
+        "expected_ppm_interrupt_edge": expected_ppm_interrupt_edge or "profile-dependent",
         "ppm_edge_mismatch_seen": ppm_edge_mismatch_seen,
+        "ppm_sync_only_seen": ppm_sync_only_seen,
+        "ppm_edge_count_latest": _latest_non_na(rows, ["ppm_edge_count"]),
+        "ppm_sync_count_latest": _latest_non_na(rows, ["ppm_sync_count"]),
+        "ppm_last_width_us_latest": _latest_non_na(rows, ["ppm_last_width_us"]),
+        "ppm_min_width_us_latest": _latest_non_na(rows, ["ppm_min_width_us"]),
+        "ppm_max_width_us_latest": _latest_non_na(rows, ["ppm_max_width_us"]),
         "mode_us_latest": _latest_non_na(rows, ["mode_us", "raw_mode_channel_us"]),
         "rc_input_detected": rc_input_detected,
         "rc_ok_rows": rc_ok_rows,
@@ -1469,6 +1557,8 @@ def build_resolved_field_config(args: argparse.Namespace, plan: dict[str, object
         "path_shape": str(plan.get("path_shape", getattr(args, "path_shape", "unknown"))),
         "diagonal_orientation": getattr(args, "diagonal_orientation", "A_top_left_to_B_bottom_right"),
         "expected_goal_distance_m": float(plan["goal_distance_m"]),
+        "lane_count": int(plan.get("lane_count", 0)),
+        "segment_count": int(plan.get("segment_count", 0)),
         "expected_lane_count": int(plan.get("lane_count", 0)),
         "expected_segment_count": int(plan.get("segment_count", 0)),
         "relative_enu_note": (
@@ -2210,6 +2300,7 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
         "mode": "manual-control",
         "profile": args.profile,
         "firmware_profile": args.profile,
+        "expected_ppm_interrupt_edge": manual_control_expected_ppm_edge(args.profile),
         "old_working_log": MANUAL_CONTROL_OLD_WORKING_LOG,
         "rc_input_mode": "ppm",
         "ppm_input_pin": "D6",
@@ -2297,7 +2388,7 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
         import serial
 
         print("Manual control: PPM input on OpenRB D6.")
-        print(f"Profile: {args.profile}. Default old-working-ppm matches the May 30 moving manual run.")
+        print(f"Profile: {args.profile}. Default rc-mix-ppm matches the May 2 rc_mix_test decoder: FALLING edge, 4000us sync.")
         print("Expected mapping: CH1 steering -> physical B, CH2 throttle -> physical A, CH5 mode/manual-auto.")
         print("GPS/IMU status remains visible as telemetry only; it does not gate manual motor output.")
         print("Set mode to MANUAL / AUTO OFF and move the physical station/controller.")
@@ -2327,10 +2418,19 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
             raw_lines.append(f"SERIAL_ERROR error={str(exc).replace(' ', '_')}")
 
     rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
-    summary = {**config, **evaluate_manual_control_rows(rows)}
+    summary = {
+        **config,
+        **evaluate_manual_control_rows(
+            rows,
+            expected_ppm_interrupt_edge=manual_control_expected_ppm_edge(args.profile),
+        ),
+    }
     if summary.get("reason") == "PPM_INPUT_ABSENT":
         print("reason=PPM_INPUT_ABSENT")
         print("Expected wiring: signal -> OpenRB D6; CH1 steering; CH2 throttle; CH5 mode/manual-auto.")
+    if summary.get("reason") == "PPM_SYNC_ONLY_NO_CHANNELS":
+        print("reason=PPM_SYNC_ONLY_NO_CHANNELS")
+        print("D6 has sync-like pulses but no decoded PPM channels. Check receiver output mode is combined PPM, not single PWM.")
     _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
     _write_rows_csv(out_dir / "manual_control.csv", rows)
     _write_json(out_dir / "manual_control_summary.json", summary)
@@ -3826,6 +3926,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "imu_relative_yaw_deg": plan.get("imu_relative_yaw_deg", "NA"),
             "motion_calibration_loaded": motion_calibration_loaded(cal),
             "field_config": field_config_for_run,
+            "field_config_loaded": bool(field_config_for_run),
             "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
             "continuous_drive_used": args.straight_motion_mode == "continuous",
             "path_control_mode": args.path_control_mode,
@@ -3930,10 +4031,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         "imu_relative_yaw_deg": plan.get("imu_relative_yaw_deg", "NA"),
         "motion_calibration_loaded": motion_calibration_loaded(cal),
         "field_config": field_config_for_run,
+        "field_config_loaded": bool(field_config_for_run),
         "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "continuous_drive_used": summary.get("continuous_drive_used", args.straight_motion_mode == "continuous"),
         "path_control_mode": summary.get("path_control_mode", args.path_control_mode),
         "closed_loop_correction_enabled": summary.get("closed_loop_correction_enabled", False),
+        "closed_loop_correction_applied": summary.get("closed_loop_correction_applied", False),
         "live_chunk_ms": args.live_chunk_ms,
         "max_segment_chunks": args.max_segment_chunks,
         "max_ms": summary.get("max_ms", args.max_ms),
@@ -3960,6 +4063,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     _write_json(out_dir / "run_summary.json", summary)
     write_summary_files(out_dir, summary, title="Physical Path Planner Run")
     _write_rows_csv(out_dir / "run_rows.csv", rows)
+    _write_raw_log(out_dir / "run_serial.log", raw_lines)
+    _write_closed_loop_artifacts(out_dir, rows, raw_lines)
+    print(
+        f"run: abort_reason={abort_reason}, pulses={summary['pulse_count']}, "
+        f"valid={summary['valid_pulse_count']} -> {out_dir}"
+    )
+    return 1 if summary["aborted"] else 0
+
+
+# --- AUTO-switch-triggered relative path planning -----------------------------
+
+
+def _write_closed_loop_artifacts(
+    out_dir: Path, rows: Sequence[dict[str, object]], raw_lines: Sequence[str]
+) -> None:
+    """Write the closed-loop trace, planned-vs-actual, and raw USBDBG log."""
     _write_rows_csv(out_dir / "closed_loop_trace.csv", rows)
     planned_vs_actual = [
         {
@@ -3983,13 +4102,506 @@ def cmd_run(args: argparse.Namespace) -> int:
         for row in rows
     ]
     _write_rows_csv(out_dir / "planned_vs_actual.csv", planned_vs_actual)
-    _write_raw_log(out_dir / "run_serial.log", raw_lines)
     _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
-    print(
-        f"run: abort_reason={abort_reason}, pulses={summary['pulse_count']}, "
-        f"valid={summary['valid_pulse_count']} -> {out_dir}"
+
+
+def _write_preview_outputs(
+    out_dir: Path,
+    plan: dict[str, object],
+    *,
+    start_mode: str,
+    start_source: str,
+    write_png: bool,
+) -> dict[str, object]:
+    """Write field_config_resolved.json, plan.json, planned CSVs, and the preview PNG."""
+    field_config = dict(plan.get("field_config", {}))
+    field_config.update({"start_mode": start_mode, "start_source": start_source})
+    _write_json(out_dir / "field_config_resolved.json", field_config)
+    _write_json(out_dir / "plan.json", plan)
+    _write_rows_csv(out_dir / "planned_segments.csv", plan.get("segments", []))  # type: ignore[arg-type]
+    _write_rows_csv(out_dir / "planned_primitives.csv", plan.get("primitives", []))  # type: ignore[arg-type]
+    _write_rows_csv(out_dir / "planned_path_local.csv", plan.get("path_points", []))  # type: ignore[arg-type]
+    if write_png:
+        png = preview.write_preview_png(
+            out_dir / "preview.png",
+            plan["segments"],  # type: ignore[arg-type]
+            float(plan["start_lat"]),
+            float(plan["start_lon"]),
+            float(plan["goal_lat"]),
+            float(plan["goal_lon"]),
+            plan.get("workspace"),  # type: ignore[arg-type]
+        )
+        if png is None:
+            print("auto-relative: matplotlib unavailable; skipped PNG render")
+    return field_config
+
+
+def _auto_relative_status_line(
+    rows: Sequence[dict[str, str]], *, waiting_for: str, min_sats: float, max_hdop: float
+) -> str:
+    """One-line operator status while waiting for GPS / the AUTO mode switch."""
+    snapshot = gps_snapshot(rows, min_sats=min_sats, max_hdop=max_hdop)
+    last = rows[-1] if rows else {}
+    fmt = telemetry._fmt
+    return (
+        f"mode_switch={controller.mode_switch_state(last)} "
+        f"mode_us={last.get('mode_us', 'NA')} "
+        f"rc_ok={str(telemetry._parse_bool(last.get('rc_ok'))).lower()} "
+        f"gps_ready={str(snapshot['gps_ready']).lower()} "
+        f"gps_sats={fmt(snapshot['gps_sats'], 0) if snapshot['gps_sats'] is not None else 'NA'} "
+        f"gps_hdop={fmt(snapshot['gps_hdop'], 2) if snapshot['gps_hdop'] is not None else 'NA'} "
+        f"current_lat={fmt(snapshot['current_lat'], 7) if snapshot['current_lat'] is not None else 'NA'} "
+        f"current_lon={fmt(snapshot['current_lon'], 7) if snapshot['current_lon'] is not None else 'NA'} "
+        f"imu_present={str(snapshot['imu_present']).lower()} "
+        f"imu_relative_yaw_deg={snapshot['imu_relative_yaw_deg']} "
+        f"waiting_for={waiting_for}"
     )
-    return 1 if summary["aborted"] else 0
+
+
+def _auto_relative_wait_for_gps(
+    handle: object,
+    *,
+    min_sats: float,
+    max_hdop: float,
+    timeout_s: float,
+    cached_start_max_age_ms: int,
+    raw_lines: list[str],
+    rows: list[dict[str, str]],
+) -> dict[str, object] | None:
+    """Stream telemetry until a usable GPS start fix; print status ~every 1s."""
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    next_status = time.monotonic()
+    started = time.monotonic()
+    while time.monotonic() < deadline:
+        raw = handle.readline()  # type: ignore[attr-defined]
+        if raw:
+            line = raw.decode("utf-8", errors="replace").strip()
+            raw_lines.append(line)
+            rows.extend(telemetry.parse_usbdbg_rows(line))
+        resolved = resolve_start_gps_from_rows(
+            rows,
+            start_mode="live_gps",
+            cached_start_max_age_ms=cached_start_max_age_ms,
+            min_sats=min_sats,
+            max_hdop=max_hdop,
+        )
+        if resolved is not None:
+            resolved["gps_wait_elapsed_s"] = time.monotonic() - started
+            return resolved
+        if time.monotonic() >= next_status:
+            print(_auto_relative_status_line(rows, waiting_for="GPS", min_sats=min_sats, max_hdop=max_hdop))
+            next_status = time.monotonic() + 1.0
+    return None
+
+
+def _auto_relative_wait_for_auto(
+    handle: object,
+    *,
+    timeout_s: float,
+    allow_keyboard: bool,
+    input_fn: "callable",
+    raw_lines: list[str],
+    rows: list[dict[str, str]],
+    min_sats: float,
+    max_hdop: float,
+) -> tuple[bool, str]:
+    """Wait for the physical mode switch to read AUTO (or a keyboard start fallback).
+
+    Returns ``(started, reason)``. ``reason`` is ``AUTO_SWITCH`` /
+    ``KEYBOARD_START`` on success, or ``AUTO_SWITCH_NOT_DETECTED`` /
+    ``KEYBOARD_START_ABORTED`` when execution must not begin.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    next_status = time.monotonic()
+    keyboard_offered = False
+    while time.monotonic() < deadline:
+        raw = handle.readline()  # type: ignore[attr-defined]
+        if raw:
+            line = raw.decode("utf-8", errors="replace").strip()
+            raw_lines.append(line)
+            rows.extend(telemetry.parse_usbdbg_rows(line))
+        last = rows[-1] if rows else {}
+        state = controller.mode_switch_state(last)
+        if state == "AUTO":
+            return True, "AUTO_SWITCH"
+        if state == "ABSENT" and allow_keyboard and not keyboard_offered:
+            keyboard_offered = True
+            print("auto-relative-run: PPM mode channel absent; press Enter to start (Ctrl-C aborts).")
+            try:
+                input_fn()
+            except (EOFError, KeyboardInterrupt):
+                return False, "KEYBOARD_START_ABORTED"
+            return True, "KEYBOARD_START"
+        if time.monotonic() >= next_status:
+            print(_auto_relative_status_line(rows, waiting_for="AUTO_SWITCH", min_sats=min_sats, max_hdop=max_hdop))
+            next_status = time.monotonic() + 1.0
+    return False, "AUTO_SWITCH_NOT_DETECTED"
+
+
+def _auto_relative_summary(
+    args: argparse.Namespace,
+    cal: dict[str, object],
+    plan: dict[str, object] | None,
+    field_config: dict[str, object] | None,
+    *,
+    controller_summary: dict[str, object] | None,
+    start_lat: float | None,
+    start_lon: float | None,
+    start_source: str,
+    auto_switch_detected: bool,
+    execution_started: bool,
+    stop_reason: str,
+    reason: str,
+) -> dict[str, object]:
+    """Assemble the auto-relative-run summary (closed-loop counts + AUTO outcome)."""
+    summary: dict[str, object] = {
+        "mode": "auto-relative-run",
+        "success": stop_reason in {"COMPLETED", "USER_SWITCHED_TO_MANUAL"},
+        "reason": reason,
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+        "goal_mode": "relative_enu",
+        "goal_east_m": args.goal_east_m,
+        "goal_north_m": args.goal_north_m,
+        "expected_goal_distance_m": float(plan["goal_distance_m"]) if plan else "NA",
+        "workspace_width_m": args.workspace_width_m,
+        "step_spacing_m": args.step_spacing_m,
+        "path_shape": args.path_shape,
+        "start_source": start_source,
+        "start_lat": start_lat,
+        "start_lon": start_lon,
+        "auto_switch_detected": auto_switch_detected,
+        "execution_started": execution_started,
+        "path_control_mode": args.path_control_mode,
+        "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "continuous_drive_used": args.straight_motion_mode == "continuous",
+        "connector_mode_effective": cal.get("connector_mode_effective"),
+        "field_config": field_config,
+        "field_config_loaded": bool(field_config),
+        "allow_keyboard_start": telemetry._parse_bool(getattr(args, "allow_keyboard_start", "false"), default=False),
+        "rc_ignored_for_usb_supervised": True,
+        "stop_reason": stop_reason,
+        "ready_for_full_path_following": False,
+    }
+    if controller_summary is not None:
+        summary.update(
+            {
+                "closed_loop_correction_enabled": controller_summary.get("closed_loop_correction_enabled", False),
+                "closed_loop_correction_applied": controller_summary.get("closed_loop_correction_applied", False),
+                "imu_heading_used_count": controller_summary.get("imu_heading_used_count", 0),
+                "cross_track_correction_used_count": controller_summary.get("cross_track_correction_used_count", 0),
+                "gps_chunk_count": controller_summary.get("gps_chunk_count", 0),
+                "gps_degraded_count": controller_summary.get("gps_degraded_count", 0),
+                "gps_reanchor_count": controller_summary.get("gps_reanchor_count", 0),
+                "completed_segment_count": controller_summary.get("completed_segment_count", 0),
+                "completed_chunk_count": controller_summary.get("completed_chunk_count", 0),
+                "average_abs_heading_error_deg": controller_summary.get("average_abs_heading_error_deg", "NA"),
+                "max_abs_heading_error_deg": controller_summary.get("max_abs_heading_error_deg", "NA"),
+                "average_abs_cross_track_error_m": controller_summary.get("average_abs_cross_track_error_m", "NA"),
+                "max_abs_cross_track_error_m": controller_summary.get("max_abs_cross_track_error_m", "NA"),
+                "final_distance_to_goal_m": controller_summary.get("final_distance_to_goal_m", "NA"),
+                "abort_reason": controller_summary.get("abort_reason", stop_reason),
+            }
+        )
+    else:
+        summary.update(
+            {
+                "closed_loop_correction_enabled": args.path_control_mode in {"imu_heading", "gps_imu_closed_loop"},
+                "closed_loop_correction_applied": False,
+                "imu_heading_used_count": 0,
+                "cross_track_correction_used_count": 0,
+                "gps_chunk_count": 0,
+                "gps_degraded_count": 0,
+                "gps_reanchor_count": 0,
+                "completed_segment_count": 0,
+                "completed_chunk_count": 0,
+                "average_abs_heading_error_deg": "NA",
+                "max_abs_heading_error_deg": "NA",
+                "average_abs_cross_track_error_m": "NA",
+                "max_abs_cross_track_error_m": "NA",
+                "final_distance_to_goal_m": "NA",
+                "abort_reason": stop_reason,
+            }
+        )
+    return summary
+
+
+def cmd_auto_relative_preview(args: argparse.Namespace) -> int:
+    """Wait for GPS, resolve the relative A->B field, write field config + preview. No motion."""
+    cal = resolve_calibration(args)
+    start, raw_start_lines = resolve_start_for_preview(args)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if raw_start_lines:
+        _write_raw_log(out_dir / "preview_start_usbdbg.log", raw_start_lines)
+    if start is None:
+        raw_rows = telemetry.parse_usbdbg_rows("\n".join(raw_start_lines))
+        snapshot = gps_snapshot(
+            raw_rows,
+            min_sats=float(getattr(args, "gps_min_sats", 5.0)),
+            max_hdop=float(getattr(args, "gps_max_hdop", 2.5)),
+        )
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "auto-relative-preview",
+                "success": False,
+                "reason": "NO_USABLE_START_GPS",
+                "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+                "next_recommended_action": NO_USABLE_START_GPS_ACTION,
+                "start_source": "none",
+                **{k: v for k, v in snapshot.items() if k != "ready_row"},
+                "motion_calibration_loaded": motion_calibration_loaded(cal),
+                "ready_for_full_path_following": False,
+            },
+            title="Physical Path Planner Auto-Relative Preview",
+        )
+        print(f"auto-relative-preview: reason=NO_USABLE_START_GPS. {NO_USABLE_START_GPS_ACTION}")
+        return 2
+    args.start_lat = float(start["start_lat"])
+    args.start_lon = float(start["start_lon"])
+    try:
+        plan = resolve_plan(args, cal)
+    except ValueError as exc:
+        return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
+    field_config = _write_preview_outputs(
+        out_dir,
+        plan,
+        start_mode=getattr(args, "start_mode", "live_gps"),
+        start_source=str(start["start_source"]),
+        write_png=getattr(args, "png", True),
+    )
+    summary = {
+        **plan,
+        "mode": "auto-relative-preview",
+        "success": True,
+        "reason": "OK",
+        "firmware_profile": MAC_PHYSICAL_SUPERVISED_PROFILE,
+        "start_source": start["start_source"],
+        "current_lat": start["start_lat"],
+        "current_lon": start["start_lon"],
+        "goal_mode": "relative_enu",
+        "goal_east_m": args.goal_east_m,
+        "goal_north_m": args.goal_north_m,
+        "expected_goal_distance_m": float(plan["goal_distance_m"]),
+        "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
+        "field_config": field_config,
+        "field_config_loaded": True,
+        "next_recommended_action": f"Inspect {out_dir / 'summary.md'} then run auto-relative-run with --plan-dir {out_dir}.",
+        "ready_for_full_path_following": False,
+    }
+    _write_json(out_dir / "preview_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Preview")
+    if telemetry._parse_bool(getattr(args, "print_field_config", "false"), default=False):
+        print(format_field_config(field_config))
+    print(
+        f"auto-relative-preview: {plan['segment_count']} segments, "
+        f"goal_distance_m={float(plan['goal_distance_m']):.3f} -> {out_dir}"
+    )
+    return 0
+
+
+def _auto_relative_run_on_handle(
+    handle: object,
+    args: argparse.Namespace,
+    cal: dict[str, object],
+    out_dir: Path,
+    *,
+    plan: dict[str, object] | None,
+    field_config: dict[str, object] | None,
+    plan_dir_used: bool,
+    input_fn: "callable",
+) -> int:
+    """Serial-facing core of auto-relative-run (testable with a fake handle)."""
+    raw_lines: list[str] = []
+    rows: list[dict[str, str]] = []
+    min_sats = float(getattr(args, "gps_min_sats", 5.0))
+    max_hdop = float(getattr(args, "gps_max_hdop", 2.5))
+    start_source = "plan_dir" if plan_dir_used else "live_gps"
+    start_lat: float | None = None
+    start_lon: float | None = None
+
+    if plan_dir_used and plan is not None:
+        start_lat = float(plan["start_lat"])
+        start_lon = float(plan["start_lon"])
+        if field_config:
+            field_config = dict(field_config)
+            field_config["start_source"] = "plan_dir"
+            _write_json(out_dir / "field_config_resolved.json", field_config)
+    else:
+        # 2. Wait for GPS readiness; save the current fix as start A.
+        start = _auto_relative_wait_for_gps(
+            handle,
+            min_sats=min_sats,
+            max_hdop=max_hdop,
+            timeout_s=float(getattr(args, "gps_timeout_s", 300.0)),
+            cached_start_max_age_ms=int(getattr(args, "cached_start_max_age_ms", 10000)),
+            raw_lines=raw_lines,
+            rows=rows,
+        )
+        if start is None:
+            summary = _auto_relative_summary(
+                args, cal, None, None,
+                controller_summary=None, start_lat=None, start_lon=None,
+                start_source="none", auto_switch_detected=False,
+                execution_started=False, stop_reason="NO_USABLE_START_GPS",
+                reason="NO_USABLE_START_GPS",
+            )
+            _write_json(out_dir / "run_summary.json", summary)
+            write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
+            _write_closed_loop_artifacts(out_dir, [], raw_lines)
+            print(f"auto-relative-run: reason=NO_USABLE_START_GPS. {NO_USABLE_START_GPS_ACTION}")
+            return 2
+        start_lat = float(start["start_lat"])
+        start_lon = float(start["start_lon"])
+        snapshot = dict(start.get("gps_wait_snapshot", {}))
+        if snapshot:
+            write_gps_cache(snapshot)
+        args.start_lat = start_lat
+        args.start_lon = start_lon
+        try:
+            plan = resolve_plan(args, cal)
+        except ValueError as exc:
+            return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
+        field_config = _write_preview_outputs(
+            out_dir,
+            plan,
+            start_mode="live_gps",
+            start_source="live_gps",
+            write_png=getattr(args, "png", True),
+        )
+
+    # 3. Monitor the physical mode switch; start only when AUTO (or keyboard fallback).
+    started, start_reason = _auto_relative_wait_for_auto(
+        handle,
+        timeout_s=float(getattr(args, "auto_switch_timeout_s", 300.0)),
+        allow_keyboard=telemetry._parse_bool(getattr(args, "allow_keyboard_start", "false"), default=False),
+        input_fn=input_fn,
+        raw_lines=raw_lines,
+        rows=rows,
+        min_sats=min_sats,
+        max_hdop=max_hdop,
+    )
+    if not started:
+        summary = _auto_relative_summary(
+            args, cal, plan, field_config,
+            controller_summary=None, start_lat=start_lat, start_lon=start_lon,
+            start_source=start_source, auto_switch_detected=False,
+            execution_started=False, stop_reason=start_reason, reason=start_reason,
+        )
+        _write_json(out_dir / "run_summary.json", summary)
+        write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
+        _write_closed_loop_artifacts(out_dir, [], raw_lines)
+        print(f"auto-relative-run: execution_started=false stop_reason={start_reason} -> {out_dir}")
+        return 2
+
+    # 5/6. Execute closed-loop; require_auto_switch stops safely on a MANUAL flip.
+    assert plan is not None
+    rows_exec, raw_exec, abort_reason = controller.run_controller(
+        handle,
+        segments=plan["segments"],  # type: ignore[arg-type]
+        resolved_calibration=cal,
+        start_lat=float(start_lat),
+        start_lon=float(start_lon),
+        start_yaw_deg=args.start_yaw_deg,
+        goal_lat=float(plan["goal_lat"]),
+        goal_lon=float(plan["goal_lon"]),
+        event_timeout_s=args.event_timeout_s,
+        heartbeat_timeout_s=args.heartbeat_timeout_s,
+        rc_neutral_wait_s=args.rc_neutral_wait_s,
+        gps_degradation_policy=args.gps_degradation_policy,
+        manual_override_mode=args.manual_override_mode,
+        left_fixed_pulses=args.left_fixed_pulses,
+        right_fixed_pulses=args.right_fixed_pulses,
+        straight_motion_mode=args.straight_motion_mode,
+        live_update_hz=args.live_update_hz,
+        live_ttl_ms=args.live_ttl_ms,
+        live_chunk_ms=args.live_chunk_ms,
+        max_segment_chunks=args.max_segment_chunks,
+        live_max_ms=args.max_ms,
+        imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
+        cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
+        path_control_mode=args.path_control_mode,
+        k_heading=args.k_heading,
+        k_cross_track=args.k_cross_track,
+        max_correction_b=args.max_correction_b,
+        gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
+        require_auto_switch=True,
+    )
+    raw_lines.extend(raw_exec)
+    controller_summary = controller.build_controller_summary(
+        rows_exec,
+        start_lat=float(start_lat),
+        start_lon=float(start_lon),
+        goal_lat=float(plan["goal_lat"]),
+        goal_lon=float(plan["goal_lon"]),
+        goal_distance_m=float(plan["goal_distance_m"]),
+        fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
+        abort_reason=abort_reason,
+    )
+    stop_reason = "COMPLETED" if abort_reason == "NONE" else str(abort_reason)
+    summary = _auto_relative_summary(
+        args, cal, plan, field_config,
+        controller_summary=controller_summary, start_lat=start_lat, start_lon=start_lon,
+        start_source=start_source, auto_switch_detected=(start_reason == "AUTO_SWITCH"),
+        execution_started=True,
+        stop_reason=stop_reason,
+        reason="OK" if stop_reason in {"COMPLETED", "USER_SWITCHED_TO_MANUAL"} else stop_reason,
+    )
+    summary["auto_start_reason"] = start_reason
+    _write_json(out_dir / "run_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
+    _write_closed_loop_artifacts(out_dir, rows_exec, raw_lines)
+    print(
+        f"auto-relative-run: started={start_reason} stop_reason={stop_reason} "
+        f"chunks={controller_summary.get('chunk_count', 0)} -> {out_dir}"
+    )
+    return 0 if stop_reason in {"COMPLETED", "USER_SWITCHED_TO_MANUAL"} else 1
+
+
+def cmd_auto_relative_run(args: argparse.Namespace) -> int:
+    """Watch the physical mode switch and run closed-loop relative path execution on AUTO."""
+    cal = resolve_calibration(args)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plan_dir_used = bool(getattr(args, "plan_dir", None))
+    plan: dict[str, object] | None = None
+    field_config: dict[str, object] | None = None
+    if plan_dir_used:
+        plan_dir = Path(args.plan_dir)
+        candidates = [plan_dir / "preview_summary.json", plan_dir / "plan.json"]
+        plan_path = next((path for path in candidates if path.exists()), None)
+        if plan_path is None:
+            return _fail_with_summary(
+                args,
+                reason="PLAN_DIR_MISSING_PLAN",
+                message=f"--plan-dir must contain preview_summary.json or plan.json: {plan_dir}",
+            )
+        plan = json.loads(plan_path.read_text())
+        field_config_path = plan_dir / "field_config_resolved.json"
+        if field_config_path.exists():
+            loaded = json.loads(field_config_path.read_text())
+            if isinstance(loaded, dict):
+                field_config = loaded
+                plan["field_config"] = loaded
+    if not ensure_port(args):
+        return 2
+    import serial  # local import: keeps preview/diagnose --from-log free of pyserial
+
+    handle = serial.Serial(args.port, baudrate=args.baud, timeout=0.5)
+    try:
+        return _auto_relative_run_on_handle(
+            handle,
+            args,
+            cal,
+            out_dir,
+            plan=plan,
+            field_config=field_config,
+            plan_dir_used=plan_dir_used,
+            input_fn=input,
+        )
+    finally:
+        handle.close()
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
@@ -4087,7 +4699,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
+        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,execute-plan,run,auto-relative-run}",
     )
 
     gps_p = sub.add_parser("gps-wait", help="wait for usable GPS start fix; no motion")
@@ -4131,6 +4743,38 @@ def build_parser() -> argparse.ArgumentParser:
     preview_p.add_argument("--png", dest="png", action="store_true", default=True)
     preview_p.add_argument("--no-png", dest="png", action="store_false")
     preview_p.set_defaults(handler=cmd_preview)
+
+    auto_prev_p = sub.add_parser(
+        "auto-relative-preview",
+        help="wait for GPS, resolve a relative A->B field, write field config + preview (no motion)",
+    )
+    _add_goal_arguments(auto_prev_p, require_start=False)
+    _add_calibration_arguments(auto_prev_p)
+    auto_prev_p.add_argument("--port", default=None)
+    auto_prev_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    auto_prev_p.add_argument(
+        "--start-mode",
+        choices=["live_gps", "cached_gps", "explicit"],
+        default="live_gps",
+    )
+    auto_prev_p.add_argument("--start-timeout-s", type=float, default=120.0)
+    auto_prev_p.add_argument("--wait-gps", choices=["true", "false"], default="true")
+    auto_prev_p.add_argument("--gps-timeout-s", type=float, default=300.0)
+    auto_prev_p.add_argument("--gps-status-interval-s", type=float, default=2.0)
+    auto_prev_p.add_argument("--gps-min-sats", type=float, default=5.0)
+    auto_prev_p.add_argument("--gps-max-hdop", type=float, default=2.5)
+    auto_prev_p.add_argument("--allow-cached-start", choices=["true", "false"], default="true")
+    auto_prev_p.add_argument("--max-cached-start-age-s", type=float, default=600.0)
+    auto_prev_p.add_argument("--cached-start-max-age-ms", type=int, default=10000)
+    auto_prev_p.add_argument("--from-log", default=None)
+    auto_prev_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
+    auto_prev_p.add_argument("--out-dir", default="outputs/physical_path_planning/auto_relative_preview")
+    auto_prev_p.add_argument("--print-field-config", choices=["true", "false"], default="false")
+    auto_prev_p.add_argument("--allow-wide-field", choices=["true", "false"], default="false")
+    auto_prev_p.add_argument("--max-width-to-goal-ratio", type=float, default=0.95)
+    auto_prev_p.add_argument("--png", dest="png", action="store_true", default=True)
+    auto_prev_p.add_argument("--no-png", dest="png", action="store_false")
+    auto_prev_p.set_defaults(handler=cmd_auto_relative_preview, goal_mode="relative_enu")
 
     cal_p = sub.add_parser(
         "calibrate-turn",
@@ -4211,8 +4855,8 @@ def build_parser() -> argparse.ArgumentParser:
     manual_control_p.add_argument(
         "--profile",
         choices=MANUAL_CONTROL_PROFILES,
-        default=MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
-        help="firmware compile profile; default restores the old moving PPM manual build",
+        default=MANUAL_CONTROL_DEFAULT_PROFILE,
+        help="firmware compile profile; default uses the older rc_mix_test PPM decoder",
     )
     manual_control_p.add_argument("--mode-channel-index", type=int, default=4)
     manual_control_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
@@ -4363,8 +5007,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_guarded_pulse_ready_parser("guarded-pulse-ready")
 
-    for name in ("run", "execute-plan"):
-        run_p = sub.add_parser(name, help="drive the continuous-motion controller over a plan")
+    for name in ("run", "execute-plan", "auto-relative-run"):
+        if name == "auto-relative-run":
+            run_p = sub.add_parser(
+                name,
+                help="watch the AUTO mode switch, then run closed-loop relative path execution",
+            )
+        else:
+            run_p = sub.add_parser(name, help="drive the continuous-motion controller over a plan")
         _add_goal_arguments(run_p, require_start=False)
         _add_calibration_arguments(run_p)
         run_p.add_argument("--plan-dir", default=None)
@@ -4431,7 +5081,19 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="build + write the plan and exit (no serial opened)",
         )
-        run_p.set_defaults(handler=cmd_run)
+        if name == "auto-relative-run":
+            run_p.add_argument(
+                "--allow-keyboard-start",
+                choices=["true", "false"],
+                default="false",
+                help="when the PPM mode channel is absent, start on Enter instead of the AUTO switch",
+            )
+            run_p.add_argument("--auto-switch-timeout-s", type=float, default=300.0)
+            run_p.add_argument("--png", dest="png", action="store_true", default=True)
+            run_p.add_argument("--no-png", dest="png", action="store_false")
+            run_p.set_defaults(handler=cmd_auto_relative_run, goal_mode="relative_enu")
+        else:
+            run_p.set_defaults(handler=cmd_run)
 
     diag_p = sub.add_parser("diagnose", help="read-only telemetry summary (live port or --from-log)")
     diag_p.add_argument("--port", default=None)

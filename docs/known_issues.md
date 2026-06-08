@@ -73,6 +73,46 @@ Do not repeat:
 - Do not approve AUTO, bench, or floor testing unless USBDBG shows the expected
   Manual/Auto mode values and the relevant safety gates.
 
+## PPM Sync-Only On D6 Is A Receiver Output/Wiring Problem
+
+Status:
+
+- A recent manual-control run showed `ppm_interrupt_edge=FALLING`,
+  `ppm_decode_reason=PPM_SYNC_ONLY_NO_CHANNELS`,
+  `ppm_edge_count` and `ppm_sync_count` increasing, but
+  `ppm_frame_count=0`, `ppm_last_channel_count=0`, `steer_us=0`,
+  `throttle_us=0`, and `mode_us=0`.
+- This means OpenRB `D6` is receiving periodic sync-like timing edges, but no
+  decoded PPM channel intervals.
+- The rover correctly remains stopped with `rc_ok=false` and
+  `control_source=STOP`.
+
+Interpretation:
+
+- This is not an A/B motor mapping issue.
+- This is not a manual direction sign issue.
+- This is not solved by changing MANUAL/AUTO channel selection.
+- A single PWM receiver channel on `D6` cannot provide CH1 steering, CH2
+  throttle, and CH5 mode to a one-wire PPM decoder.
+
+Required next check:
+
+1. Inspect the rover-side receiver, not only the station transmitter panel.
+2. Confirm whether the wire going to OpenRB `D6` is connected to a combined
+   PPM/SUM output or to an individual PWM channel output.
+3. If the receiver supports PPM/SUM, enable that receiver output mode and keep
+   the PPM signal on `D6`.
+4. If the receiver only provides separate PWM channel outputs, use separate
+   wires for CH1, CH2, and CH5 and add/use a separate multi-pin PWM input
+   profile.
+
+Do not repeat:
+
+- Do not weaken `rc_ok` or force `control_source=RC_MANUAL` while
+  `ppm_frame_count=0`.
+- Do not continue changing motor signs or A/B mapping until
+  `raw_ch1_us`, `raw_ch2_us`, and `raw_ch5_us` are nonzero and valid.
+
 ## AUTO/MANUAL Channel (CH5) Does Not Hold HIGH
 
 Status (2026-05-30):

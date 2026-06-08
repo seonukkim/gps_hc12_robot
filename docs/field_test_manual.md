@@ -260,3 +260,139 @@ Every command writes:
 <out-dir>/summary.md
 <out-dir>/summary.json
 ```
+
+## 12. Closed-Loop Path Following (5 m straight field experiment)
+
+This is the GPS/IMU closed-loop experiment. The default
+`--path-control-mode gps_imu_closed_loop` actively steers the B axis from the
+IMU heading error and the GPS cross-track error while driving the calibrated
+forward/backward A command; `--path-control-mode open_loop_chunks` is kept only
+for comparison and does not steer.
+
+1. GPS/IMU readiness:
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh gps-wait \
+     --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+     --out-dir outputs/physical_path_planning/gps_wait_5m
+   ```
+
+2. Preview a 5 m relative path (writes the fully resolved field config):
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh preview \
+     --goal-mode relative_enu --goal-east-m 5.0 --goal-north-m 0.0 \
+     --workspace-width-m 1.5 --step-spacing-m 0.30 \
+     --path-shape diagonal_rectangle_serpentine --print-field-config true \
+     --out-dir outputs/physical_path_planning/preview_5m_relative_enu
+   ```
+
+3. Confirm the resolved field config (A is local `(0,0)`, B is `(5.0, 0.0)`):
+
+   ```bash
+   cat outputs/physical_path_planning/preview_5m_relative_enu/field_config_resolved.json
+   cat outputs/physical_path_planning/preview_5m_relative_enu/summary.md
+   ```
+
+4. Execute with real closed-loop correction:
+
+   ```bash
+   bash scripts/run_physical_path_planner.sh execute-plan \
+     --plan-dir outputs/physical_path_planning/preview_5m_relative_enu \
+     --path-control-mode gps_imu_closed_loop \
+     --live-chunk-ms 700 --max-segment-chunks 30 \
+     --gps-degradation-policy continue --gps-reanchor true \
+     --imu-heading-hold true --cross-track-correction true \
+     --k-heading 0.006 --k-cross-track 0.20 --max-correction-b 0.08 \
+     --out-dir outputs/physical_path_planning/execute_5m_gps_imu_closed_loop
+   ```
+
+   `--plan-dir` loads the planned segments, the approved
+   `motion_calibration.json`, and the start coordinate from the plan directory,
+   so execution does not require a fresh start GPS fix.
+
+5. Inspect correction evidence:
+
+   ```bash
+   cat  outputs/physical_path_planning/execute_5m_gps_imu_closed_loop/summary.md
+   head -40 outputs/physical_path_planning/execute_5m_gps_imu_closed_loop/closed_loop_trace.csv
+   tail -40 outputs/physical_path_planning/execute_5m_gps_imu_closed_loop/closed_loop_trace.csv
+   ```
+
+Each chunk prints one line:
+
+```text
+seg=<i> chunk=<j> mode=gps_imu_closed_loop gps=OK|DEGRADED imu=OK|NA heading_err=<deg> cte=<m> progress=<m> remaining=<m> A=<a> B=<b> correction=<heading|cross_track|both|dead_reckon>
+```
+
+Reading the evidence:
+
+- `closed_loop_correction_applied=true` confirms a nonzero steering correction
+  reached B at least once; `false` means B stayed `0` for every chunk (open-loop
+  behavior). `imu_heading_used_count` and `cross_track_correction_used_count`
+  count the chunks that used each correction.
+- The IMU heading reference is captured per lane from the first heartbeat yaw, so
+  `--start-yaw-deg` is optional; pass it only to override the first lane.
+- When GPS degrades the run continues on IMU heading hold plus calibrated
+  dead-reckoned progress (`gps_degraded=true`, `correction=dead_reckon`); when GPS
+  recovers the pose is re-anchored (`gps_reanchored=true`).
+- `closed_loop_trace.csv` carries the full per-chunk record (pose, segment
+  endpoints, target/IMU heading, heading and cross-track error, the
+  `b_heading_correction`/`b_cross_track_correction` components, the final A/B
+  command, and the ACK/ACTIVE/STOP handshake flags).
+
+RC/PPM input is ignored for Mac USB supervised drive, so `rc_ok=false` does not
+abort execution. Each live chunk is split so its duration never exceeds the
+firmware maximum; a firmware `USB_DRIVE_LIVE_DURATION_EXCEEDS_MAX` reject is
+classified as `HOST_SENT_DURATION_OVER_MAX` with the offending duration.
+
+## 13. AUTO-Switch Relative Run (3 m east / 4 m north diagonal)
+
+`auto-relative-run` waits for GPS, then watches the physical PPM mode switch and
+starts the same closed-loop execution only when AUTO is selected. The first field
+target is the 5 m diagonal `east=3 m, north=4 m`.
+
+Preview only (no motion):
+
+```bash
+bash scripts/run_physical_path_planner.sh auto-relative-preview \
+  --goal-east-m 3.0 --goal-north-m 4.0 \
+  --workspace-width-m 1.5 --step-spacing-m 0.30 \
+  --out-dir outputs/physical_path_planning/auto_relative_3x4m_preview
+```
+
+Wait for AUTO, then run closed-loop:
+
+```bash
+bash scripts/run_physical_path_planner.sh auto-relative-run \
+  --goal-east-m 3.0 --goal-north-m 4.0 \
+  --workspace-width-m 1.5 --step-spacing-m 0.30 \
+  --path-shape diagonal_rectangle_serpentine \
+  --path-control-mode gps_imu_closed_loop \
+  --live-chunk-ms 700 --max-segment-chunks 30 \
+  --gps-degradation-policy continue --gps-reanchor true \
+  --imu-heading-hold true --cross-track-correction true \
+  --k-heading 0.006 --k-cross-track 0.20 --max-correction-b 0.08 \
+  --out-dir outputs/physical_path_planning/auto_relative_3x4m
+```
+
+Behavior:
+
+- Waits for GPS readiness (default timeout 300 s, min sats 5, max HDOP 2.5) and
+  saves the current fix as start A. While waiting it prints a status line every
+  second with `mode_switch`, `mode_us`, `rc_ok`, `gps_ready`, `gps_sats`,
+  `gps_hdop`, `current_lat`, `current_lon`, `imu_present`,
+  `imu_relative_yaw_deg`, and `waiting_for=GPS` then `waiting_for=AUTO_SWITCH`.
+- `MANUAL` keeps motors stopped and never starts the path. `AUTO` generates the
+  preview from the current GPS start (writes `field_config_resolved.json` and the
+  preview image) and starts closed-loop execution.
+- If the PPM mode channel is absent, pass `--allow-keyboard-start true` to start
+  on Enter instead of the switch.
+- Flipping the switch back to `MANUAL` during execution stops safely with
+  `stop_reason=USER_SWITCHED_TO_MANUAL` and a final motor zero.
+- `--plan-dir` reuses an existing `auto-relative-preview` plan and skips the fresh
+  GPS wait.
+
+The run writes `summary.md`, `summary.json`, `field_config_resolved.json`, the
+preview image, `closed_loop_trace.csv`, `planned_vs_actual.csv`, and
+`raw_usbdbg.log`. Every summary keeps `ready_for_full_path_following=false`.

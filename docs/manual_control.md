@@ -8,12 +8,16 @@ and how the current code maps joystick input to motor commands.
 sensor-disabled mode: GPS and IMU status continue to print when available, but
 they are diagnostic-only and do not gate manual motor output.
 
-The default `manual-control` firmware profile is `old-working-ppm`. It restores
-the exact compile flags from the 2026-05-30 moving PPM manual run:
-`MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
-`DRIVE_CALIBRATION_ENABLE=0`. Use `--profile full-telemetry-ppm` only when
-diagnosing the newer sensor-heavy PPM build; it is not the default movement
-compatibility profile.
+The default `manual-control` firmware profile is `rc-mix-ppm`. It keeps the
+manual movement signs from the 2026-05-30 moving PPM run
+(`MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
+`DRIVE_CALIBRATION_ENABLE=0`) but uses the older May 2 `rc_mix_test` PPM
+decoder style: `FALLING` edge and `4000 us` sync threshold. It also enables the
+manual-control PPM telemetry build path, GPS-on-Serial2 status, and IMU
+diagnostic status. The May 30 integrated decoder remains available as
+`--profile old-working-ppm`, with the same full telemetry display enabled.
+Use `--profile full-telemetry-ppm` only when comparing against the newer
+sensor-heavy PPM build; it is not the default movement compatibility profile.
 
 All motor and ESC checks are wheel-off-ground only.
 
@@ -61,6 +65,34 @@ OpenRB is not running the current repository firmware and must be flashed again.
 ## RC Manual Mapping
 
 The receiver PPM input is read on OpenRB `D6`.
+
+Important current diagnostic:
+
+- `PPM_SYNC_ONLY_NO_CHANNELS` means OpenRB `D6` is seeing timing edges, but no
+  channel pulses are present between frame syncs.
+- Recent USBDBG showed `ppm_edge_count` and `ppm_sync_count` increasing while
+  `ppm_frame_count=0`, `ppm_last_channel_count=0`, and all raw channels stayed
+  `0`.
+- That is not a motor mapping problem and not a joystick sign problem. It means
+  the signal on `D6` is not the combined PPM/SUM stream required by this
+  firmware.
+- A combined PPM stream must produce multiple channel pulse widths per frame:
+  `raw_ch1_us`, `raw_ch2_us`, and `raw_ch5_us` should be in the roughly
+  `900..2100 us` range and `ppm_last_channel_count` should be at least `5`.
+- If `D6` is connected to a single receiver PWM channel output, the firmware can
+  see periodic edges but cannot recover CH1 steering, CH2 throttle, and CH5 mode
+  from that one wire.
+
+Fix this at the receiver/output wiring level before changing motor code:
+
+1. If the receiver supports combined PPM/SUM output, configure that output mode
+   and wire the receiver PPM/SUM signal to OpenRB `D6` with shared ground.
+2. If the receiver only exposes separate PWM channel pins, the current one-wire
+   PPM manual firmware is the wrong input reader. Wire separate PWM outputs for
+   CH1, CH2, and CH5 to separate OpenRB input pins and use/add a separate
+   multi-pin PWM reader profile instead of weakening `rc_ok`.
+3. Do not bypass `rc_ok=false`; it is correctly forcing motor zero when the
+   channel frame is absent.
 
 Current channel mapping:
 
@@ -350,7 +382,7 @@ arduino-cli compile \
 Unified launcher equivalent:
 
 ```bash
-bash scripts/run_physical_path_planner.sh manual-control --profile old-working-ppm
+bash scripts/run_physical_path_planner.sh manual-control --profile rc-mix-ppm
 ```
 
 The current correction was chosen from the observed failure sequence:

@@ -25,8 +25,10 @@ Modes:
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
   preview               Build + render a rectangle coverage plan. No motion.
+  auto-relative-preview Wait for GPS, resolve a relative A->B field + preview. No motion.
   execute-plan          Execute an existing/specified plan with guarded pulses.
   run                   Plan and execute with guarded pulses.
+  auto-relative-run     Wait for the AUTO mode switch, then run closed-loop path execution.
 
 Examples:
   bash scripts/run_physical_path_planner.sh diagnose \
@@ -43,7 +45,7 @@ Examples:
     --out-dir outputs/physical_path_planning/manual_rc
 
   bash scripts/run_physical_path_planner.sh manual-control \
-    --profile old-working-ppm \
+    --profile rc-mix-ppm \
     --out-dir outputs/physical_path_planning/manual_control
 
   bash scripts/run_physical_path_planner.sh station-hw-diagnose \
@@ -85,6 +87,18 @@ Examples:
     --goal-mode relative_enu --goal-east-m 4.0 --goal-north-m -1.2 \
     --workspace-width-m 1.2 --step-spacing-m 0.25 \
     --out-dir outputs/physical_path_planning/run_relative_enu
+
+  bash scripts/run_physical_path_planner.sh auto-relative-preview \
+    --goal-east-m 3.0 --goal-north-m 4.0 \
+    --workspace-width-m 1.5 --step-spacing-m 0.30 \
+    --out-dir outputs/physical_path_planning/auto_relative_3x4m_preview
+
+  bash scripts/run_physical_path_planner.sh auto-relative-run \
+    --goal-east-m 3.0 --goal-north-m 4.0 \
+    --workspace-width-m 1.5 --step-spacing-m 0.30 \
+    --path-control-mode gps_imu_closed_loop \
+    --gps-reanchor true --imu-heading-hold true --cross-track-correction true \
+    --out-dir outputs/physical_path_planning/auto_relative_3x4m
 
 Every mode writes:
   <out-dir>/summary.md
@@ -231,8 +245,8 @@ Options:
   --duration-s SECONDS     Monitor duration; <=0 means continuous until Ctrl-C.
                             Default: 0.
   --upload true|false|auto Upload PPM manual firmware. Default: true.
-  --profile PROFILE        Firmware compile profile. Default: old-working-ppm.
-                            Other option: full-telemetry-ppm.
+  --profile PROFILE        Firmware compile profile. Default: rc-mix-ppm.
+                            Other options: old-working-ppm, full-telemetry-ppm.
   --from-log PATH          Parse an existing raw USB debug log instead of serial.
   --verbose-raw true|false Print raw telemetry in addition to concise status.
   --print-cmd              Print firmware commands and exit.
@@ -280,7 +294,7 @@ mode_needs_port() {
     tune-motion)
       [[ "$PRINT_CANDIDATE" != "true" ]]
       ;;
-    run|execute-plan)
+    run|execute-plan|auto-relative-run)
       [[ "$PRINT_PLAN" != "true" ]]
       ;;
     *)
@@ -381,10 +395,10 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
+  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
-  run|execute-plan)
+  run|execute-plan|auto-relative-run)
     if [[ "$PRINT_PLAN" == "true" ]]; then
       # No motion, no serial: build/write the plan only.
       exec_cli
