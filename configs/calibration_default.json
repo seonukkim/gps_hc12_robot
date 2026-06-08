@@ -1,0 +1,16 @@
+{
+  "_comment": "The resolver's fallback motion set, used when NO on-disk calibration exists. These are the same known-good primitives that geometry.FALLBACK_RESOLVED_CALIBRATION returns; a parity test keeps this file in lockstep with the code. Connectors fall back to repeated fixed pulses (12 left / 12 right) because no turn-angle calibration is present, and ready_for_full_path_following stays false.",
+  "forward": {"a": 0.30, "b": 0.0, "ms": 800, "source": "fallback_known_forward"},
+  "backward": {"a": -0.08, "b": 0.0, "ms": 300, "source": "fallback_known_backward"},
+  "turn_left": {"a": 0.0, "b": 0.26, "ms": 700, "source": "fallback_known_turn_left"},
+  "turn_right": {"a": 0.0, "b": -0.08, "ms": 250, "source": "fallback_known_turn_right"},
+  "connector_mode_requested": "repeated_pulses",
+  "connector_mode_recommended": "repeated_pulses",
+  "connector_mode_effective": "repeated_pulses",
+  "angle_based_connector_available": false,
+  "smooth_connector_available": false,
+  "fallback_to_repeated_pulses": true,
+  "left_fixed_pulses": 12,
+  "right_fixed_pulses": 12,
+  "ready_for_full_path_following": false
+}

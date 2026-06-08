@@ -49,6 +49,42 @@ Current code supports the Python-side protocol and mock planning pieces. It does
 not yet implement completed autonomous ROS2 execution or confirmed end-to-end
 station HC-12 operation.
 
+## Physical Path Planning (Integrated CLI)
+
+A→B serpentine coverage, calibration, and guarded motion are consolidated into one
+package, `tools/physical_path_planning/`, behind a single entrypoint with five modes:
+
+```bash
+uv run python -m tools.physical_path_planning.cli <mode> [options]
+# launcher wrapper (adds the firmware flash for run/execute-plan):
+scripts/run_physical_path_planner.sh <mode> [options]
+```
+
+- `preview` — build + render the A→B plan (no serial, no motion; works with no
+  calibration).
+- `calibrate-turn` — measure a 90° turn via the Stage20 probe with IMU yaw.
+- `run` / `execute-plan` — drive the guarded continuous-motion controller.
+- `diagnose` — read-only telemetry summary (live port or `--from-log`).
+
+`start` (A) and `goal` (B) are **opposite corners of a rectangle's diagonal**, not a
+straight line; `--workspace-width-m` is the short side and must be shorter than the
+diagonal. Use `--path-shape direct_line` for an actual straight A→B.
+
+Safety posture is unchanged: `run`/`execute-plan` flash the STAGE20 *guarded-crawl*
+firmware behind the same 4-flag compile gate as
+`scripts/run_stage20_physical_ab_probe.sh` (that gate, not the CLI, is the real
+motor-output safety), and every summary carries `ready_for_full_path_following=false`.
+This is guarded, bounded motion, not full autonomous path following — station-side
+preview is always allowed, physical execution stays subject to the field
+preconditions noted throughout this README. `--print-plan` / `--print-cmd` /
+`--from-log` give fully no-hardware paths.
+
+This package supersedes the former `stage30`–`stage36` modules and their scripts.
+See [docs/README_physical_path_planning.md](docs/README_physical_path_planning.md)
+(usage), [docs/physical_path_planning_architecture.md](docs/physical_path_planning_architecture.md)
+(module map + control law), and [docs/field_test_manual.md](docs/field_test_manual.md)
+(operator procedure).
+
 ## Hardware Overview
 
 - Target surface: outer hull of a ship, currently approximated as planar.

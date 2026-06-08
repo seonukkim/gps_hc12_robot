@@ -1,0 +1,14 @@
+{
+  "_comment": "Worked A->B-diagonal coverage example. A (start) and B (goal) are OPPOSITE CORNERS of the rectangle's diagonal -- they are NOT a straight driving line. workspace_width_m is the short side and MUST be shorter than the A->B diagonal (~8.6 m here). The planner derives the long side as sqrt(diagonal^2 - width^2) and lays serpentine lanes spaced step_spacing_m apart. Every key is a build_preview() kwarg, so this file loads directly via cli.load_planner_config().",
+  "start_lat": 35.1000000,
+  "start_lon": 129.1000000,
+  "goal_mode": "absolute",
+  "goal_lat": 35.1000600,
+  "goal_lon": 129.1000600,
+  "path_shape": "diagonal_rectangle_serpentine",
+  "workspace_width_m": 2.5,
+  "step_spacing_m": 0.5,
+  "diagonal_orientation": "A_top_left_to_B_bottom_right",
+  "max_segment_pulses": 8,
+  "nominal_forward_pulse_m": 0.30
+}

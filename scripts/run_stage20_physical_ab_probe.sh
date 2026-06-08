@@ -18,6 +18,11 @@ MAX_MS="800"
 DANGEROUSLY_ALLOW_HIGHER_CMD="false"
 DANGEROUSLY_ALLOW_LONGER_PULSE="false"
 TURN_PROFILE=""
+IMU_ANGLE_COMPARE="false"
+TARGET_ANGLE_DEG="90"
+ANGLE_TOLERANCE_DEG="10"
+SAVE_TURN_CALIBRATION="false"
+TURN_CALIBRATION_OUT="outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,6 +94,26 @@ while [[ $# -gt 0 ]]; do
       OUT_DIR="$2"
       shift 2
       ;;
+    --imu-angle-compare)
+      IMU_ANGLE_COMPARE="$2"
+      shift 2
+      ;;
+    --target-angle-deg)
+      TARGET_ANGLE_DEG="$2"
+      shift 2
+      ;;
+    --angle-tolerance-deg)
+      ANGLE_TOLERANCE_DEG="$2"
+      shift 2
+      ;;
+    --save-turn-calibration)
+      SAVE_TURN_CALIBRATION="$2"
+      shift 2
+      ;;
+    --turn-calibration-out)
+      TURN_CALIBRATION_OUT="$2"
+      shift 2
+      ;;
     -h|--help)
       cat <<'USAGE'
 Usage:
@@ -106,10 +131,18 @@ Usage:
     --stop-after-big-turn true \
     --require-enter true \
     --interactive-visible-motion true \
+    --imu-angle-compare true \
+    --target-angle-deg 90 \
+    --angle-tolerance-deg 10 \
+    --save-turn-calibration true \
+    --turn-calibration-out outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json \
     --out-dir outputs/stage20_physical_ab_probe/forward
 
 Stage 20 sends direct physical A/B throttle/turn pulses through the
 manual-equivalent guarded path. It is not full path following.
+
+IMU angle compare wraps the same Stage20 command with before/after heartbeat yaw
+measurement. It does not add an autonomous turn runner or candidate sweep.
 
 Turn profiles:
   --turn-profile left_twitch   mode=turn_left, cmd-list 0.25..0.35, pulse-ms 700..1000
@@ -231,6 +264,16 @@ FLAGS="-DSTAGE20_PHYSICAL_AB_GUARDED_CRAWL=1 \
 -DSTAGE17_FIRST_PRIMITIVE_CRAWL=0 \
 -DSTAGE18_MOTOR_MAPPING_PROBE=0"
 
+# Turn-angle calibration needs live IMU yaw, so enable the BMI160 yaw diagnostics
+# only when --imu-angle-compare is requested. These are motor-output-neutral and
+# are not in the reject list below.
+case "$(printf '%s' "$IMU_ANGLE_COMPARE" | tr '[:upper:]' '[:lower:]')" in
+  true|1|yes)
+    FLAGS="$FLAGS -DIMU_ENABLE=1 -DIMU_YAW_DIAG=1"
+    echo "imu_angle_compare requested: appended -DIMU_ENABLE=1 -DIMU_YAW_DIAG=1"
+    ;;
+esac
+
 if ! printf '%s' "$FLAGS" | grep -q 'STAGE20_PHYSICAL_AB_GUARDED_CRAWL=1'; then
   echo "ABORT: Stage 20 compile flag missing." >&2
   exit 2
@@ -254,6 +297,11 @@ echo "max_ms=${MAX_MS}"
 echo "forward_sign=${FORWARD_SIGN}"
 echo "turn_sign=${TURN_SIGN}"
 echo "stop_after_big_turn=${STOP_AFTER_BIG_TURN}"
+echo "imu_angle_compare=${IMU_ANGLE_COMPARE}"
+echo "target_angle_deg=${TARGET_ANGLE_DEG}"
+echo "angle_tolerance_deg=${ANGLE_TOLERANCE_DEG}"
+echo "save_turn_calibration=${SAVE_TURN_CALIBRATION}"
+echo "turn_calibration_out=${TURN_CALIBRATION_OUT}"
 echo "upload_port=${PORT}"
 echo "flags=${FLAGS}"
 
@@ -278,9 +326,17 @@ uv run python tools/stage20_physical_ab_probe.py \
   --forward-sign "$FORWARD_SIGN" \
   --turn-sign "$TURN_SIGN" \
   --stop-after-big-turn "$STOP_AFTER_BIG_TURN" \
+  --imu-angle-compare "$IMU_ANGLE_COMPARE" \
+  --target-angle-deg "$TARGET_ANGLE_DEG" \
+  --angle-tolerance-deg "$ANGLE_TOLERANCE_DEG" \
+  --save-turn-calibration "$SAVE_TURN_CALIBRATION" \
+  --turn-calibration-out "$TURN_CALIBRATION_OUT" \
   --require-enter "$REQUIRE_ENTER" \
   --interactive-visible-motion "$INTERACTIVE_VISIBLE_MOTION" \
   --continue-after-visible "$CONTINUE_AFTER_VISIBLE" \
   --out-dir "$OUT_DIR"
 
-uv run python tools/check_stage20_physical_ab_probe.py "$OUT_DIR"
+uv run python tools/check_stage20_physical_ab_probe.py "$OUT_DIR" \
+  --max-abs-a "$MAX_ABS_A" \
+  --max-abs-b "$MAX_ABS_B" \
+  --max-ms "$MAX_MS"

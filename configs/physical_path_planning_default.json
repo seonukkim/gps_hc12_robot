@@ -1,0 +1,19 @@
+{
+  "_comment": "Default runtime parameters for the unified planner CLI (tools/physical_path_planning/cli.py). These mirror the argparse defaults so an operator can see every knob in one place; the CLI does not auto-load this file -- copy values onto the command line as needed. Geometry/goal inputs live in field_rectangle_example.json instead.",
+  "port": "/dev/ttyACM0",
+  "baud": 115200,
+  "step_spacing_m": 0.5,
+  "max_segment_pulses": 8,
+  "nominal_forward_pulse_m": 0.30,
+  "diagonal_orientation": "A_top_left_to_B_bottom_right",
+  "path_shape": "diagonal_rectangle_serpentine",
+  "calibration_mode": "auto",
+  "event_timeout_s": 3.0,
+  "heartbeat_timeout_s": 3.0,
+  "rc_neutral_wait_s": 5.0,
+  "gps_degradation_policy": "continue",
+  "manual_override_mode": "abort",
+  "left_fixed_pulses": 12,
+  "right_fixed_pulses": 12,
+  "ready_for_full_path_following": false
+}

@@ -1,0 +1,32 @@
+{
+  "name": "stage32_known_good_block1",
+  "source": "successful physical Stage32 first_block_left_more run",
+  "forward": {
+    "a": 0.3,
+    "b": 0.0,
+    "ms": 800
+  },
+  "backward": {
+    "a": -0.08,
+    "b": 0.0,
+    "ms": 300
+  },
+  "turn_left": {
+    "a": 0.0,
+    "b": 0.26,
+    "ms": 700
+  },
+  "turn_right": {
+    "a": 0.0,
+    "b": -0.08,
+    "ms": 250
+  },
+  "block_count": 1,
+  "forward_pulses_per_lane": 1,
+  "backward_pulses_per_lane": 1,
+  "left_fixed_pulses": 12,
+  "right_fixed_pulses": 12,
+  "turn_strategy": "imu",
+  "gps_mode": "log_only",
+  "ready_for_full_path_following": false
+}
