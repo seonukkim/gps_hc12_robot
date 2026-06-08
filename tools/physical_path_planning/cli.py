@@ -134,7 +134,6 @@ def usb_drive_live_firmware_flags(
     return (
         "-DUSB_DRIVE_LIVE_ENABLE=1 "
         "-DUSB_DRIVE_LIVE_IGNORE_RC_INPUT=1 "
-        "-DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 "
         f"-DUSB_DRIVE_LIVE_MAX_ABS_A={max_abs_a} "
         f"-DUSB_DRIVE_LIVE_MAX_ABS_B={max_abs_b} "
         f"-DUSB_DRIVE_LIVE_MAX_DURATION_MS={max_duration_ms} "
