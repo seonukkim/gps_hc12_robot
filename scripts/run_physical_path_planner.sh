@@ -28,6 +28,7 @@ Modes:
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
   preview               Build + render a rectangle coverage plan. No motion.
+  inspect-plan          Inspect saved plan artifacts and preview images. No motion.
   auto-relative-preview Wait for GPS, resolve a relative A->B field + preview. No motion.
   align-heading         Point the rover at the first lane heading (GPS probe + IMU turn).
   execute-plan          Execute an existing/specified plan with guarded pulses.
@@ -99,6 +100,9 @@ Examples:
     --goal-mode relative_enu --goal-east-m 4.0 --goal-north-m -1.2 \
     --workspace-width-m 1.2 --step-spacing-m 0.25 \
     --out-dir outputs/physical_path_planning/preview_relative_enu
+
+  bash scripts/run_physical_path_planner.sh inspect-plan \
+    --plan-dir outputs/physical_path_planning/preview_relative_enu
 
   bash scripts/run_physical_path_planner.sh align-heading \
     --plan-dir outputs/physical_path_planning/preview_relative_enu \
@@ -433,7 +437,7 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|set-motion-calibration|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
+  preview|inspect-plan|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|set-motion-calibration|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
   run|execute-plan|auto-relative-run|align-heading)

@@ -95,9 +95,26 @@ inspection step after every run.
 
 ## Rectangle Geometry
 
-`start` (A) and `goal` (B) are opposite corners of the workspace rectangle's
-diagonal, not a direct driving line. `--workspace-width-m` is the short side and
-must be shorter than the A-B diagonal. `--step-spacing-m` controls lane spacing.
+The default `--path-shape` is `coverage_lawnmower`: a local-ENU ㄹ/lawnmower
+coverage sweep. It is not a direct A-B follower. The generated plan alternates
+straight lane segments and explicit `path_connector` turns so the rover sweeps
+the full rectangular area.
+
+For `--goal-mode relative_enu`, A is always local `(0, 0)` and B is
+`(goal_east_m, goal_north_m)`. `--workspace-width-m` is the coverage rectangle
+width and `--step-spacing-m` controls lane spacing. The preview writes both the
+resolved geometry and mandatory images:
+
+```text
+field_config_resolved.json
+planned_segments.csv
+planned_segments.json
+preview_current_goal_rectangle_path.png
+preview_overview.png
+```
+
+If an image cannot be written, preview fails with
+`reason=PREVIEW_IMAGE_NOT_WRITTEN`.
 
 When `--start-lat` / `--start-lon` are omitted, `preview` waits for the current
 rover GPS from OpenRB telemetry. The default wait is up to 300 seconds so GPS
@@ -106,8 +123,10 @@ fix is temporarily unavailable. If neither is usable, the summary reports
 `reason=NO_USABLE_START_GPS`; move outdoors and wait longer, or pass explicit
 start coordinates.
 
-Use `--path-shape direct_line` only when a literal straight A-B plan is explicitly
-wanted.
+Use `--path-shape diagonal_rectangle_serpentine` only when the older A-B diagonal
+frame is intentionally requested; it prints a warning because it is not the ㄹ
+coverage path. Use `--path-shape direct_line` only when a literal straight A-B
+plan is explicitly wanted.
 
 Every `preview` and `run` resolves the field geometry before planning. Add
 `--print-field-config true` to print the exact resolved configuration, and inspect:
@@ -116,12 +135,19 @@ Every `preview` and `run` resolves the field geometry before planning. Add
 <out-dir>/field_config_resolved.json
 ```
 
-For `--goal-mode relative_enu`, A is always local `(0, 0)` and B is exactly
-`(goal_east_m, goal_north_m)`. The workspace width is perpendicular to the A-B
-diagonal. The resolved field config records start source, start/goal lat/lon,
-resolved local goal coordinates, width, step spacing, path shape, lane count,
-and segment count. `execute-plan --plan-dir ...` loads the same
-`field_config_resolved.json` that preview wrote.
+The resolved field config records start source, start/goal lat/lon, resolved
+local goal coordinates, width, step spacing, path shape, lane count, connector
+count, segment count, expected sweep style, and image paths. `execute-plan
+--plan-dir ...` loads the same `field_config_resolved.json` and
+`planned_segments.json` that preview wrote; it does not regenerate a different
+shape.
+
+Inspect a saved plan without motion:
+
+```bash
+bash scripts/run_physical_path_planner.sh inspect-plan \
+  --plan-dir outputs/physical_path_planning/preview_relative_enu
+```
 
 ## Execution Control Modes
 

@@ -1,10 +1,11 @@
-"""Rectangle-from-diagonal serpentine coverage geometry, goal/start resolution, and
-the stateless control math (cross-track projection + heading/CTE correction).
+"""Rectangle coverage geometry, goal/start resolution, and stateless control math.
 
-A->B is treated as the rectangle *diagonal*; ``--path-shape direct_line`` uses
-:func:`build_direct_segments`. The control-law helpers (:func:`projection_metrics`,
-:func:`compute_b_correction`) are stateless and reused by the continuous-motion
-controller. ``ready_for_full_path_following`` stays False on every emitted primitive.
+``coverage_lawnmower`` builds an axis-aligned local-ENU ㄹ/lawnmower sweep.
+``diagonal_rectangle_serpentine`` remains as the explicit A->B-diagonal frame.
+``direct_line`` uses :func:`build_direct_segments`. The control-law helpers
+(:func:`projection_metrics`, :func:`compute_b_correction`) are stateless and
+reused by the continuous-motion controller. ``ready_for_full_path_following``
+stays False on every emitted primitive.
 """
 from __future__ import annotations
 
@@ -22,6 +23,26 @@ FALLBACK_RESOLVED_CALIBRATION = calibration_resolver.resolve_physical_calibratio
     smooth_turn_calibration_json=None,
     calibration_mode="repeated_pulses",
 )
+
+COVERAGE_LAWNMOWER = "coverage_lawnmower"
+DIAGONAL_RECTANGLE_SERPENTINE = "diagonal_rectangle_serpentine"
+DIRECT_LINE = "direct_line"
+PATH_SHAPE_ALIASES = {
+    "coverage_lawnmower": COVERAGE_LAWNMOWER,
+    "coverage_serpentine": COVERAGE_LAWNMOWER,
+    "lawnmower": COVERAGE_LAWNMOWER,
+    "boustrophedon": COVERAGE_LAWNMOWER,
+    "l_shape": COVERAGE_LAWNMOWER,
+    "diagonal_rectangle_serpentine": DIAGONAL_RECTANGLE_SERPENTINE,
+    "direct_line": DIRECT_LINE,
+}
+
+
+def canonical_path_shape(path_shape: str) -> str:
+    normalized = path_shape.strip().lower()
+    if normalized not in PATH_SHAPE_ALIASES:
+        raise ValueError(f"unsupported path_shape: {path_shape}")
+    return PATH_SHAPE_ALIASES[normalized]
 
 
 def _resolved_or_fallback(calibration: dict[str, object] | None) -> dict[str, object]:
@@ -204,6 +225,91 @@ def build_rectangle_from_diagonal_and_width(
     }
 
 
+def build_axis_aligned_lawnmower_workspace(
+    *,
+    start_lat: float,
+    start_lon: float,
+    goal_lat: float,
+    goal_lon: float,
+    width_m: float,
+    step_spacing_m: float,
+) -> dict[str, object]:
+    """Build an axis-aligned local-ENU coverage rectangle for ㄹ/lawnmower sweeps.
+
+    The dominant start->goal component becomes the lane direction. The other
+    local axis is the coverage-width direction, using the sign of the supplied
+    goal offset when available. This keeps common relative-ENU field commands
+    intuitive: ``goal-east=4, goal-north=-1.2, width=1.2`` sweeps east/west
+    lanes and steps south.
+    """
+    if width_m <= 0:
+        raise ValueError("workspace_width_m must be > 0")
+    if step_spacing_m <= 0:
+        raise ValueError("step_spacing_m must be > 0")
+    goal_x, goal_y = goal_to_local(start_lat, start_lon, goal_lat, goal_lon)
+    if math.hypot(goal_x, goal_y) <= 1e-9:
+        raise ValueError("goal distance must be > 0")
+    if abs(goal_x) >= abs(goal_y):
+        length = goal_x
+        if math.isclose(length, 0.0, abs_tol=1e-9):
+            raise ValueError("coverage_lawnmower requires a nonzero lane length")
+        width_sign = -1.0 if goal_y < 0 else 1.0
+        ux, uy = (1.0 if length >= 0 else -1.0), 0.0
+        vx, vy = 0.0, width_sign
+        length_m = abs(length)
+    else:
+        length = goal_y
+        width_sign = -1.0 if goal_x < 0 else 1.0
+        ux, uy = 0.0, (1.0 if length >= 0 else -1.0)
+        vx, vy = width_sign, 0.0
+        length_m = abs(length)
+    c_x = length_m * ux
+    c_y = length_m * uy
+    d_x = width_m * vx
+    d_y = width_m * vy
+    b_reconstructed_x = c_x + d_x
+    b_reconstructed_y = c_y + d_y
+    origin = GeoPoint(start_lat, start_lon)
+    c_geo = local_to_latlon(origin, LocalPoint(c_x, c_y))
+    d_geo = local_to_latlon(origin, LocalPoint(d_x, d_y))
+    b_reconstructed_geo = local_to_latlon(origin, LocalPoint(b_reconstructed_x, b_reconstructed_y))
+    diagonal_length = math.hypot(goal_x, goal_y)
+    return {
+        "local_frame_origin_lat": start_lat,
+        "local_frame_origin_lon": start_lon,
+        "local_frame_origin_latlon": {"lat": start_lat, "lon": start_lon},
+        "diagonal_orientation": "axis_aligned_local_enu",
+        "A_corner": {"x_m": 0.0, "y_m": 0.0, "lat": start_lat, "lon": start_lon},
+        "B_corner": {"x_m": goal_x, "y_m": goal_y, "lat": goal_lat, "lon": goal_lon},
+        "B_reconstructed": {
+            "x_m": b_reconstructed_x,
+            "y_m": b_reconstructed_y,
+            "lat": b_reconstructed_geo.lat,
+            "lon": b_reconstructed_geo.lon,
+        },
+        "C_corner": {"x_m": c_x, "y_m": c_y, "lat": c_geo.lat, "lon": c_geo.lon},
+        "D_corner": {"x_m": d_x, "y_m": d_y, "lat": d_geo.lat, "lon": d_geo.lon},
+        "A_prime_top_left": {"x_m": 0.0, "y_m": 0.0, "lat": start_lat, "lon": start_lon},
+        "B_prime_bottom_right": {
+            "x_m": b_reconstructed_x,
+            "y_m": b_reconstructed_y,
+            "lat": b_reconstructed_geo.lat,
+            "lon": b_reconstructed_geo.lon,
+        },
+        "long_axis_unit": {"x": ux, "y": uy},
+        "short_axis_unit": {"x": vx, "y": vy},
+        "local_x_axis_heading_deg": math.degrees(math.atan2(uy, ux)),
+        "local_y_axis_heading_deg": math.degrees(math.atan2(vy, vx)),
+        "workspace_length_m": length_m,
+        "workspace_width_m": width_m,
+        "diagonal_length_m": diagonal_length,
+        "step_spacing_m": step_spacing_m,
+        "coverage_area_estimate_m2": length_m * width_m,
+        "expected_sweep_style": "lawnmower_ㄹ",
+        "ready_for_full_path_following": False,
+    }
+
+
 def _track_offsets(width_m: float, step_spacing_m: float) -> list[float]:
     offsets = [0.0]
     value = step_spacing_m
@@ -289,7 +395,8 @@ def build_serpentine_segments(
             turn_direction = "turn_left" if forward else "turn_right"
             segments.append({
                 "segment_index": segment_index,
-                "segment_type": "connector_turn",
+                "segment_type": "path_connector",
+                "connector_kind": "path_connector",
                 "start_x_m": csx,
                 "start_y_m": csy,
                 "end_x_m": cex,
@@ -393,7 +500,7 @@ def primitives_from_segments(
     for primitive_index, segment in enumerate(segments, start=1):
         segment_type = str(segment.get("segment_type", ""))
         expected = str(segment.get("expected_motion_direction", "forward"))
-        if segment_type == "connector_turn":
+        if segment_type in {"connector_turn", "path_connector"}:
             direction = "left" if expected == "turn_left" else "right"
             calibrated = _turn_calibrated(calibration, direction)
             repeat_count = 1

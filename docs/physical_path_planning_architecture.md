@@ -36,7 +36,17 @@ geometry  calibration  telemetry  safety  checks
 | `controller.py` | Supervised segment loop that issues guarded pulses/live chunks along the planned coverage path. |
 | `alignment.py` | Initial heading alignment: GPS displacement probe for absolute heading, IMU-feedback turn-to-heading, and the `gps_probe`/`user_confirmed`/`skip` strategies. |
 | `tuning.py` | Interactive motion calibration candidate adjustment, approved-calibration persistence, and calibration backup/reset. |
-| `cli.py` | User-facing modes: `diagnose`, `manual-rc`, `guarded-pulse-ready`, `calibrate-turn`, `tune-motion`, `reset-motion-calibration`, `calibration-check`, `preview`, `align-heading`, `execute-plan`, `run`, and `auto-relative-run`. |
+| `cli.py` | User-facing modes: `diagnose`, `manual-rc`, `guarded-pulse-ready`, `calibrate-turn`, `tune-motion`, `reset-motion-calibration`, `calibration-check`, `preview`, `inspect-plan`, `align-heading`, `execute-plan`, `run`, and `auto-relative-run`. |
+
+## Coverage Planner
+
+The default preview/run geometry is `coverage_lawnmower`: a local-ENU
+ㄹ/lawnmower sweep made from straight lane segments and explicit
+`path_connector` turns. For `relative_enu`, start A is local `(0,0)` and goal B
+is `(goal_east_m, goal_north_m)`; the planner uses workspace width and step
+spacing to sweep the area instead of following a direct diagonal. The explicit
+`diagonal_rectangle_serpentine` shape remains available for the older A-B
+diagonal frame, but it is not the default coverage mode.
 
 ## Guarded Pulse Contract
 

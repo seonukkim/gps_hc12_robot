@@ -11,6 +11,7 @@
     calibrate-turn        run guarded pulse turn-angle calibration.
     set-motion-calibration write a manual calibration preset/override. No motion.
     preview               build + render the rectangle coverage plan.
+    inspect-plan          inspect saved plan artifacts and preview images. No motion.
     execute-plan / run    execute a planned path with guarded pulses.
 
 Every summary is routed through ``checks.assert_not_ready_for_full_path_following``
@@ -1518,6 +1519,8 @@ def resolve_plan(args: argparse.Namespace, calibration_dict: dict[str, object]) 
     )
     validate_resolved_field_config(args, plan)
     plan["field_config"] = build_resolved_field_config(args, plan)
+    if str(plan.get("path_shape")) == geometry.DIAGONAL_RECTANGLE_SERPENTINE:
+        print("diagonal_rectangle_serpentine follows the A-B diagonal frame; it is not the ㄹ coverage path.")
     return plan
 
 
@@ -1550,6 +1553,8 @@ def build_resolved_field_config(args: argparse.Namespace, plan: dict[str, object
         "goal_north_m": goal_input.get("goal_north_m", getattr(args, "goal_north_m", None)),
         "goal_lat": float(plan["goal_lat"]),
         "goal_lon": float(plan["goal_lon"]),
+        "goal_x_m": goal_x,
+        "goal_y_m": goal_y,
         "resolved_goal_x_m": goal_x,
         "resolved_goal_y_m": goal_y,
         "workspace_width_m": plan.get("workspace_width_m"),
@@ -1558,12 +1563,17 @@ def build_resolved_field_config(args: argparse.Namespace, plan: dict[str, object
         "path_shape": str(plan.get("path_shape", getattr(args, "path_shape", "unknown"))),
         "diagonal_orientation": getattr(args, "diagonal_orientation", "A_top_left_to_B_bottom_right"),
         "expected_goal_distance_m": float(plan["goal_distance_m"]),
+        "connector_count": int(plan.get("connector_count", 0)),
+        "coverage_area_estimate_m2": plan.get("coverage_area_estimate_m2"),
+        "expected_sweep_style": plan.get("expected_sweep_style", "lawnmower_ㄹ"),
         "lane_count": int(plan.get("lane_count", 0)),
         "segment_count": int(plan.get("segment_count", 0)),
         "expected_lane_count": int(plan.get("lane_count", 0)),
         "expected_segment_count": int(plan.get("segment_count", 0)),
         "relative_enu_note": (
-            "A is local (0,0); B is (goal_east_m, goal_north_m); workspace width is perpendicular to the A-B diagonal."
+            "A is local (0,0); B is (goal_east_m, goal_north_m); coverage_lawnmower sweeps axis-aligned local ENU lanes."
+            if str(plan.get("goal_mode")) == "relative_enu" and str(plan.get("path_shape")) == "coverage_lawnmower"
+            else "A is local (0,0); B is (goal_east_m, goal_north_m); workspace width is perpendicular to the A-B diagonal."
             if str(plan.get("goal_mode")) == "relative_enu"
             else "NA"
         ),
@@ -1603,6 +1613,8 @@ def format_field_config(config: dict[str, object]) -> str:
         "goal_north_m",
         "goal_lat",
         "goal_lon",
+        "goal_x_m",
+        "goal_y_m",
         "resolved_goal_x_m",
         "resolved_goal_y_m",
         "workspace_width_m",
@@ -1612,6 +1624,9 @@ def format_field_config(config: dict[str, object]) -> str:
         "expected_goal_distance_m",
         "expected_lane_count",
         "expected_segment_count",
+        "connector_count",
+        "coverage_area_estimate_m2",
+        "expected_sweep_style",
     ]
     lines = ["Field configuration:"]
     for key in ordered_keys:
@@ -1637,6 +1652,38 @@ def load_planner_config(path: Path) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError(f"config {path} must be a JSON object")
     return {key: value for key, value in data.items() if not key.startswith("_")}
+
+
+def load_plan_dir_plan(plan_dir: Path) -> dict[str, object]:
+    candidates = [plan_dir / "plan.json", plan_dir / "preview_summary.json"]
+    plan_path = next((path for path in candidates if path.exists()), None)
+    if plan_path is None:
+        raise FileNotFoundError(f"--plan-dir must contain plan.json or preview_summary.json: {plan_dir}")
+    plan = json.loads(plan_path.read_text())
+    if not isinstance(plan, dict):
+        raise ValueError(f"plan file must contain a JSON object: {plan_path}")
+    segments_json = plan_dir / "planned_segments.json"
+    if segments_json.exists():
+        segments = json.loads(segments_json.read_text())
+        if isinstance(segments, list):
+            plan["segments"] = segments
+            plan["segment_count"] = len(segments)
+            plan["lane_count"] = len(
+                [seg for seg in segments if str(seg.get("segment_type", "")).endswith("_lane")]
+            )
+            plan["connector_count"] = len(
+                [
+                    seg for seg in segments
+                    if str(seg.get("segment_type", "")) in {"connector_turn", "path_connector"}
+                ]
+            )
+    primitives_json = plan_dir / "planned_primitives.json"
+    if primitives_json.exists():
+        primitives = json.loads(primitives_json.read_text())
+        if isinstance(primitives, list):
+            plan["primitives"] = primitives
+            plan["primitive_count"] = len(primitives)
+    return plan
 
 
 def diagnose_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
@@ -1749,6 +1796,46 @@ def _write_raw_log(path: Path, lines: Sequence[str]) -> None:
     path.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
+def _required_preview_image_paths(out_dir: Path) -> dict[str, str]:
+    return {
+        "preview_current_goal_rectangle_path": str(out_dir / "preview_current_goal_rectangle_path.png"),
+        "preview_overview": str(out_dir / "preview_overview.png"),
+    }
+
+
+def _write_required_preview_images(out_dir: Path, plan: dict[str, object]) -> dict[str, str]:
+    image_paths = _required_preview_image_paths(out_dir)
+    for expected in image_paths.values():
+        expected_path = Path(expected)
+        rendered = preview.write_preview_png(
+            expected_path,
+            plan["segments"],  # type: ignore[arg-type]
+            float(plan["start_lat"]),
+            float(plan["start_lon"]),
+            float(plan["goal_lat"]),
+            float(plan["goal_lon"]),
+            plan.get("workspace"),  # type: ignore[arg-type]
+            path_shape=str(plan.get("path_shape", "unknown")),
+        )
+        if rendered is None or not expected_path.exists():
+            raise RuntimeError(f"PREVIEW_IMAGE_NOT_WRITTEN {expected_path}")
+    return image_paths
+
+
+def _write_plan_artifacts(out_dir: Path, plan: dict[str, object], field_config: dict[str, object]) -> dict[str, str]:
+    image_paths = _write_required_preview_images(out_dir, plan)
+    field_config["image_paths"] = image_paths
+    plan["image_paths"] = image_paths
+    _write_json(out_dir / "field_config_resolved.json", field_config)
+    _write_json(out_dir / "plan.json", plan)
+    _write_rows_csv(out_dir / "planned_segments.csv", plan.get("segments", []))  # type: ignore[arg-type]
+    _write_json(out_dir / "planned_segments.json", plan.get("segments", []))
+    _write_rows_csv(out_dir / "planned_primitives.csv", plan.get("primitives", []))  # type: ignore[arg-type]
+    _write_json(out_dir / "planned_primitives.json", plan.get("primitives", []))
+    _write_rows_csv(out_dir / "planned_path_local.csv", plan.get("path_points", []))  # type: ignore[arg-type]
+    return image_paths
+
+
 def _fail(message: str) -> int:
     print(f"ABORT: {message}", file=sys.stderr)
     return 2
@@ -1848,28 +1935,28 @@ def cmd_preview(args: argparse.Namespace) -> int:
             "start_source": start["start_source"],
         }
     )
+    try:
+        image_paths = _write_plan_artifacts(out_dir, plan, field_config)
+    except RuntimeError as exc:
+        expected = str(exc).replace("PREVIEW_IMAGE_NOT_WRITTEN ", "")
+        failure = {
+            "mode": "preview",
+            "success": False,
+            "reason": "PREVIEW_IMAGE_NOT_WRITTEN",
+            "expected_image_path": expected,
+            "next_recommended_action": "Install/check matplotlib rendering and rerun preview before physical execution.",
+            "ready_for_full_path_following": False,
+        }
+        write_summary_files(out_dir, failure, title="Physical Path Planner Preview")
+        print(f"preview: reason=PREVIEW_IMAGE_NOT_WRITTEN expected_image_path={expected}")
+        return 2
+    plan["image_paths"] = image_paths
     summary["field_config"] = field_config
-    _write_json(out_dir / "field_config_resolved.json", field_config)
+    summary["image_paths"] = image_paths
     _write_json(out_dir / "preview_summary.json", summary)
     write_summary_files(out_dir, summary, title="Physical Path Planner Preview")
     if telemetry._parse_bool(getattr(args, "print_field_config", "false"), default=False):
         print(format_field_config(field_config))
-    _write_json(out_dir / "plan.json", plan)
-    _write_rows_csv(out_dir / "planned_segments.csv", plan.get("segments", []))  # type: ignore[arg-type]
-    _write_rows_csv(out_dir / "planned_primitives.csv", plan.get("primitives", []))  # type: ignore[arg-type]
-    _write_rows_csv(out_dir / "planned_path_local.csv", plan.get("path_points", []))  # type: ignore[arg-type]
-    if args.png:
-        png = preview.write_preview_png(
-            out_dir / "preview.png",
-            plan["segments"],  # type: ignore[arg-type]
-            float(plan["start_lat"]),
-            float(plan["start_lon"]),
-            float(plan["goal_lat"]),
-            float(plan["goal_lon"]),
-            plan["workspace"],  # type: ignore[arg-type]
-        )
-        if png is None:
-            print("preview: matplotlib unavailable; skipped PNG render")
     print(
         f"preview: {plan['segment_count']} segments, "
         f"{plan['lane_count']} lanes, goal_distance_m={float(plan['goal_distance_m']):.3f} -> {out_dir}"
@@ -4299,6 +4386,79 @@ def _calibration_incomplete_summary(
     }
 
 
+def _load_plan_segments_from_dir(plan_dir: Path) -> list[dict[str, object]]:
+    json_path = plan_dir / "planned_segments.json"
+    if json_path.exists():
+        loaded = json.loads(json_path.read_text())
+        if isinstance(loaded, list):
+            return [row for row in loaded if isinstance(row, dict)]
+    csv_path = plan_dir / "planned_segments.csv"
+    if csv_path.exists():
+        with csv_path.open(newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    plan = load_plan_dir_plan(plan_dir)
+    segments = plan.get("segments", [])
+    return [row for row in segments if isinstance(row, dict)] if isinstance(segments, list) else []
+
+
+def cmd_inspect_plan(args: argparse.Namespace) -> int:
+    plan_dir = Path(args.plan_dir)
+    out_dir = Path(args.out_dir or plan_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        plan = load_plan_dir_plan(plan_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        return _fail_with_summary(args, reason="PLAN_DIR_MISSING_PLAN", message=str(exc))
+    field_config_path = plan_dir / "field_config_resolved.json"
+    field_config: dict[str, object] = {}
+    if field_config_path.exists():
+        loaded = json.loads(field_config_path.read_text())
+        if isinstance(loaded, dict):
+            field_config = loaded
+    segments = _load_plan_segments_from_dir(plan_dir)
+    image_paths = dict(field_config.get("image_paths", {})) if isinstance(field_config.get("image_paths"), dict) else {}
+    if not image_paths:
+        image_paths = _required_preview_image_paths(plan_dir)
+    image_status = {
+        name: {"path": path, "exists": Path(path).exists()}
+        for name, path in image_paths.items()
+    }
+    missing_images = [status["path"] for status in image_status.values() if not status["exists"]]
+    connector_count = len(
+        [seg for seg in segments if str(seg.get("segment_type", "")) in {"connector_turn", "path_connector"}]
+    )
+    lane_count = len([seg for seg in segments if str(seg.get("segment_type", "")).endswith("_lane")])
+    summary = {
+        "mode": "inspect-plan",
+        "success": not missing_images,
+        "reason": "OK" if not missing_images else "PREVIEW_IMAGE_MISSING",
+        "plan_dir": str(plan_dir),
+        "path_shape": field_config.get("path_shape", plan.get("path_shape", "NA")),
+        "lane_count": int(field_config.get("lane_count", lane_count)),
+        "segment_count": len(segments),
+        "connector_count": int(field_config.get("connector_count", connector_count)),
+        "first_20_planned_segments": segments[:20],
+        "image_status": image_status,
+        "missing_preview_images": missing_images,
+        "next_recommended_action": (
+            "Plan artifacts are present; execute-plan can use this plan-dir."
+            if not missing_images else
+            "Rerun preview so required preview images are regenerated before physical execution."
+        ),
+        "ready_for_full_path_following": False,
+    }
+    summary = checks.assert_not_ready_for_full_path_following(summary)
+    _write_json(out_dir / "inspect_plan_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Inspect Physical Path Plan")
+    print(f"path_shape={summary['path_shape']}")
+    print(f"lane_count={summary['lane_count']} segment_count={summary['segment_count']} connector_count={summary['connector_count']}")
+    for index, segment in enumerate(segments[:20], start=1):
+        print(f"{index}: {segment}")
+    for name, status in image_status.items():
+        print(f"{name}: exists={str(status['exists']).lower()} path={status['path']}")
+    return 0 if not missing_images else 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
     plan_dir_used = bool(getattr(args, "plan_dir", None))
@@ -4306,15 +4466,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     field_config_for_run: dict[str, object] | None = None
     if getattr(args, "plan_dir", None):
         plan_dir = Path(args.plan_dir)
-        candidates = [plan_dir / "preview_summary.json", plan_dir / "plan.json"]
-        plan_path = next((path for path in candidates if path.exists()), None)
-        if plan_path is None:
+        try:
+            plan = load_plan_dir_plan(plan_dir)
+        except (FileNotFoundError, ValueError) as exc:
             return _fail_with_summary(
                 args,
                 reason="PLAN_DIR_MISSING_PLAN",
-                message=f"--plan-dir must contain preview_summary.json or plan.json: {plan_dir}",
+                message=str(exc),
             )
-        plan = json.loads(plan_path.read_text())
         field_config_path = plan_dir / "field_config_resolved.json"
         if field_config_path.exists():
             loaded_field_config = json.loads(field_config_path.read_text())
@@ -4387,7 +4546,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "start_source": "plan_dir" if plan_dir_used else str(plan.get("start_source", "explicit")),
             }
         )
-        _write_json(out_dir / "field_config_resolved.json", field_config_for_run)
+        if plan_dir_used:
+            _write_json(out_dir / "field_config_resolved.json", field_config_for_run)
+        else:
+            try:
+                image_paths = _write_plan_artifacts(out_dir, plan, field_config_for_run)
+                plan["image_paths"] = image_paths
+            except RuntimeError as exc:
+                expected = str(exc).replace("PREVIEW_IMAGE_NOT_WRITTEN ", "")
+                failure = {
+                    "mode": args.mode,
+                    "success": False,
+                    "reason": "PREVIEW_IMAGE_NOT_WRITTEN",
+                    "expected_image_path": expected,
+                    "next_recommended_action": "Install/check matplotlib rendering and rerun planning before physical execution.",
+                    "ready_for_full_path_following": False,
+                }
+                write_summary_files(out_dir, failure, title="Physical Path Planner Run")
+                print(f"run: reason=PREVIEW_IMAGE_NOT_WRITTEN expected_image_path={expected}")
+                return 2
         if telemetry._parse_bool(getattr(args, "print_field_config", "false"), default=False):
             print(format_field_config(field_config_for_run))
     if args.print_plan:
@@ -4767,23 +4944,12 @@ def _write_preview_outputs(
     """Write field_config_resolved.json, plan.json, planned CSVs, and the preview PNG."""
     field_config = dict(plan.get("field_config", {}))
     field_config.update({"start_mode": start_mode, "start_source": start_source})
-    _write_json(out_dir / "field_config_resolved.json", field_config)
-    _write_json(out_dir / "plan.json", plan)
-    _write_rows_csv(out_dir / "planned_segments.csv", plan.get("segments", []))  # type: ignore[arg-type]
-    _write_rows_csv(out_dir / "planned_primitives.csv", plan.get("primitives", []))  # type: ignore[arg-type]
-    _write_rows_csv(out_dir / "planned_path_local.csv", plan.get("path_points", []))  # type: ignore[arg-type]
-    if write_png:
-        png = preview.write_preview_png(
-            out_dir / "preview.png",
-            plan["segments"],  # type: ignore[arg-type]
-            float(plan["start_lat"]),
-            float(plan["start_lon"]),
-            float(plan["goal_lat"]),
-            float(plan["goal_lon"]),
-            plan.get("workspace"),  # type: ignore[arg-type]
-        )
-        if png is None:
-            print("auto-relative: matplotlib unavailable; skipped PNG render")
+    try:
+        image_paths = _write_plan_artifacts(out_dir, plan, field_config)
+        plan["image_paths"] = image_paths
+    except RuntimeError as exc:
+        expected = str(exc).replace("PREVIEW_IMAGE_NOT_WRITTEN ", "")
+        raise RuntimeError(f"PREVIEW_IMAGE_NOT_WRITTEN {expected}") from exc
     return field_config
 
 
@@ -5014,13 +5180,27 @@ def cmd_auto_relative_preview(args: argparse.Namespace) -> int:
         plan = resolve_plan(args, cal)
     except ValueError as exc:
         return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
-    field_config = _write_preview_outputs(
-        out_dir,
-        plan,
-        start_mode=getattr(args, "start_mode", "live_gps"),
-        start_source=str(start["start_source"]),
-        write_png=getattr(args, "png", True),
-    )
+    try:
+        field_config = _write_preview_outputs(
+            out_dir,
+            plan,
+            start_mode=getattr(args, "start_mode", "live_gps"),
+            start_source=str(start["start_source"]),
+            write_png=getattr(args, "png", True),
+        )
+    except RuntimeError as exc:
+        expected = str(exc).replace("PREVIEW_IMAGE_NOT_WRITTEN ", "")
+        failure = {
+            "mode": "auto-relative-preview",
+            "success": False,
+            "reason": "PREVIEW_IMAGE_NOT_WRITTEN",
+            "expected_image_path": expected,
+            "next_recommended_action": "Install/check matplotlib rendering and rerun preview before physical execution.",
+            "ready_for_full_path_following": False,
+        }
+        write_summary_files(out_dir, failure, title="Physical Path Planner Auto-Relative Preview")
+        print(f"auto-relative-preview: reason=PREVIEW_IMAGE_NOT_WRITTEN expected_image_path={expected}")
+        return 2
     summary = {
         **plan,
         "mode": "auto-relative-preview",
@@ -5114,13 +5294,29 @@ def _auto_relative_run_on_handle(
             plan = resolve_plan(args, cal)
         except ValueError as exc:
             return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
-        field_config = _write_preview_outputs(
-            out_dir,
-            plan,
-            start_mode="live_gps",
-            start_source="live_gps",
-            write_png=getattr(args, "png", True),
-        )
+        try:
+            field_config = _write_preview_outputs(
+                out_dir,
+                plan,
+                start_mode="live_gps",
+                start_source="live_gps",
+                write_png=getattr(args, "png", True),
+            )
+        except RuntimeError as exc:
+            expected = str(exc).replace("PREVIEW_IMAGE_NOT_WRITTEN ", "")
+            summary = {
+                "mode": "auto-relative-run",
+                "success": False,
+                "reason": "PREVIEW_IMAGE_NOT_WRITTEN",
+                "expected_image_path": expected,
+                "next_recommended_action": "Install/check matplotlib rendering and rerun before physical execution.",
+                "ready_for_full_path_following": False,
+            }
+            _write_json(out_dir / "run_summary.json", summary)
+            write_summary_files(out_dir, summary, title="Physical Path Planner Auto-Relative Run")
+            _write_closed_loop_artifacts(out_dir, [], raw_lines)
+            print(f"auto-relative-run: reason=PREVIEW_IMAGE_NOT_WRITTEN expected_image_path={expected}")
+            return 2
 
     # 3. Monitor the physical mode switch; start only when AUTO (or keyboard fallback).
     started, start_reason = _auto_relative_wait_for_auto(
@@ -5293,15 +5489,14 @@ def cmd_auto_relative_run(args: argparse.Namespace) -> int:
     field_config: dict[str, object] | None = None
     if plan_dir_used:
         plan_dir = Path(args.plan_dir)
-        candidates = [plan_dir / "preview_summary.json", plan_dir / "plan.json"]
-        plan_path = next((path for path in candidates if path.exists()), None)
-        if plan_path is None:
+        try:
+            plan = load_plan_dir_plan(plan_dir)
+        except (FileNotFoundError, ValueError) as exc:
             return _fail_with_summary(
                 args,
                 reason="PLAN_DIR_MISSING_PLAN",
-                message=f"--plan-dir must contain preview_summary.json or plan.json: {plan_dir}",
+                message=str(exc),
             )
-        plan = json.loads(plan_path.read_text())
         field_config_path = plan_dir / "field_config_resolved.json"
         if field_config_path.exists():
             loaded = json.loads(field_config_path.read_text())
@@ -5394,8 +5589,8 @@ def _add_goal_arguments(parser: argparse.ArgumentParser, *, require_start: bool 
     parser.add_argument("--goal-distance-m", type=float, default=None)
     parser.add_argument(
         "--path-shape",
-        choices=["diagonal_rectangle_serpentine", "direct_line"],
-        default="diagonal_rectangle_serpentine",
+        choices=sorted(geometry.PATH_SHAPE_ALIASES.keys()),
+        default=geometry.COVERAGE_LAWNMOWER,
     )
     parser.add_argument("--workspace-width-m", type=float, default=None)
     parser.add_argument("--step-spacing-m", type=float, default=0.5)
@@ -5423,7 +5618,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="mode",
         required=True,
-        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,set-motion-calibration,reset-motion-calibration,calibration-check,guarded-pulse-ready,calibrate-turn,preview,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
+        metavar="{diagnose,gps-wait,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,set-motion-calibration,reset-motion-calibration,calibration-check,guarded-pulse-ready,calibrate-turn,preview,inspect-plan,auto-relative-preview,align-heading,execute-plan,run,auto-relative-run}",
     )
 
     gps_p = sub.add_parser("gps-wait", help="wait for usable GPS start fix; no motion")
@@ -5755,6 +5950,14 @@ def build_parser() -> argparse.ArgumentParser:
     cal_check_p.add_argument("--plan-dir", default=None)
     cal_check_p.add_argument("--out-dir", default="outputs/physical_path_planning/calibration_check")
     cal_check_p.set_defaults(handler=cmd_calibration_check)
+
+    inspect_p = sub.add_parser(
+        "inspect-plan",
+        help="inspect saved plan shape, segments, and preview images; no motion",
+    )
+    inspect_p.add_argument("--plan-dir", required=True)
+    inspect_p.add_argument("--out-dir", default=None)
+    inspect_p.set_defaults(handler=cmd_inspect_plan)
 
     def add_guarded_pulse_ready_parser(name: str) -> None:
         guarded_p = sub.add_parser(

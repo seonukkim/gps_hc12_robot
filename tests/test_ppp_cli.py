@@ -1214,7 +1214,7 @@ def test_preview_writes_guarded_summary(tmp_path: Path) -> None:
     assert data["ready_for_full_path_following"] is False
     assert data["segment_count"] >= 1
     assert data["lane_count"] >= 1
-    assert data["path_shape"] == "diagonal_rectangle_serpentine"
+    assert data["path_shape"] == "coverage_lawnmower"
     summary = _assert_standard_summary(tmp_path)
     assert summary["mode"] == "preview"
 

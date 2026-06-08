@@ -79,7 +79,7 @@ def test_preview_summary_includes_resolved_field_config(tmp_path: Path) -> None:
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["field_config"]["start_lat"] == 35.5709
     assert summary["field_config"]["workspace_width_m"] == 1.2
-    assert summary["field_config"]["path_shape"] == "diagonal_rectangle_serpentine"
+    assert summary["field_config"]["path_shape"] == "coverage_lawnmower"
 
 
 def test_execute_plan_loads_field_config_from_plan_dir(tmp_path: Path) -> None:

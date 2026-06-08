@@ -101,13 +101,26 @@ Field modes:
 - `tune-motion` — interactive visual/IMU-assisted motion calibration.
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
-- `preview` — build + render a rectangle coverage plan without motor output.
+- `preview` — build + render a ㄹ/lawnmower coverage plan without motor output.
+- `inspect-plan` — inspect saved plan artifacts and verify preview images.
 - `execute-plan` / `run` — supervised guarded pulse execution.
 
-`start` (A) and `goal` (B) are **opposite corners of a rectangle's diagonal**, not a
-straight line; `--workspace-width-m` is the short side and must be shorter than the
-diagonal. Use `--path-shape direct_line` only for an explicitly requested straight
-A→B plan.
+The default plan shape is `coverage_lawnmower`: a local-ENU ㄹ/lawnmower sweep
+with alternating straight lanes and explicit connector turns. For
+`--goal-mode relative_enu`, A is local `(0,0)` and B is
+`(goal_east_m, goal_north_m)`; the planner sweeps the rectangle using
+`--workspace-width-m` and `--step-spacing-m` instead of collapsing to a direct
+A→B diagonal. Use `--path-shape diagonal_rectangle_serpentine` only when the A-B
+diagonal frame is intentionally requested, and `--path-shape direct_line` only
+for an explicitly requested straight A→B plan.
+
+Every preview/run plan writes `field_config_resolved.json`,
+`planned_segments.csv`, `planned_segments.json`,
+`preview_current_goal_rectangle_path.png`, and `preview_overview.png`. If either
+preview image cannot be written, preview fails with
+`reason=PREVIEW_IMAGE_NOT_WRITTEN`. Use `inspect-plan` to confirm the saved
+shape, lane/connector counts, first planned segments, and image existence before
+execution.
 
 If preview/run start coordinates are omitted, the planner waits for live GPS and
 can fall back to a fresh cached GPS coordinate. If GPS is still unavailable, the

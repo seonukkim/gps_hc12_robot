@@ -789,7 +789,7 @@ def _segment_pulse_budget(
     right_fixed_pulses: int,
 ) -> tuple[int, bool, str]:
     """Return (pulse_budget, is_connector, direction) for a planned segment."""
-    if str(segment["segment_type"]) == "connector_turn":
+    if str(segment["segment_type"]) in {"connector_turn", "path_connector"}:
         direction = "left" if str(segment["expected_motion_direction"]) == "turn_left" else "right"
         if str(resolved_calibration.get("connector_mode_effective")) == "repeated_pulses":
             budget = int(left_fixed_pulses if direction == "left" else right_fixed_pulses)
@@ -1590,7 +1590,7 @@ def run_stop_correct_go(
     dead_reckon_advance_m = max(0.01, 0.30 * (float(move_chunk_ms) / 700.0))
 
     for segment in segments:
-        is_connector = str(segment["segment_type"]) == "connector_turn"
+        is_connector = str(segment["segment_type"]) in {"connector_turn", "path_connector"}
         target_heading = float(segment["target_heading_deg"])
         length_m = float(segment.get("length_m", 0.0))
 

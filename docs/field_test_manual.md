@@ -277,21 +277,25 @@ for comparison and does not steer.
      --out-dir outputs/physical_path_planning/gps_wait_5m
    ```
 
-2. Preview a 5 m relative path (writes the fully resolved field config):
+2. Preview a 5 m ㄹ/lawnmower coverage path (writes the fully resolved field config
+   and mandatory preview images):
 
    ```bash
    bash scripts/run_physical_path_planner.sh preview \
      --goal-mode relative_enu --goal-east-m 5.0 --goal-north-m 0.0 \
      --workspace-width-m 1.5 --step-spacing-m 0.30 \
-     --path-shape diagonal_rectangle_serpentine --print-field-config true \
+     --path-shape coverage_lawnmower --print-field-config true \
      --out-dir outputs/physical_path_planning/preview_5m_relative_enu
    ```
 
-3. Confirm the resolved field config (A is local `(0,0)`, B is `(5.0, 0.0)`):
+3. Confirm the resolved field config and preview image artifacts (A is local
+   `(0,0)`, B is `(5.0, 0.0)`, and the plan alternates lane/connector segments):
 
    ```bash
    cat outputs/physical_path_planning/preview_5m_relative_enu/field_config_resolved.json
    cat outputs/physical_path_planning/preview_5m_relative_enu/summary.md
+   bash scripts/run_physical_path_planner.sh inspect-plan \
+     --plan-dir outputs/physical_path_planning/preview_5m_relative_enu
    ```
 
 4. Execute with real closed-loop correction:
@@ -367,7 +371,7 @@ Wait for AUTO, then run closed-loop:
 bash scripts/run_physical_path_planner.sh auto-relative-run \
   --goal-east-m 3.0 --goal-north-m 4.0 \
   --workspace-width-m 1.5 --step-spacing-m 0.30 \
-  --path-shape diagonal_rectangle_serpentine \
+  --path-shape coverage_lawnmower \
   --path-control-mode gps_imu_closed_loop \
   --live-chunk-ms 700 --max-segment-chunks 30 \
   --gps-degradation-policy continue --gps-reanchor true \
@@ -495,13 +499,14 @@ an aligned closed-loop run:
      --out-dir outputs/physical_path_planning/gps_wait_3x4m
    ```
 
-3. Preview the 3 m east / 4 m north diagonal (writes the resolved field config):
+3. Preview the 3 m east / 4 m north ㄹ coverage field (writes the resolved field
+   config and preview images):
 
    ```bash
    bash scripts/run_physical_path_planner.sh preview \
      --goal-mode relative_enu --goal-east-m 3.0 --goal-north-m 4.0 \
      --workspace-width-m 1.5 --step-spacing-m 0.30 \
-     --path-shape diagonal_rectangle_serpentine --print-field-config true \
+     --path-shape coverage_lawnmower --print-field-config true \
      --out-dir outputs/physical_path_planning/preview_3x4m
    ```
 
