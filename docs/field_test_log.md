@@ -69,7 +69,7 @@ Next action:
 Firmware marker:
 
 ```text
-openrb_robot_controller station-manual rc-cardinal-remap 2026-05-26
+openrb_robot_controller station-hw-manual rc-cardinal-remap 2026-05-26
 ```
 
 Station command:

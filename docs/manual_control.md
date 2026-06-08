@@ -41,7 +41,7 @@ After flashing the expected integrated firmware, the OpenRB USB serial output
 should include:
 
 ```text
-Firmware: openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05-30
+Firmware: openrb_robot_controller station-hw-manual rc-arcade-manual-fwdneg 2026-05-30
 ```
 
 If USB serial prints older lines such as `STAT,...,MANUAL_CENTER_STOP,...`, the
@@ -378,14 +378,14 @@ MANUAL,steer,throttle,deadman,estop
 Rules:
 
 - `steer` and `throttle` are normalized `-1.0..1.0`.
-- `deadman=1` is required for station manual drive.
+- `deadman=1` is required for station-hw-manual.
 - `estop=1` forces stop.
-- Rover station-manual frames must be fresh within `STATION_TIMEOUT_MS = 500`.
-- First station manual tests are capped by the station tool at `--max-speed 0.25`.
-- Rover-side station manual output is also capped by
+- Rover station-hw-manual frames must be fresh within `STATION_TIMEOUT_MS = 500`.
+- First station-hw-manual tests are capped by the station tool at `--max-speed 0.25`.
+- Rover-side station-hw-manual output is also capped by
   `STATION_MANUAL_MAX_OUTPUT = 0.25f`.
 
-Station manual command mixing in firmware uses the same differential formula:
+Station-drive command mixing in firmware uses the same differential formula:
 
 ```cpp
 left = stationManual.throttle - stationManual.steer;

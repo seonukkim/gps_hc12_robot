@@ -1,24 +1,27 @@
-"""Unified physical-path-planning CLI: one entrypoint, five modes.
+"""Unified physical-path-planning CLI: one field-facing entrypoint.
 
-    preview         build the A->B serpentine (or direct) plan and render it -- no
-                    serial, no firmware, no motion. Works even with NO calibration.
-    calibrate-turn  shell out to scripts/run_stage20_physical_ab_probe.sh with
-                    --imu-angle-compare true (that script compiles the BMI160 yaw
-                    flags and uploads); this CLI never opens serial for it.
-    execute-plan /  run the continuous-motion controller over a planned path
-    run             (opens serial + drives guarded pulses when invoked at the field).
-    diagnose        read-only telemetry summary, from a live port or --from-log FILE.
+    diagnose              read-only telemetry summary.
+    manual-rc             restore and validate manual RC passthrough.
+    guarded-pulse-ready   upload/check IMU-enabled guarded pulse firmware.
+    station-hw-diagnose  read-only physical station hardware link diagnostic.
+    station-hw-manual    physical station hardware manual rover control.
+    usb-pulse-test       laptop USB bounded A/B rover pulse test.
+    calibrate-turn        run guarded pulse turn-angle calibration.
+    preview               build + render the rectangle coverage plan.
+    execute-plan / run    execute a planned path with guarded pulses.
 
 Every summary is routed through ``checks.assert_not_ready_for_full_path_following``
 so no mode can ever claim full-path-following readiness. The hardware modes open
-serial only when actually invoked; ``--print-plan`` / ``--print-cmd`` / ``--from-log``
-give fully no-hardware paths for previewing exactly what would run.
+serial only when actually invoked; ``--print-plan`` / ``--print-cmd`` /
+``--from-log`` give fully no-hardware paths for previewing exactly what would run.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -26,17 +29,447 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from tools.physical_path_planning import calibration, checks, controller, preview, telemetry
+from tools.physical_path_planning import calibration, checks, controller, executor, preview, safety, telemetry
 
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
-DEFAULT_STAGE20_SCRIPT = "scripts/run_stage20_physical_ab_probe.sh"
+DEFAULT_GUARDED_PULSE_CALIBRATION_SCRIPT = "scripts/run_stage20_physical_ab_probe.sh"
+DEFAULT_MANUAL_RC_UPLOAD_SCRIPT = "scripts/upload_manual_rc_recovery_firmware.sh"
+DEFAULT_MANUAL_RC_VALIDATE_SCRIPT = "scripts/run_manual_rc_passthrough_validation.sh"
+DEFAULT_RC_INPUT_DIAGNOSE_SKETCH = "firmware/ppm_channel_map_probe"
 DEFAULT_TURN_CALIBRATION_OUT = (
     "outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json"
 )
+RC_INPUT_ABSENT_ACTION = (
+    "Check RC receiver power; check receiver signal wire to OpenRB RC input; "
+    "check whether receiver output mode is PPM/SBUS/PWM and firmware input mode matches; "
+    "check mode channel index / channel mapping; check transmitter-receiver binding; "
+    "if using individual PWM channels instead of PPM, firmware must read the correct pins; "
+    "then run manual-rc --diagnose-only true after changing wiring or binding."
+)
+USB_PULSE_TEST_SEQUENCE = (
+    {"primitive": "forward", "a": calibration.DEFAULT_FORWARD_A_CMD, "b": 0.0, "ms": calibration.DEFAULT_FORWARD_MS},
+    {"primitive": "backward", "a": calibration.DEFAULT_BACKWARD_A_CMD, "b": 0.0, "ms": calibration.DEFAULT_BACKWARD_MS},
+    {"primitive": "left", "a": 0.0, "b": calibration.DEFAULT_TURN_LEFT_B_CMD, "ms": calibration.DEFAULT_TURN_LEFT_MS},
+    {"primitive": "right", "a": 0.0, "b": calibration.DEFAULT_TURN_RIGHT_B_CMD, "ms": calibration.DEFAULT_TURN_RIGHT_MS},
+)
+USB_PULSE_TEST_ALIASES = {
+    "forward": "forward",
+    "backward": "backward",
+    "left": "left",
+    "right": "right",
+    "turn_left": "left",
+    "turn_right": "right",
+}
 
 
 # --- Pure, no-hardware helpers (directly unit-testable) -----------------------
+
+
+def stage20_imu_flags(*, max_abs_a: float = 0.35, max_abs_b: float = 0.35, max_ms: int = 1500) -> str:
+    return (
+        "-DSTAGE20_PHYSICAL_AB_GUARDED_CRAWL=1 "
+        f"-DSTAGE20_MAX_ABS_A={max_abs_a} "
+        f"-DSTAGE20_MAX_ABS_B={max_abs_b} "
+        f"-DSTAGE20_MAX_MS={max_ms} "
+        "-DIMU_ENABLE=1 "
+        "-DIMU_YAW_DIAG=1 "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+
+
+def guarded_pulse_firmware_flags(
+    *,
+    max_abs_a: float = 0.35,
+    max_abs_b: float = 0.35,
+    max_ms: int = 1500,
+    ignore_rc_input_for_usb_command: bool = False,
+) -> str:
+    flags = stage20_imu_flags(max_abs_a=max_abs_a, max_abs_b=max_abs_b, max_ms=max_ms)
+    if ignore_rc_input_for_usb_command:
+        flags += " -DSTATION_MANUAL_IGNORE_RC_INPUT=1"
+    return flags
+
+
+def usb_pulse_test_firmware_flags(
+    *,
+    max_abs_a: float = 0.35,
+    max_abs_b: float = 0.35,
+    max_ms: int = 1000,
+) -> str:
+    return (
+        "-DUSB_PULSE_TEST_GUARDED=1 "
+        "-DUSB_PULSE_TEST_IGNORE_RC_INPUT=1 "
+        f"-DUSB_PULSE_TEST_MAX_ABS_A={max_abs_a} "
+        f"-DUSB_PULSE_TEST_MAX_ABS_B={max_abs_b} "
+        f"-DUSB_PULSE_TEST_MAX_MS={max_ms} "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+
+
+def station_hw_manual_firmware_flags() -> str:
+    return (
+        "-DSTATION_HW_MANUAL_ENABLE=1 "
+        "-DSTATION_HW_MANUAL_A_B_MAPPING=1 "
+        "-DSTATION_HW_MANUAL_IGNORE_RC_INPUT=1 "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=1 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+
+
+def station_hw_diagnose_firmware_flags() -> str:
+    return station_hw_manual_firmware_flags() + " -DSTATION_HW_MANUAL_DIAGNOSE_ONLY=1"
+
+
+def manual_rc_recovery_flags(*, mode_channel_index: int | None = None) -> str:
+    flags = (
+        "-DMANUAL_RC_RECOVERY=1 "
+        "-DMANUAL_FORWARD_SIGN=-1 "
+        "-DMANUAL_TURN_SIGN=1 "
+        "-DMOTOR_OUTPUT_SWAP_LR=0 "
+        "-DDRIVE_CALIBRATION_ENABLE=0 "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+        "-DSTAGE20_PHYSICAL_AB_GUARDED_CRAWL=0 "
+        "-DSTAGE16_USB_GUARDED_CRAWL=0 "
+        "-DSTAGE17_FIRST_PRIMITIVE_CRAWL=0 "
+        "-DSTAGE18_MOTOR_MAPPING_PROBE=0 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+    if mode_channel_index is not None:
+        flags += f" -DMODE_CHANNEL_INDEX={mode_channel_index}"
+    return flags
+
+
+def evaluate_rc_input_diagnose_rows(rows: Sequence[dict[str, str]]) -> dict[str, object]:
+    frame_counts = [int(float(row.get("frames", "0") or 0)) for row in rows if "frames" in row]
+    invalid_counts = [int(float(row.get("invalid_frames", "0") or 0)) for row in rows if "invalid_frames" in row]
+    total_frames = sum(frame_counts)
+    total_invalid = sum(invalid_counts)
+    ppm_header_seen = any("ppm_pin" in row or "channel_count" in row for row in rows)
+    event_frames = [
+        row for row in rows
+        if any(f"ch{i}_us" in row for i in range(1, 9))
+    ]
+    nonzero_channels = [
+        (key, value)
+        for row in rows
+        for key, value in row.items()
+        if key.startswith("ch") and key.endswith("_us")
+        if telemetry._optional_float(value) is not None and abs(float(value)) > 1e-3
+    ]
+    any_ppm_signal = total_frames > 0 or bool(nonzero_channels)
+    valid_ppm_signal = any_ppm_signal and total_invalid < max(1, total_frames)
+    if not rows:
+        reason = "SERIAL_ERROR"
+    elif not any_ppm_signal:
+        reason = "RC_INPUT_ABSENT"
+    elif not valid_ppm_signal:
+        reason = "RC_CHANNELS_PRESENT_BUT_INVALID"
+    else:
+        reason = "RC_CHANNELS_PRESENT_AND_VALID"
+    signal_class = "RC_INPUT_PRESENT_PPM" if any_ppm_signal else "RC_INPUT_ABSENT"
+    next_action = {
+        "SERIAL_ERROR": "Check USB serial connection and rerun rc-input-diagnose.",
+        "RC_INPUT_ABSENT": RC_INPUT_ABSENT_ACTION,
+        "RC_CHANNELS_PRESENT_BUT_INVALID": (
+            "PPM frames were seen but invalid or incomplete; check receiver output mode, "
+            "signal wiring, and whether the receiver is configured for PPM on the OpenRB input pin."
+        ),
+        "RC_CHANNELS_PRESENT_AND_VALID": (
+            "RC input frames are present. Run manual-rc and verify MANUAL mode stick passthrough."
+        ),
+    }.get(reason, "Inspect RC input telemetry.")
+    return {
+        "mode": "rc-input-diagnose",
+        "success": reason == "RC_CHANNELS_PRESENT_AND_VALID",
+        "reason": reason,
+        "rc_input_classification": reason,
+        "rc_input_signal_class": signal_class,
+        "rc_input_detected": any_ppm_signal,
+        "rc_input_present_ppm": any_ppm_signal,
+        "rc_input_present_pwm": False,
+        "rc_input_present_sbus": False,
+        "ppm_header_seen": ppm_header_seen,
+        "ppm_event_row_count": len(event_frames),
+        "ppm_total_frames": total_frames,
+        "ppm_invalid_frames": total_invalid,
+        "raw_channel_nonzero_seen": bool(nonzero_channels),
+        "next_recommended_action": next_action,
+        "ready_for_full_path_following": False,
+    }
+
+
+def _station_value_present(value: object) -> bool:
+    text = str(value or "").strip().upper()
+    return text not in {"", "NA", "NAN", "NONE", "NULL"}
+
+
+def _station_hw_link_row(row: dict[str, str]) -> bool:
+    if telemetry._parse_bool(row.get("station_link_seen")) is True:
+        return True
+    if _station_value_present(row.get("station_seq")) or _station_value_present(row.get("station_age_ms")):
+        return True
+    rx_count = telemetry._optional_float(row.get("hc12_rx_count"))
+    return rx_count is not None and rx_count > 0
+
+
+def _station_hw_float_seen(rows: Sequence[dict[str, str]], *keys: str) -> bool:
+    for row in rows:
+        for key in keys:
+            value = telemetry._optional_float(row.get(key))
+            if value is not None and abs(value) > 1e-6:
+                return True
+    return False
+
+
+def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> dict[str, object]:
+    link_rows = [row for row in rows if _station_hw_link_row(row)]
+    manual_valid_rows = [row for row in rows if telemetry._parse_bool(row.get("station_manual_valid")) is True]
+    deadman_rows = [row for row in rows if telemetry._parse_bool(row.get("station_deadman")) is True]
+    estop_rows = [row for row in rows if telemetry._parse_bool(row.get("station_estop")) is True]
+    motor_rows = [
+        row for row in rows
+        if telemetry._parse_bool(row.get("motor_write_called")) is True
+        or telemetry.physical_output_active(row)
+        or abs(telemetry._optional_float(row.get("final_left_cmd")) or 0.0) > 1e-6
+        or abs(telemetry._optional_float(row.get("final_right_cmd")) or 0.0) > 1e-6
+    ]
+    parse_ok_count = sum(
+        1 for row in rows
+        if telemetry._parse_bool(row.get("station_parse_ok")) is True
+        or telemetry._parse_bool(row.get("station_manual_valid")) is True
+    )
+    parse_error_count = sum(
+        1 for row in rows
+        if telemetry._parse_bool(row.get("station_parse_error")) is True
+    )
+    last = link_rows[-1] if link_rows else (rows[-1] if rows else {})
+    station_frame_count = max(
+        len(link_rows),
+        int(telemetry._optional_float(last.get("station_frame_count")) or 0),
+        int(telemetry._optional_float(last.get("hc12_rx_count")) or 0),
+    )
+    station_link_seen = station_frame_count > 0
+    station_physical_a_nonzero_seen = _station_hw_float_seen(
+        rows, "station_physical_a_cmd", "station_a_cmd", "station_forward_cmd"
+    )
+    station_physical_b_nonzero_seen = _station_hw_float_seen(
+        rows, "station_physical_b_cmd", "station_b_cmd", "station_turn_cmd"
+    )
+    if not station_link_seen:
+        reason = "STATION_HW_LINK_ABSENT"
+        success = False
+        next_action = "Check station hardware power, HC-12 station link wiring, baud rate, and whether the rover firmware has station hardware manual mode enabled."
+    elif estop_rows:
+        reason = "STATION_HW_ESTOP_ACTIVE"
+        success = False
+        next_action = "Release station hardware emergency stop and rerun station-hw-diagnose."
+    elif link_rows and not manual_valid_rows:
+        reason = "STATION_HW_FRAMES_PRESENT_PARSE_FAIL"
+        success = False
+        next_action = "Station frames are arriving but not valid; check frame format, checksum, and station firmware protocol."
+    elif not deadman_rows:
+        reason = "STATION_HW_DEADMAN_NOT_ACTIVE"
+        success = False
+        next_action = "Hold the station hardware deadman control while moving the station input."
+    elif motor_rows:
+        reason = "STATION_HW_MANUAL_PASS"
+        success = True
+        next_action = "Station hardware manual control is passing; continue only with bounded supervised tests."
+    elif station_physical_a_nonzero_seen or station_physical_b_nonzero_seen:
+        reason = "STATION_HW_MANUAL_READY"
+        success = mode == "station-hw-diagnose"
+        next_action = "Station hardware commands are valid. Run station-hw-manual to verify motor output if needed."
+    else:
+        reason = "STATION_HW_MANUAL_VALID"
+        success = mode == "station-hw-diagnose"
+        next_action = "Station frames are valid. Move the station hardware input while holding deadman to verify A/B commands."
+    return checks.assert_not_ready_for_full_path_following({
+        "mode": mode,
+        "success": success,
+        "reason": reason,
+        "station_hw_result": reason,
+        "station_link_seen": station_link_seen,
+        "station_frame_count": station_frame_count,
+        "station_parse_ok_count": parse_ok_count,
+        "station_parse_error_count": parse_error_count,
+        "station_last_frame_age_ms": last.get("station_age_ms", "NA"),
+        "station_seq": last.get("station_seq", "NA"),
+        "station_manual_valid": bool(manual_valid_rows),
+        "station_manual_valid_seen": bool(manual_valid_rows),
+        "station_deadman": bool(deadman_rows),
+        "station_deadman_seen": bool(deadman_rows),
+        "station_estop": bool(estop_rows),
+        "station_estop_seen": bool(estop_rows),
+        "station_a_cmd": last.get("station_a_cmd", last.get("station_physical_a_cmd", "NA")),
+        "station_b_cmd": last.get("station_b_cmd", last.get("station_physical_b_cmd", "NA")),
+        "station_forward_cmd": last.get("station_forward_cmd", "NA"),
+        "station_turn_cmd": last.get("station_turn_cmd", "NA"),
+        "station_physical_a_cmd": last.get("station_physical_a_cmd", "NA"),
+        "station_physical_b_cmd": last.get("station_physical_b_cmd", "NA"),
+        "station_physical_a_nonzero_seen": station_physical_a_nonzero_seen,
+        "station_physical_b_nonzero_seen": station_physical_b_nonzero_seen,
+        "active_control_source_candidate": "STATION_HW_MANUAL" if bool(manual_valid_rows) else "STOP",
+        "hc12_rx_count": last.get("hc12_rx_count", station_frame_count),
+        "hc12_tx_count": last.get("hc12_tx_count", "NA"),
+        "hc12_last_rx_age_ms": last.get("hc12_last_rx_age_ms", "NA"),
+        "motor_write_called_seen": any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in rows),
+        "physical_output_active_seen": any(telemetry.physical_output_active(row) for row in rows),
+        "final_motor_nonzero_seen": any(
+            abs(telemetry._optional_float(row.get("final_left_cmd")) or 0.0) > 1e-6
+            or abs(telemetry._optional_float(row.get("final_right_cmd")) or 0.0) > 1e-6
+            for row in rows
+        ),
+        "rc_input_required": False,
+        "gps_required": False,
+        "imu_required": False,
+        "physical_a_role": "throttle",
+        "physical_b_role": "turn",
+        "wheel_to_physical_mapping": "physical_ab_manual_equivalent",
+        "next_recommended_action": next_action,
+        "ready_for_full_path_following": False,
+    })
+
+
+def arduino_cli_openrb_port() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["arduino-cli", "board", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in completed.stdout.splitlines():
+        if "OpenRB-150" in line:
+            parts = line.split()
+            return parts[0] if parts else None
+    return None
+
+
+def detected_serial_ports() -> list[str]:
+    parent = Path("/dev")
+    if not parent.exists():
+        return []
+    patterns = (
+        "cu.usbmodem*",
+        "tty.usbmodem*",
+        "ttyACM*",
+        "ttyUSB*",
+        "cu.usbserial*",
+        "tty.usbserial*",
+    )
+    ports: list[str] = []
+    for pattern in patterns:
+        ports.extend(str(path) for path in parent.glob(pattern))
+    return sorted(set(ports))
+
+
+def resolve_port(
+    explicit_port: str | None,
+    *,
+    env: dict[str, str] | None = None,
+    system_name: str | None = None,
+) -> dict[str, object]:
+    env = os.environ if env is None else env
+    system_name = platform.system() if system_name is None else system_name
+    if explicit_port:
+        return {"port": explicit_port, "source": "explicit"}
+    env_port = env.get("PORT", "")
+    if env_port:
+        return {"port": env_port, "source": "env"}
+    detected = arduino_cli_openrb_port()
+    if detected:
+        return {"port": detected, "source": "arduino_cli"}
+    if system_name == "Linux" and Path(DEFAULT_PORT).exists():
+        return {"port": DEFAULT_PORT, "source": "linux_default"}
+    return {"port": None, "source": "none"}
+
+
+def write_summary_files(out_dir: str | Path, summary: dict[str, object], *, title: str) -> dict[str, object]:
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    normalized = dict(summary)
+    normalized.setdefault("success", normalized.get("reason") == "OK")
+    normalized["ready_for_full_path_following"] = False
+    normalized = checks.assert_not_ready_for_full_path_following(normalized)
+    _write_json(path / "summary.json", normalized)
+    lines = [f"# {title}", ""]
+    lines.extend(f"- {key}: `{value}`" for key, value in normalized.items())
+    (path / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return normalized
+
+
+def write_failure_summary(
+    out_dir: str | Path | None,
+    *,
+    reason: str,
+    attempted_port: str | None = None,
+    mode: str | None = None,
+    next_recommended_action: str = "Check the requested serial port or connect OpenRB-150 and retry.",
+) -> None:
+    if out_dir is None:
+        return
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "mode": mode or "unknown",
+        "reason": reason,
+        "success": False,
+        "attempted_port": attempted_port,
+        "detected_ports": detected_serial_ports(),
+        "next_recommended_action": next_recommended_action,
+        "ready_for_full_path_following": False,
+    }
+    write_summary_files(path, payload, title="Physical Path Planner")
+
+
+def ensure_port(args: argparse.Namespace) -> bool:
+    if getattr(args, "from_log", None):
+        return True
+    resolved = resolve_port(getattr(args, "port", None))
+    args.port = resolved["port"]
+    args.port_source = resolved["source"]
+    if args.port is None or not Path(str(args.port)).exists():
+        write_failure_summary(
+            getattr(args, "out_dir", None),
+            reason="SERIAL_PORT_NOT_FOUND",
+            attempted_port=None if args.port is None else str(args.port),
+            mode=getattr(args, "mode", None),
+        )
+        print(f"reason=SERIAL_PORT_NOT_FOUND attempted_port={args.port} detected_ports={detected_serial_ports()}")
+        print("ready_for_full_path_following=false")
+        return False
+    print(f"resolved_port={args.port}")
+    print(f"port_source={args.port_source}")
+    return True
+
+
+def printable_port(explicit_port: str | None) -> str:
+    if explicit_port:
+        return explicit_port
+    resolved = resolve_port(None)
+    return str(resolved["port"] or "$PORT")
 
 
 def build_calibrate_turn_argv(
@@ -49,20 +482,27 @@ def build_calibrate_turn_argv(
     save_turn_calibration: str,
     turn_calibration_out: str,
     out_dir: str,
+    b_cmd: float | None = None,
+    pulse_ms: int | None = None,
+    max_abs_b: float = 0.35,
+    max_ms: int = 1500,
 ) -> list[str]:
-    """Build the argv that shells out to the Stage20 probe for turn-angle calibration.
+    """Build the argv that shells out to guarded pulse calibration.
 
     Always passes ``--imu-angle-compare true`` -- that is what makes the launcher
-    append ``-DIMU_ENABLE=1 -DIMU_YAW_DIAG=1`` and measure before/after yaw. This
-    CLI delegates the firmware compile/upload entirely to that script.
+    append ``-DIMU_ENABLE=1 -DIMU_YAW_DIAG=1`` and measure before/after yaw.
     """
-    return [
+    argv = [
         "bash",
         str(script),
         "--port",
         str(port),
         "--mode",
         str(mode),
+        "--max-abs-b",
+        str(max_abs_b),
+        "--max-ms",
+        str(max_ms),
         "--imu-angle-compare",
         "true",
         "--target-angle-deg",
@@ -76,6 +516,11 @@ def build_calibrate_turn_argv(
         "--out-dir",
         str(out_dir),
     ]
+    if b_cmd is not None:
+        argv.extend(["--cmd-list", str(abs(b_cmd))])
+    if pulse_ms is not None:
+        argv.extend(["--pulse-ms-list", str(pulse_ms)])
+    return argv
 
 
 def resolve_calibration(args: argparse.Namespace) -> dict[str, object]:
@@ -149,11 +594,11 @@ def diagnose_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
         name = telemetry.event(row) or "NONE"
         event_counts[name] = event_counts.get(name, 0) + 1
     summary: dict[str, object] = {
-        "stage": "diagnose",
+        "mode": "diagnose",
         "row_count": len(rows),
         "heartbeat_count": len(heartbeats),
         "event_counts": event_counts,
-        "stage20_compatible": controller.stage20_compatible(last) if last else False,
+        "guarded_pulse_compatible": controller.stage20_compatible(last) if last else False,
         "physical_output_active": telemetry.physical_output_active(last) if last else False,
         "last_gps_block_reason": telemetry.gps_block_reason(last) if last else "NA",
         "last_gps_sats": telemetry._fmt(telemetry.gps_sats(last)) if last else "NA",
@@ -164,6 +609,57 @@ def diagnose_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
         "ready_for_full_path_following": False,
     }
     return checks.assert_not_ready_for_full_path_following(summary)
+
+
+def guarded_pulse_ready_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
+    heartbeats = [row for row in rows if telemetry.event(row) == "HEARTBEAT"]
+    last = heartbeats[-1] if heartbeats else {}
+    guarded_seen = any(row.get("stage20_physical_ab_guarded_crawl") == "true" for row in rows)
+    firmware_ready = any(row.get("stage20_firmware_ready") == "true" for row in rows)
+    imu_enabled = any(row.get("imu_enabled") == "true" for row in rows)
+    imu_present = any(row.get("imu_present") == "true" for row in rows)
+    imu_bmi160 = any(row.get("imu_type") == "BMI160" for row in rows)
+    yaw_seen = any(row.get("imu_relative_yaw_deg", "NA").upper() not in {"", "NA", "NAN", "NONE"} for row in rows)
+    rc_ok = any(row.get("rc_ok") == "true" for row in rows)
+    neutral_ok = any(row.get("neutral_ok") == "true" for row in rows)
+    ready = guarded_seen and firmware_ready and imu_enabled and imu_present and imu_bmi160 and yaw_seen and rc_ok and neutral_ok
+    reasons: list[str] = []
+    if not guarded_seen:
+        reasons.append("GUARDED_PULSE_HEARTBEAT_NOT_SEEN")
+    if not firmware_ready:
+        reasons.append("GUARDED_PULSE_READY_FALSE")
+    if not imu_enabled:
+        reasons.append("IMU_NOT_ENABLED")
+    if not imu_present:
+        reasons.append("IMU_NOT_PRESENT")
+    if not imu_bmi160:
+        reasons.append("BMI160_NOT_SEEN")
+    if not yaw_seen:
+        reasons.append("IMU_YAW_NOT_AVAILABLE")
+    if not rc_ok:
+        reasons.append("RC_NOT_OK")
+    if not neutral_ok:
+        reasons.append("NEUTRAL_NOT_OK")
+    return checks.assert_not_ready_for_full_path_following({
+        "mode": "guarded-pulse-ready",
+        "success": ready,
+        "guarded_pulse_ready": ready,
+        "guarded_pulse_heartbeat_seen": guarded_seen,
+        "turn_angle_calibration_ready": ready,
+        "imu_enabled": imu_enabled,
+        "imu_present": imu_present,
+        "imu_type": last.get("imu_type", "NA"),
+        "imu_relative_yaw_available": yaw_seen,
+        "rc_ok": rc_ok,
+        "neutral_ok": neutral_ok,
+        "reason": "OK" if ready else ",".join(reasons),
+        "next_recommended_action": (
+            "Guarded pulse firmware is ready for turn calibration or usb-pulse-test validation."
+            if ready else
+            "Upload/check IMU-enabled guarded pulse firmware and inspect heartbeat, IMU, RC, and neutral fields."
+        ),
+        "ready_for_full_path_following": False,
+    })
 
 
 # --- Output writers -----------------------------------------------------------
@@ -198,6 +694,24 @@ def _fail(message: str) -> int:
     return 2
 
 
+def _fail_with_summary(args: argparse.Namespace, *, reason: str, message: str) -> int:
+    out_dir = getattr(args, "out_dir", None)
+    if out_dir is not None:
+        write_summary_files(
+            out_dir,
+            {
+                "mode": getattr(args, "mode", "unknown"),
+                "success": False,
+                "reason": reason,
+                "message": message,
+                "next_recommended_action": "Fix the reported input or configuration and rerun the same command.",
+                "ready_for_full_path_following": False,
+            },
+            title="Physical Path Planner",
+        )
+    return _fail(message)
+
+
 # --- Mode handlers ------------------------------------------------------------
 
 
@@ -206,10 +720,19 @@ def cmd_preview(args: argparse.Namespace) -> int:
     try:
         plan = resolve_plan(args, cal)
     except ValueError as exc:
-        return _fail(str(exc))
+        return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(out_dir / "preview_summary.json", plan)
+    summary = {
+        **plan,
+        "mode": "preview",
+        "success": True,
+        "reason": "OK",
+        "next_recommended_action": f"Inspect {out_dir / 'summary.md'} and preview outputs before execute-plan or run.",
+        "ready_for_full_path_following": False,
+    }
+    _write_json(out_dir / "preview_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Physical Path Planner Preview")
     if args.png:
         png = preview.write_preview_png(
             out_dir / "preview.png",
@@ -230,10 +753,21 @@ def cmd_preview(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate_turn(args: argparse.Namespace) -> int:
+    if args.print_cmd:
+        args.port = printable_port(args.port)
+    if not args.print_cmd and not ensure_port(args):
+        return 2
+    mode = args.mode
+    if args.direction:
+        mode = "turn_left" if args.direction == "left" else "turn_right"
     argv = build_calibrate_turn_argv(
         script=args.script,
         port=args.port,
-        mode=args.mode,
+        mode=mode,
+        b_cmd=args.b_cmd,
+        pulse_ms=args.pulse_ms,
+        max_abs_b=args.max_abs_b,
+        max_ms=args.max_ms,
         target_angle_deg=args.target_angle_deg,
         angle_tolerance_deg=args.angle_tolerance_deg,
         save_turn_calibration=args.save_turn_calibration,
@@ -243,28 +777,1054 @@ def cmd_calibrate_turn(args: argparse.Namespace) -> int:
     printable = " ".join(shlex.quote(part) for part in argv)
     if args.print_cmd:
         print(printable)
+        write_summary_files(
+            args.out_dir,
+            {
+                "mode": "calibrate-turn",
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "command": printable,
+                "turn_angle_calibration_ready": False,
+                "next_recommended_action": "Run without --print-cmd only when ready to upload firmware and calibrate physically.",
+                "ready_for_full_path_following": False,
+            },
+            title="Turn Angle Calibration",
+        )
         return 0
     print(f"calibrate-turn: invoking {printable}")
     completed = subprocess.run(argv, check=False)
+    write_summary_files(
+        args.out_dir,
+        {
+            "mode": "calibrate-turn",
+            "success": completed.returncode == 0,
+            "reason": "OK" if completed.returncode == 0 else "TURN_CALIBRATION_FAILED",
+            "returncode": completed.returncode,
+            "command": printable,
+            "turn_angle_calibration_ready": completed.returncode == 0,
+            "next_recommended_action": (
+                "Inspect the calibration output summary and turn calibration JSON."
+                if completed.returncode == 0
+                else "Inspect raw logs, IMU yaw availability, ACK/STOP, and visual confirmation."
+            ),
+            "ready_for_full_path_following": False,
+        },
+        title="Turn Angle Calibration",
+    )
     return completed.returncode
+
+
+def cmd_manual_rc(args: argparse.Namespace) -> int:
+    if args.print_cmd:
+        args.port = printable_port(args.port)
+    if not args.print_cmd and not ensure_port(args):
+        return 2
+    if args.diagnose_only == "true" and args.upload == "true":
+        print("diagnose-only requested; skipping upload")
+        args.upload = "false"
+    upload_enabled = args.upload in {"true", "auto"}
+    validate_enabled = args.validate == "true"
+    upload_cmd = ["bash", args.upload_script, "--port", str(args.port)]
+    upload_cmd.extend(["--rc-input-mode", str(args.rc_input_mode)])
+    if args.mode_channel_index is not None:
+        upload_cmd.extend(["--mode-channel-index", str(args.mode_channel_index)])
+    upload_cmd.extend(["--steer-channel-index", str(args.steer_channel_index)])
+    upload_cmd.extend(["--throttle-channel-index", str(args.throttle_channel_index)])
+    validate_cmd = [
+        "bash",
+        args.validate_script,
+        "--port",
+        str(args.port),
+        "--duration-s",
+        str(args.duration_s),
+        "--out-dir",
+        str(args.out_dir),
+        "--upload",
+        "false",
+    ]
+    if args.log:
+        validate_cmd.extend(["--log", str(args.log)])
+    if args.diagnose_only == "true":
+        validate_cmd.extend(["--diagnose-only", "true"])
+    mapping_warning = "NONE"
+    if args.rc_input_mode not in {"auto", "old_known_good", "ppm"}:
+        mapping_warning = "RC_INPUT_MODE_FLAG_NOT_IMPLEMENTED"
+    elif args.steer_channel_index != 0 or args.throttle_channel_index != 1:
+        mapping_warning = "RC_STEER_THROTTLE_CHANNEL_FLAGS_NOT_IMPLEMENTED"
+    mapping_summary = {
+        "rc_input_mode_requested": args.rc_input_mode,
+        "rc_input_mode_effective": "ppm_old_known_good" if args.rc_input_mode in {"auto", "old_known_good", "ppm"} else "unsupported",
+        "mode_channel_index": args.mode_channel_index,
+        "steer_channel_index": args.steer_channel_index,
+        "throttle_channel_index": args.throttle_channel_index,
+        "old_known_good_rc_path": args.rc_input_mode in {"auto", "old_known_good", "ppm"},
+        "manual_forward_sign": -1,
+        "manual_turn_sign": 1,
+        "motor_output_swap_lr": 0,
+        "drive_calibration_enable": 0,
+        "manual_mode_threshold_us": args.manual_mode_threshold_us,
+        "rc_mapping_flags_effective": mapping_warning == "NONE",
+        "rc_mapping_warning": mapping_warning,
+    }
+    if args.print_cmd:
+        if upload_enabled:
+            print(" ".join(shlex.quote(part) for part in upload_cmd))
+        if validate_enabled:
+            print(" ".join(shlex.quote(part) for part in validate_cmd))
+        print("ready_for_full_path_following=false")
+        write_summary_files(
+            args.out_dir,
+            {
+                "mode": "manual-rc",
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "upload_success": False,
+                "validation_success": False,
+                **mapping_summary,
+                "next_recommended_action": "Run without --print-cmd when ready to upload or validate manual RC telemetry.",
+                "ready_for_full_path_following": False,
+            },
+            title="Manual RC Diagnostic",
+        )
+        return 0
+    print("Manual RC recovery")
+    print("RC transmitter ON; MANUAL / AUTO OFF")
+    print("Sequence: neutral 5s, slight forward, neutral, slight backward, neutral, slight left/right steering, neutral")
+    if args.print_rc_mapping == "true":
+        for key, value in mapping_summary.items():
+            print(f"{key}={value}")
+    print(f"manual_rc_recovery_flags={manual_rc_recovery_flags(mode_channel_index=args.mode_channel_index)}")
+    upload_success = False
+    if upload_enabled:
+        completed = subprocess.run(upload_cmd, check=False)
+        if completed.returncode != 0:
+            write_summary_files(
+                args.out_dir,
+                {
+                    "mode": "manual-rc",
+                    "success": False,
+                    "reason": "MANUAL_RC_UPLOAD_FAILED",
+                    "upload_success": False,
+                    "validation_success": False,
+                    "returncode": completed.returncode,
+                    **mapping_summary,
+                    "next_recommended_action": "Check Arduino CLI, OpenRB port, and compile/upload output.",
+                    "ready_for_full_path_following": False,
+                },
+                title="Manual RC Diagnostic",
+            )
+            return completed.returncode
+        upload_success = True
+    else:
+        upload_success = args.upload == "false"
+    if validate_enabled:
+        completed = subprocess.run(validate_cmd, check=False)
+        summary_path = Path(args.out_dir) / "summary.json"
+        validation_summary: dict[str, object]
+        if summary_path.exists():
+            loaded = json.loads(summary_path.read_text())
+            validation_summary = loaded if isinstance(loaded, dict) else {}
+        else:
+            validation_summary = {
+                "reason": "MANUAL_RC_VALIDATION_FAILED",
+                "manual_rc_passthrough_ok": False,
+                "validation_success": False,
+            }
+        merged = {
+            "mode": "manual-rc",
+            "success": completed.returncode == 0 and validation_summary.get("manual_rc_passthrough_ok") is True,
+            "upload_success": upload_success,
+            "validation_success": completed.returncode == 0 and validation_summary.get("manual_rc_passthrough_ok") is True,
+            **mapping_summary,
+            **validation_summary,
+            "ready_for_full_path_following": False,
+        }
+        merged.setdefault("reason", "OK" if merged["success"] else "MANUAL_RC_VALIDATION_FAILED")
+        if merged.get("reason") == "RC_INPUT_ABSENT":
+            merged["next_recommended_action"] = RC_INPUT_ABSENT_ACTION
+        merged.setdefault("next_recommended_action", "Inspect manual RC telemetry and wiring before rerunning.")
+        write_summary_files(args.out_dir, merged, title="Manual RC Diagnostic")
+        return 0 if merged["success"] is True else 2
+    write_summary_files(
+        args.out_dir,
+        {
+            "mode": "manual-rc",
+            "success": upload_success,
+            "reason": "OK" if upload_success else "NO_UPLOAD_OR_VALIDATION_REQUESTED",
+            "upload_success": upload_success,
+            "validation_success": False,
+            "manual_rc_passthrough_ok": False,
+            **mapping_summary,
+            "next_recommended_action": "Run manual-rc --upload false --validate true to diagnose receiver input.",
+            "ready_for_full_path_following": False,
+        },
+        title="Manual RC Diagnostic",
+    )
+    return 0 if upload_success else 2
+
+
+def cmd_rc_input_diagnose(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    compile_cmd = [
+        "arduino-cli",
+        "compile",
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        "/private/tmp/openrb-rc-input-diagnose",
+        args.sketch,
+    ]
+    upload_cmd = [
+        "arduino-cli",
+        "upload",
+        "-p",
+        printable_port(args.port),
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        "/private/tmp/openrb-rc-input-diagnose",
+        args.sketch,
+    ]
+    if args.print_cmd:
+        print(" ".join(shlex.quote(part) for part in compile_cmd))
+        print(" ".join(shlex.quote(part) for part in upload_cmd))
+        print("ready_for_full_path_following=false")
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "rc-input-diagnose",
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "probe": "ppm_channel_map_probe",
+                "motors_enabled": False,
+                "next_recommended_action": "Run without --print-cmd to upload/read the RC input diagnostic firmware.",
+                "ready_for_full_path_following": False,
+            },
+            title="RC Input Diagnose",
+        )
+        return 0
+    raw_lines: list[str] = []
+    if args.from_log:
+        raw_lines = Path(args.from_log).read_text(encoding="utf-8").splitlines()
+    else:
+        if not ensure_port(args):
+            return 2
+        if args.upload in {"true", "auto"}:
+            completed = subprocess.run(compile_cmd, check=False)
+            if completed.returncode != 0:
+                write_summary_files(
+                    out_dir,
+                    {
+                        "mode": "rc-input-diagnose",
+                        "success": False,
+                        "reason": "RC_INPUT_DIAGNOSE_COMPILE_FAILED",
+                        "returncode": completed.returncode,
+                        "next_recommended_action": "Inspect Arduino compile output for the read-only PPM probe.",
+                        "ready_for_full_path_following": False,
+                    },
+                    title="RC Input Diagnose",
+                )
+                return completed.returncode
+            completed = subprocess.run(upload_cmd, check=False)
+            if completed.returncode != 0:
+                write_summary_files(
+                    out_dir,
+                    {
+                        "mode": "rc-input-diagnose",
+                        "success": False,
+                        "reason": "RC_INPUT_DIAGNOSE_UPLOAD_FAILED",
+                        "returncode": completed.returncode,
+                        "next_recommended_action": "Check OpenRB port and upload mode, then retry rc-input-diagnose.",
+                        "ready_for_full_path_following": False,
+                    },
+                    title="RC Input Diagnose",
+                )
+                return completed.returncode
+        import serial
+
+        print("RC input diagnose: read-only PPM channel probe; motors/GPS/HC-12 disabled.")
+        deadline = time.monotonic() + args.duration_s
+        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+            while time.monotonic() < deadline:
+                raw = handle.readline()
+                if raw:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    print(line)
+                    raw_lines.append(line)
+    rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+    summary = evaluate_rc_input_diagnose_rows(rows)
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "rc_input_diagnose.csv", rows)
+    _write_json(out_dir / "rc_input_diagnose_summary.json", summary)
+    write_summary_files(out_dir, summary, title="RC Input Diagnose")
+    print(f"rc_input_classification={summary['rc_input_classification']}")
+    print("ready_for_full_path_following=false")
+    return 0 if summary["success"] is True else 2
+
+
+def cmd_guarded_pulse_ready(args: argparse.Namespace) -> int:
+    if getattr(args, "deprecated_alias", False):
+        print("Deprecated alias: use guarded-pulse-ready.")
+    if args.print_cmd:
+        args.port = printable_port(args.port)
+    if not args.print_cmd and not ensure_port(args):
+        return 2
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    flags = guarded_pulse_firmware_flags(max_abs_a=args.max_abs_a, max_abs_b=args.max_abs_b, max_ms=args.max_ms)
+    compile_cmd = [
+        "arduino-cli",
+        "compile",
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        "/private/tmp/openrb-guarded-pulse-ready",
+        "--build-property",
+        f"compiler.cpp.extra_flags={flags}",
+        "firmware/openrb_robot_controller",
+    ]
+    upload_cmd = [
+        "arduino-cli",
+        "upload",
+        "-p",
+        str(args.port),
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        "/private/tmp/openrb-guarded-pulse-ready",
+        "firmware/openrb_robot_controller",
+    ]
+    if args.print_cmd:
+        if args.upload in {"true", "auto"}:
+            print(" ".join(shlex.quote(part) for part in compile_cmd))
+            print(" ".join(shlex.quote(part) for part in upload_cmd))
+        print(f"guarded_pulse_flags={flags}")
+        print("ready_for_full_path_following=false")
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "guarded-pulse-ready",
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "guarded_pulse_ready": False,
+                "guarded_pulse_heartbeat_seen": False,
+                "turn_angle_calibration_ready": False,
+                "next_recommended_action": "Run without --print-cmd only when ready to upload/check guarded pulse firmware.",
+                "ready_for_full_path_following": False,
+            },
+            title="IMU-Enabled Guarded Pulse Firmware",
+        )
+        return 0
+    if args.upload in {"true", "auto"}:
+        completed = subprocess.run(compile_cmd, check=False)
+        if completed.returncode != 0:
+            return completed.returncode
+        completed = subprocess.run(upload_cmd, check=False)
+        if completed.returncode != 0:
+            return completed.returncode
+    import serial
+
+    raw_lines: list[str] = []
+    with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+        deadline = time.monotonic() + args.duration_s
+        while time.monotonic() < deadline:
+            raw = handle.readline()
+            if raw:
+                line = raw.decode("utf-8", errors="replace").strip()
+                print(line)
+                raw_lines.append(line)
+    rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+    summary = guarded_pulse_ready_summary(rows)
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "guarded_pulse_readiness.csv", rows)
+    _write_json(out_dir / "guarded_pulse_readiness_summary.json", summary)
+    write_summary_files(out_dir, summary, title="IMU-Enabled Guarded Pulse Firmware")
+    print(f"guarded_pulse_ready={str(summary['guarded_pulse_ready']).lower()}")
+    print("ready_for_full_path_following=false")
+    return 0 if summary["guarded_pulse_ready"] is True else 2
+
+
+def _station_drive_name(name: str) -> str:
+    normalized = USB_PULSE_TEST_ALIASES.get(name.strip().lower())
+    if normalized is None:
+        raise ValueError(f"unknown usb-pulse-test primitive: {name}")
+    return normalized
+
+
+def station_drive_plan(*, sequence: str | None = None, single: str | None = None) -> list[dict[str, object]]:
+    requested = [_station_drive_name(item["primitive"]) for item in USB_PULSE_TEST_SEQUENCE]
+    if sequence:
+        requested = [_station_drive_name(part) for part in sequence.split(",") if part.strip()]
+    if single:
+        requested = [_station_drive_name(single)]
+    by_name = {str(item["primitive"]): item for item in USB_PULSE_TEST_SEQUENCE}
+    planned: list[dict[str, object]] = []
+    for index, name in enumerate(requested, start=1):
+        primitive = by_name[name]
+        a_cmd = float(primitive["a"])
+        b_cmd = float(primitive["b"])
+        pulse_ms = int(primitive["ms"])
+        planned.append(
+            {
+                **primitive,
+                "seq": index,
+                "a_cmd": a_cmd,
+                "b_cmd": b_cmd,
+                "pulse_ms": pulse_ms,
+                "arm_command_text": f"USB_PULSE_TEST_ARM seq={index}",
+                "usb_pulse_test_command_text": (
+                    f"USB_PULSE_TEST_CMD seq={index} a={a_cmd:.3f} b={b_cmd:.3f} ms={pulse_ms}"
+                ),
+                "command_text": f"USB_PULSE_TEST_CMD seq={index} a={a_cmd:.3f} b={b_cmd:.3f} ms={pulse_ms}",
+                "stop_command_text": f"USB_PULSE_TEST_STOP seq={index}",
+            }
+        )
+    return planned
+
+
+def usb_pulse_test_plan(*, sequence: str | None = None, single: str | None = None) -> list[dict[str, object]]:
+    return station_drive_plan(sequence=sequence, single=single)
+
+
+def station_drive_display_block(item: dict[str, object]) -> str:
+    label = {
+        "forward": "FORWARD",
+        "backward": "BACKWARD",
+        "left": "LEFT",
+        "right": "RIGHT",
+    }.get(str(item["primitive"]), str(item["primitive"]).upper())
+    return f"{label}:\nA={float(item['a']):+0.3f} B={float(item['b']):+0.3f} ms={int(item['ms'])}"
+
+
+def station_drive_console_line(item: dict[str, object]) -> str:
+    return f"{str(item['primitive']).upper()}: A={float(item['a']):+0.2f} B={float(item['b']):+0.2f} {int(item['ms'])}ms"
+
+
+def station_drive_clean_plan(planned: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "primitive": item["primitive"],
+            "a_cmd": item["a"],
+            "b_cmd": item["b"],
+            "pulse_ms": item["ms"],
+        }
+        for item in planned
+    ]
+
+
+def station_drive_compatible(row: dict[str, str]) -> bool:
+    clean_ready = (
+        telemetry._parse_bool(row.get("usb_pulse_test_mode")) is True
+        and telemetry._parse_bool(row.get("usb_pulse_test_ready")) is True
+    )
+    return clean_ready or controller.stage20_compatible(row)
+
+
+def station_drive_event_counts(rows: Sequence[dict[str, object]]) -> dict[str, int]:
+    def count_bool(key: str) -> int:
+        return sum(1 for row in rows if row.get(key) is True)
+
+    return {
+        "command_sent_count": sum(1 for row in rows if row.get("command_sent") is True),
+        "ack_count": count_bool("ack_seen"),
+        "active_count": count_bool("active_seen"),
+        "stop_count": count_bool("stop_seen"),
+        "reject_count": count_bool("reject_seen"),
+        "rc_invalid_count": sum(1 for row in rows if row.get("reject_reason") == "RC_INVALID"),
+        "motor_write_called_count": count_bool("motor_write_called_seen"),
+        "physical_output_active_count": count_bool("physical_output_active_seen"),
+        "final_zero_count": count_bool("final_zero"),
+        "user_observed_motion_count": sum(
+            1 for row in rows if str(row.get("user_motion_report", "")).lower() in {"forward", "backward", "left", "right"}
+        ),
+    }
+
+
+def station_drive_classification(rows: Sequence[dict[str, object]], *, user_aborted: bool = False) -> tuple[str, str, str]:
+    counts = station_drive_event_counts(rows)
+    if any(row.get("wrong_firmware_manual_rc_recovery") is True for row in rows):
+        return (
+            "WRONG_FIRMWARE_MANUAL_RC_RECOVERY",
+            "WRONG_FIRMWARE_MANUAL_RC_RECOVERY",
+            "Upload usb-pulse-test firmware; manual-rc firmware reads receiver passthrough and is not usb-pulse-test.",
+        )
+    if counts["command_sent_count"] == 0:
+        return (
+            "WAITING_FOR_USER_ENTER",
+            "WAITING_FOR_USER_ENTER",
+            "No usb-pulse-test command was sent. Press Enter at a command prompt to run bounded USB pulses.",
+        )
+    if counts["reject_count"] > 0:
+        if counts["rc_invalid_count"] > 0:
+            return (
+                "BUG_USB_PULSE_TEST_STILL_REQUIRES_RC_INPUT",
+                "BUG_USB_PULSE_TEST_STILL_REQUIRES_RC_INPUT",
+                "usb-pulse-test must ignore absent RC input. Re-upload usb-pulse-test firmware and inspect reject telemetry.",
+            )
+        return (
+            "COMMAND_SENT_NO_ACK",
+            "COMMAND_SENT_NO_ACK",
+            "Inspect raw_usbdbg.log for the usb-pulse-test reject reason and command limits.",
+        )
+    if counts["ack_count"] < counts["command_sent_count"]:
+        return (
+            "COMMAND_SENT_NO_ACK",
+            "COMMAND_SENT_NO_ACK",
+            "Confirm usb-pulse-test firmware received the USB pulse command and emitted ACK.",
+        )
+    if counts["active_count"] < counts["command_sent_count"]:
+        return (
+            "COMMAND_ACKED_NO_ACTIVE",
+            "COMMAND_ACKED_NO_ACTIVE",
+            "ACK was seen but ACTIVE was missing; inspect firmware output gating.",
+        )
+    if counts["stop_count"] < counts["command_sent_count"]:
+        return (
+            "COMMAND_ACTIVE_NO_STOP",
+            "COMMAND_ACTIVE_NO_STOP",
+            "ACTIVE was seen but STOP was missing; inspect serial timing and STOP telemetry.",
+        )
+    if counts["motor_write_called_count"] == 0 and counts["physical_output_active_count"] == 0:
+        return (
+            "MOTOR_OUTPUT_BLOCKED",
+            "MOTOR_OUTPUT_BLOCKED",
+            "ACK/ACTIVE were seen but no motor write or output-active telemetry appeared.",
+        )
+    if any(
+        row.get("valid_pulse") is True
+        and (
+            row.get("telemetry_motion_seen") is True
+            or row.get("motor_write_called_seen") is True
+            or row.get("physical_output_active_seen") is True
+        )
+        and str(row.get("user_motion_report", "")).lower() == "none"
+        for row in rows
+    ):
+        return (
+            "TELEMETRY_OUTPUT_ACTIVE_BUT_USER_SAW_NONE",
+            "TELEMETRY_OUTPUT_ACTIVE_BUT_USER_SAW_NONE",
+            "Telemetry says output occurred; inspect wheels, drivetrain load, and whether the rover was able to move.",
+        )
+    valid_rows = [row for row in rows if row.get("valid_pulse") is True and row.get("skipped") is not True]
+    if valid_rows and all(
+        str(row.get("user_motion_report", "")).lower() in {"forward", "backward", "left", "right", "twitch", "unknown", "not_asked"}
+        for row in valid_rows
+    ):
+        return (
+            "USB_PULSE_TEST_PASS",
+            "USB_PULSE_TEST_PASS",
+            "usb-pulse-test A/B control passed; RC receiver passthrough remains a separate mode.",
+        )
+    return (
+        "COMMAND_SENT_NO_ACK",
+        "COMMAND_SENT_NO_ACK",
+        "Inspect ACK/ACTIVE/STOP/final-zero fields and raw_usbdbg.log.",
+    )
+
+
+def _station_drive_latest_state(row: dict[str, str]) -> str:
+    return row.get("usb_pulse_test_cmd_state") or row.get("station_drive_cmd_state") or row.get("stage20_cmd_state") or row.get("stage16_cmd_state") or ""
+
+
+def cmd_usb_pulse_test(args: argparse.Namespace) -> int:
+    if getattr(args, "deprecated_station_manual_alias", False):
+        print("Deprecated alias: use usb-pulse-test.")
+    if getattr(args, "deprecated_station_drive_alias", False):
+        print("Deprecated alias: use usb-pulse-test.")
+    planned = station_drive_plan(sequence=getattr(args, "sequence", None), single=getattr(args, "single", None))
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.print_command == "true":
+        print("\n\n".join(station_drive_display_block(item) for item in planned))
+        summary = {
+            "mode": "usb-pulse-test",
+            "success": True,
+            "reason": "COMMAND_PRINTED",
+            "usb_pulse_test_result": "COMMAND_PRINTED",
+            "rc_input_required": False,
+            "rc_input_ignored": True,
+            "gps_required": False,
+            "imu_required": False,
+            "pulse_count": len(planned),
+            "planned_pulses": station_drive_clean_plan(planned),
+            "physical_a_role": "throttle",
+            "physical_b_role": "turn",
+            "wheel_to_physical_mapping": "physical_ab_manual_equivalent",
+            "next_recommended_action": "Run usb-pulse-test without --print-command only when ready for bounded USB pulse control.",
+            "ready_for_full_path_following": False,
+        }
+        _write_json(out_dir / "usb_pulse_test_plan.json", planned)
+        write_summary_files(out_dir, summary, title="USB Pulse Test")
+        return 0
+    if args.print_cmd:
+        for item in planned:
+            print(item["arm_command_text"])
+            print(item["usb_pulse_test_command_text"])
+            print(item["stop_command_text"])
+        summary = {
+            "mode": "usb-pulse-test",
+            "success": True,
+            "reason": "COMMAND_PRINTED",
+            "usb_pulse_test_result": "COMMAND_PRINTED",
+            "rc_input_required": False,
+            "rc_input_ignored": True,
+            "gps_required": False,
+            "imu_required": False,
+            "pulse_count": len(planned),
+            "planned_pulses": station_drive_clean_plan(planned),
+            "next_recommended_action": "Run without --print-cmd only when ready for bounded USB pulse control.",
+            "ready_for_full_path_following": False,
+        }
+        _write_json(out_dir / "usb_pulse_test_plan.json", planned)
+        write_summary_files(out_dir, summary, title="USB Pulse Test")
+        return 0
+    if not ensure_port(args):
+        return 2
+    if args.upload in {"true", "auto"}:
+        flags = usb_pulse_test_firmware_flags(max_abs_a=args.max_abs_a, max_abs_b=args.max_abs_b, max_ms=args.max_ms)
+        compile_cmd = [
+            "arduino-cli",
+            "compile",
+            "--fqbn",
+            "OpenRB-150:samd:OpenRB-150",
+            "--build-path",
+            "/private/tmp/openrb-usb-pulse-test",
+            "--build-property",
+            f"compiler.cpp.extra_flags={flags}",
+            "firmware/openrb_robot_controller",
+        ]
+        upload_cmd = [
+            "arduino-cli",
+            "upload",
+            "-p",
+            str(args.port),
+            "--fqbn",
+            "OpenRB-150:samd:OpenRB-150",
+            "--build-path",
+            "/private/tmp/openrb-usb-pulse-test",
+            "firmware/openrb_robot_controller",
+        ]
+        completed = subprocess.run(compile_cmd, check=False)
+        if completed.returncode != 0:
+            write_summary_files(
+                out_dir,
+                {
+                    "mode": "usb-pulse-test",
+                    "success": False,
+                    "reason": "USB_PULSE_TEST_FIRMWARE_COMPILE_FAILED",
+                    "returncode": completed.returncode,
+                    "next_recommended_action": "Inspect Arduino compile output before retrying usb-pulse-test.",
+                    "ready_for_full_path_following": False,
+                },
+                title="USB Pulse Test",
+            )
+            return completed.returncode
+        completed = subprocess.run(upload_cmd, check=False)
+        if completed.returncode != 0:
+            write_summary_files(
+                out_dir,
+                {
+                    "mode": "usb-pulse-test",
+                    "success": False,
+                    "reason": "USB_PULSE_TEST_FIRMWARE_UPLOAD_FAILED",
+                    "returncode": completed.returncode,
+                    "next_recommended_action": "Check OpenRB port and upload mode before retrying usb-pulse-test.",
+                    "ready_for_full_path_following": False,
+                },
+                title="USB Pulse Test",
+            )
+            return completed.returncode
+    import serial
+
+    raw_lines: list[str] = []
+    rows: list[dict[str, object]] = []
+    invalid_count = 0
+    user_aborted = False
+    print(f"resolved_port={args.port}")
+    print("firmware_mode=usb_pulse_test")
+    print("usb_pulse_test_ignore_rc_input=true")
+    print("USB pulse-test command plan:")
+    for item in planned:
+        print(f"  {station_drive_console_line(item)}")
+    with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+        for item in planned:
+            print(f"Ready to send {station_drive_console_line(item)}")
+            heartbeat = executor.wait_for_row(
+                handle,
+                raw_lines,
+                lambda row: telemetry.event(row) == "HEARTBEAT" and station_drive_compatible(row),
+                args.heartbeat_timeout_s,
+                verbose_raw=args.verbose_raw == "true",
+            )
+            print(f"heartbeat ready: {str(heartbeat is not None).lower()}")
+            if heartbeat and telemetry._parse_bool(heartbeat.get("manual_rc_recovery")) is True:
+                rows.append({
+                    "seq": item["seq"],
+                    "primitive": item["primitive"],
+                    "a_cmd": item["a"],
+                    "b_cmd": item["b"],
+                    "pulse_ms": item["ms"],
+                    "command_sent": False,
+                    "wrong_firmware_manual_rc_recovery": True,
+                    "valid_pulse": False,
+                    "invalid_reason": "WRONG_FIRMWARE_MANUAL_RC_RECOVERY",
+                    "ready_for_full_path_following": False,
+                })
+                break
+            if heartbeat is None:
+                rows.append({
+                    "seq": item["seq"],
+                    "primitive": item["primitive"],
+                    "a_cmd": item["a"],
+                    "b_cmd": item["b"],
+                    "pulse_ms": item["ms"],
+                    "command_sent": False,
+                    "skipped": False,
+                    "valid_pulse": False,
+                    "invalid_reason": "USB_PULSE_TEST_HEARTBEAT_MISSING",
+                    "ready_for_full_path_following": False,
+                })
+                if args.abort_on_invalid == "true":
+                    break
+                continue
+            if args.require_enter == "true":
+                response = input("Press Enter to send, or type skip/abort: ").strip().lower()
+                if response == "skip":
+                    rows.append({
+                        "seq": item["seq"],
+                        "primitive": item["primitive"],
+                        "a_cmd": item["a"],
+                        "b_cmd": item["b"],
+                        "pulse_ms": item["ms"],
+                        "command_sent": False,
+                        "skipped": True,
+                        "valid_pulse": False,
+                        "invalid_reason": "SKIPPED_BY_USER",
+                        "ready_for_full_path_following": False,
+                    })
+                    print("skipped=true")
+                    continue
+                if response == "abort":
+                    user_aborted = True
+                    print("aborted_by_user=true")
+                    break
+            else:
+                for remaining in (3, 2, 1):
+                    print(f"sending in {remaining}...")
+                    time.sleep(1.0)
+            print("command sent")
+            pulse_rows = executor.send_pulse(
+                handle,
+                item,
+                raw_lines,
+                event_timeout_s=args.event_timeout_s,
+                verbose_raw=args.verbose_raw == "true",
+            )
+            invalid_reason = controller.pulse_block_reason(pulse_rows)
+            if invalid_reason is not None:
+                invalid_count += 1
+            visual = "not_asked"
+            if args.interactive_visible_motion == "true":
+                visual = input("Observed motion [forward/backward/left/right/twitch/none/unknown]: ").strip() or "unknown"
+            last = pulse_rows[-1] if pulse_rows else {}
+            reject_reason = safety.latest_reject_reason(pulse_rows) if pulse_rows else "NONE"
+            ack_seen = any(telemetry.event(row) == "ACK" for row in pulse_rows)
+            active_seen = any(telemetry.event(row) == "ACTIVE" or _station_drive_latest_state(row) == "ACTIVE" for row in pulse_rows)
+            stop_seen = any(telemetry.event(row) in {"STOP", "PULSE_COMPLETE", "PULSE_DONE"} for row in pulse_rows)
+            motor_write_called_seen = any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in pulse_rows)
+            physical_output_active_seen = any(telemetry.physical_output_active(row) for row in pulse_rows)
+            final_left = telemetry._optional_float(last.get("final_left_cmd")) if last else None
+            final_right = telemetry._optional_float(last.get("final_right_cmd")) if last else None
+            final_zero = (final_left is not None and final_right is not None and abs(final_left) <= 1e-6 and abs(final_right) <= 1e-6)
+            print(f"ACK seen: {str(ack_seen).lower()}")
+            print(f"ACTIVE seen: {str(active_seen).lower()}")
+            print(f"STOP seen: {str(stop_seen).lower()}")
+            print(f"final zero: {str(final_zero).lower()}")
+            print(f"observed_motion={visual}")
+            rows.append({
+                "seq": item["seq"],
+                "primitive": item["primitive"],
+                "a_cmd": item["a"],
+                "b_cmd": item["b"],
+                "pulse_ms": item["ms"],
+                "arm_command_text": item["arm_command_text"],
+                "usb_pulse_test_command_text": item["usb_pulse_test_command_text"],
+                "stop_command_text": item["stop_command_text"],
+                "command_sent": True,
+                "ack_seen": ack_seen,
+                "active_seen": active_seen,
+                "stop_seen": stop_seen,
+                "reject_seen": any(telemetry.event(row) == "REJECT" for row in pulse_rows),
+                "reject_reason": reject_reason,
+                "motor_write_called_seen": motor_write_called_seen,
+                "physical_output_active_seen": physical_output_active_seen,
+                "telemetry_motion_seen": motor_write_called_seen or physical_output_active_seen,
+                "invalid_reason": invalid_reason or "OK",
+                "valid_pulse": invalid_reason is None,
+                "final_left_cmd": last.get("final_left_cmd", "NA"),
+                "final_right_cmd": last.get("final_right_cmd", "NA"),
+                "final_zero": final_zero,
+                "physical_output_active_after_stop": last.get("physical_output_active", "NA"),
+                "user_motion_report": visual,
+                "ready_for_full_path_following": False,
+            })
+            if invalid_reason is not None and args.abort_on_invalid == "true":
+                break
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "usb_pulse_test_validation.csv", rows)
+    result, reason, next_action = station_drive_classification(rows, user_aborted=user_aborted)
+    counts = station_drive_event_counts(rows)
+    success = result == "USB_PULSE_TEST_PASS"
+    summary = {
+        "mode": "usb-pulse-test",
+        "success": success,
+        "reason": reason,
+        "usb_pulse_test_result": result,
+        "pulse_count": len(planned),
+        "completed_pulse_count": len(rows),
+        "invalid_pulse_count": invalid_count,
+        **counts,
+        "observed_motions": [row.get("user_motion_report", "") for row in rows if row.get("command_sent") is True],
+        "rc_input_required": False,
+        "rc_input_ignored": True,
+        "gps_required": False,
+        "imu_required": False,
+        "physical_a_role": "throttle",
+        "physical_b_role": "turn",
+        "wheel_to_physical_mapping": "physical_ab_manual_equivalent",
+        "next_recommended_action": next_action,
+        "ready_for_full_path_following": False,
+    }
+    write_summary_files(out_dir, summary, title="USB Pulse Test")
+    print(f"usb_pulse_test_success={str(success).lower()}")
+    print("ready_for_full_path_following=false")
+    return 0 if success else 2
+
+
+def _station_hw_compile_upload_cmds(args: argparse.Namespace, *, diagnose_only: bool) -> tuple[list[str], list[str], str]:
+    flags = station_hw_diagnose_firmware_flags() if diagnose_only else station_hw_manual_firmware_flags()
+    build_path = "/private/tmp/openrb-station-hw-diagnose" if diagnose_only else "/private/tmp/openrb-station-hw-manual"
+    compile_cmd = [
+        "arduino-cli",
+        "compile",
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        build_path,
+        "--build-property",
+        f"compiler.cpp.extra_flags={flags}",
+        "firmware/openrb_robot_controller",
+    ]
+    upload_cmd = [
+        "arduino-cli",
+        "upload",
+        "-p",
+        str(args.port),
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        build_path,
+        "firmware/openrb_robot_controller",
+    ]
+    return compile_cmd, upload_cmd, flags
+
+
+def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str, summary_name: str, mode: str) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_lines: list[str] = []
+    if args.from_log:
+        raw_lines = Path(args.from_log).read_text(encoding="utf-8").splitlines()
+    else:
+        if not ensure_port(args):
+            return 2
+        compile_cmd, upload_cmd, flags = _station_hw_compile_upload_cmds(
+            args,
+            diagnose_only=(mode == "station-hw-diagnose"),
+        )
+        if args.upload in {"true", "auto"}:
+            print(f"station_hw_firmware_flags={flags}")
+            completed = subprocess.run(compile_cmd, check=False)
+            if completed.returncode != 0:
+                write_summary_files(
+                    out_dir,
+                    {
+                        "mode": mode,
+                        "success": False,
+                        "reason": "STATION_HW_FIRMWARE_COMPILE_FAILED",
+                        "returncode": completed.returncode,
+                        "next_recommended_action": "Inspect Arduino compile output before retrying station hardware mode.",
+                        "ready_for_full_path_following": False,
+                    },
+                    title=title,
+                )
+                return completed.returncode
+            completed = subprocess.run(upload_cmd, check=False)
+            if completed.returncode != 0:
+                write_summary_files(
+                    out_dir,
+                    {
+                        "mode": mode,
+                        "success": False,
+                        "reason": "STATION_HW_FIRMWARE_UPLOAD_FAILED",
+                        "returncode": completed.returncode,
+                        "next_recommended_action": "Check OpenRB port and upload mode before retrying station hardware mode.",
+                        "ready_for_full_path_following": False,
+                    },
+                    title=title,
+                )
+                return completed.returncode
+        import serial
+
+        print(f"{mode}: monitoring physical station hardware frames")
+        print("rc_receiver_required=false gps_required=false imu_required=false")
+        print("station input mapping: throttle -> physical A, steering -> physical B")
+        deadline = time.monotonic() + args.duration_s
+        with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+            while time.monotonic() < deadline:
+                raw = handle.readline()
+                if raw:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    raw_lines.append(line)
+                    if args.verbose_raw == "true":
+                        print(line)
+    rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+    summary = evaluate_station_hw_rows(rows, mode=mode)
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / csv_name, rows)
+    _write_json(out_dir / summary_name, summary)
+    write_summary_files(out_dir, summary, title=title)
+    print(f"station_link_seen={str(summary['station_link_seen']).lower()}")
+    print(f"station_hw_result={summary['station_hw_result']}")
+    print("ready_for_full_path_following=false")
+    return 0 if summary["success"] is True else 2
+
+
+def cmd_station_hw_diagnose(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    compile_cmd, upload_cmd, flags = _station_hw_compile_upload_cmds(args, diagnose_only=True)
+    if args.print_cmd or args.print_command == "true":
+        print("STATION HARDWARE DIAGNOSE:")
+        print("No motor commands are sent. The rover only reports station hardware frames.")
+        print("Expected station input mapping: throttle -> physical A, steering -> physical B")
+        print(f"station_hw_firmware_flags={flags}")
+        if args.print_cmd:
+            print(" ".join(shlex.quote(part) for part in compile_cmd))
+            print(" ".join(shlex.quote(part) for part in upload_cmd))
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "station-hw-diagnose",
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "station_hw_result": "COMMAND_PRINTED",
+                "motors_enabled": False,
+                "rc_input_required": False,
+                "gps_required": False,
+                "imu_required": False,
+                "physical_a_role": "throttle",
+                "physical_b_role": "turn",
+                "wheel_to_physical_mapping": "physical_ab_manual_equivalent",
+                "next_recommended_action": "Run without print options to monitor physical station hardware frames.",
+                "ready_for_full_path_following": False,
+            },
+            title="Station Hardware Diagnose",
+        )
+        return 0
+    return _read_station_hw_rows(
+        args,
+        title="Station Hardware Diagnose",
+        csv_name="station_hw_diagnose.csv",
+        summary_name="station_hw_diagnose_summary.json",
+        mode="station-hw-diagnose",
+    )
+
+
+def cmd_station_hw_manual(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    compile_cmd, upload_cmd, flags = _station_hw_compile_upload_cmds(args, diagnose_only=False)
+    if args.print_cmd:
+        print(" ".join(shlex.quote(part) for part in compile_cmd))
+        print(" ".join(shlex.quote(part) for part in upload_cmd))
+        print(f"station_hw_firmware_flags={flags}")
+        write_summary_files(
+            out_dir,
+            {
+                "mode": "station-hw-manual",
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "station_hw_result": "COMMAND_PRINTED",
+                "rc_input_required": False,
+                "gps_required": False,
+                "imu_required": False,
+                "physical_a_role": "throttle",
+                "physical_b_role": "turn",
+                "wheel_to_physical_mapping": "physical_ab_manual_equivalent",
+                "next_recommended_action": "Run without --print-cmd to upload/verify station hardware manual firmware and monitor output.",
+                "ready_for_full_path_following": False,
+            },
+            title="Station Hardware Manual",
+        )
+        return 0
+    print("Station hardware manual control")
+    print("Operator: turn on station hardware, release estop, hold deadman, then move station throttle/steering.")
+    return _read_station_hw_rows(
+        args,
+        title="Station Hardware Manual",
+        csv_name="station_hw_manual.csv",
+        summary_name="station_hw_manual_summary.json",
+        mode="station-hw-manual",
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
-    try:
-        plan = resolve_plan(args, cal)
-    except ValueError as exc:
-        return _fail(str(exc))
+    if getattr(args, "plan_dir", None):
+        plan_dir = Path(args.plan_dir)
+        candidates = [plan_dir / "preview_summary.json", plan_dir / "plan.json"]
+        plan_path = next((path for path in candidates if path.exists()), None)
+        if plan_path is None:
+            return _fail_with_summary(
+                args,
+                reason="PLAN_DIR_MISSING_PLAN",
+                message=f"--plan-dir must contain preview_summary.json or plan.json: {plan_dir}",
+            )
+        plan = json.loads(plan_path.read_text())
+    else:
+        if args.start_lat is None or args.start_lon is None:
+            return _fail_with_summary(
+                args,
+                reason="START_COORDINATE_REQUIRED",
+                message="--start-lat and --start-lon are required unless --plan-dir is provided",
+            )
+        try:
+            plan = resolve_plan(args, cal)
+        except ValueError as exc:
+            return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.print_plan:
         _write_json(out_dir / "plan.json", plan)
+        summary = {
+            **plan,
+            "mode": args.mode,
+            "success": True,
+            "reason": "PLAN_PRINTED",
+            "next_recommended_action": "Inspect summary.md and plan.json before running physical execution.",
+            "ready_for_full_path_following": False,
+        }
+        write_summary_files(out_dir, summary, title="Physical Path Planner Plan")
         print(
             f"run --print-plan: {plan['segment_count']} segments, "
             f"fallback_to_repeated_pulses={cal['fallback_to_repeated_pulses']} "
             f"-> {out_dir}/plan.json (no serial opened)"
         )
         return 0
+    if not ensure_port(args):
+        return 2
 
     import serial  # local import: preview/diagnose --from-log never need pyserial
 
@@ -300,7 +1860,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         fallback_to_repeated_pulses=bool(cal["fallback_to_repeated_pulses"]),
         abort_reason=abort_reason,
     )
+    summary = {
+        **summary,
+        "mode": args.mode,
+        "success": summary.get("aborted") is False,
+        "reason": "OK" if summary.get("aborted") is False else str(abort_reason),
+        "next_recommended_action": (
+            "Inspect path trace and run summary before any longer test."
+            if summary.get("aborted") is False else
+            "Inspect abort reason, raw USB log, and final motor command fields."
+        ),
+        "ready_for_full_path_following": False,
+    }
     _write_json(out_dir / "run_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Physical Path Planner Run")
     _write_rows_csv(out_dir / "run_rows.csv", rows)
     _write_raw_log(out_dir / "run_serial.log", raw_lines)
     print(
@@ -318,6 +1891,8 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         raw_lines = log_path.read_text().splitlines()
         rows = load_rows_from_log(log_path)
     else:
+        if not ensure_port(args):
+            return 2
         import serial  # local import: --from-log path never needs pyserial
 
         raw_lines = []
@@ -335,7 +1910,15 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
 
     summary = diagnose_summary(rows)
+    summary = {
+        **summary,
+        "success": True,
+        "reason": "OK",
+        "next_recommended_action": "Inspect summary.md for GPS, IMU, RC, and guarded pulse heartbeat status.",
+        "ready_for_full_path_following": False,
+    }
     _write_json(out_dir / "diagnose_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Physical Path Planner Diagnose")
     if raw_lines:
         _write_raw_log(out_dir / "diagnose_serial.log", raw_lines)
     print(
@@ -348,9 +1931,9 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 # --- Argument parser ----------------------------------------------------------
 
 
-def _add_goal_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--start-lat", type=float, required=True)
-    parser.add_argument("--start-lon", type=float, required=True)
+def _add_goal_arguments(parser: argparse.ArgumentParser, *, require_start: bool = True) -> None:
+    parser.add_argument("--start-lat", type=float, required=require_start)
+    parser.add_argument("--start-lon", type=float, required=require_start)
     parser.add_argument(
         "--goal-mode",
         choices=["absolute", "relative_enu", "relative_latlon", "bearing_distance"],
@@ -389,9 +1972,13 @@ def _add_calibration_arguments(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="physical_path_planner",
-        description="Integrated A->B serpentine path planning, calibration, and guarded motion.",
+        description="Unified physical rover tools: station hardware manual, USB pulse tests, diagnostics, calibration, and supervised planning.",
     )
-    sub = parser.add_subparsers(dest="mode", required=True)
+    sub = parser.add_subparsers(
+        dest="mode",
+        required=True,
+        metavar="{diagnose,rc-input-diagnose,manual-rc,station-hw-diagnose,station-hw-manual,usb-pulse-test,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
+    )
 
     preview_p = sub.add_parser("preview", help="build + render the plan (no serial, no motion)")
     _add_goal_arguments(preview_p)
@@ -403,16 +1990,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     cal_p = sub.add_parser(
         "calibrate-turn",
-        help="shell out to the Stage20 probe with --imu-angle-compare true",
+        help="run guarded pulse turn angle calibration",
     )
-    cal_p.add_argument("--port", default=DEFAULT_PORT)
+    cal_p.add_argument("--port", default=None)
+    cal_p.add_argument("--direction", choices=["left", "right"], default=None)
     cal_p.add_argument("--mode", default="turn_left")
+    cal_p.add_argument("--b-cmd", type=float, default=None)
+    cal_p.add_argument("--pulse-ms", type=int, default=None)
+    cal_p.add_argument("--max-abs-b", type=float, default=0.35)
+    cal_p.add_argument("--max-ms", type=int, default=1500)
+    cal_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
     cal_p.add_argument("--target-angle-deg", type=float, default=90.0)
     cal_p.add_argument("--angle-tolerance-deg", type=float, default=10.0)
-    cal_p.add_argument("--save-turn-calibration", default="false")
+    cal_p.add_argument("--save-turn-calibration", default="true")
     cal_p.add_argument("--turn-calibration-out", default=DEFAULT_TURN_CALIBRATION_OUT)
-    cal_p.add_argument("--out-dir", default="outputs/physical_path_planning/calibrate_turn")
-    cal_p.add_argument("--script", default=DEFAULT_STAGE20_SCRIPT)
+    cal_p.add_argument("--out-dir", default="outputs/physical_path_planning/calibration")
+    cal_p.add_argument("--script", default=DEFAULT_GUARDED_PULSE_CALIBRATION_SCRIPT)
     cal_p.add_argument(
         "--print-cmd",
         action="store_true",
@@ -420,11 +2013,137 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cal_p.set_defaults(handler=cmd_calibrate_turn)
 
+    rc_diag_p = sub.add_parser(
+        "rc-input-diagnose",
+        help="upload/read the read-only RC input channel diagnostic",
+    )
+    rc_diag_p.add_argument("--port", default=None)
+    rc_diag_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    rc_diag_p.add_argument("--duration-s", type=float, default=20.0)
+    rc_diag_p.add_argument("--upload", choices=["true", "false", "auto"], default="true")
+    rc_diag_p.add_argument("--from-log", default=None)
+    rc_diag_p.add_argument("--out-dir", default="outputs/physical_path_planning/rc_input_diagnose")
+    rc_diag_p.add_argument("--sketch", default=DEFAULT_RC_INPUT_DIAGNOSE_SKETCH)
+    rc_diag_p.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="print read-only probe upload commands and exit",
+    )
+    rc_diag_p.set_defaults(handler=cmd_rc_input_diagnose)
+
+    manual_p = sub.add_parser("manual-rc", help="upload and validate manual RC recovery")
+    manual_p.add_argument("--port", default=None)
+    manual_p.add_argument("--upload", choices=["true", "false", "auto"], default="true")
+    manual_p.add_argument("--validate", choices=["true", "false"], default="true")
+    manual_p.add_argument("--diagnose-only", choices=["true", "false"], default="false")
+    manual_p.add_argument("--duration-s", type=float, default=45.0)
+    manual_p.add_argument("--log", default=None)
+    manual_p.add_argument("--rc-input-mode", choices=["auto", "old_known_good", "ppm", "pwm", "sbus"], default="old_known_good")
+    manual_p.add_argument("--mode-channel-index", type=int, default=4)
+    manual_p.add_argument("--steer-channel-index", type=int, default=0)
+    manual_p.add_argument("--throttle-channel-index", type=int, default=1)
+    manual_p.add_argument("--manual-mode-threshold-us", type=int, default=None)
+    manual_p.add_argument("--print-rc-mapping", choices=["true", "false"], default="false")
+    manual_p.add_argument("--out-dir", default="outputs/physical_path_planning/manual_rc")
+    manual_p.add_argument("--upload-script", default=DEFAULT_MANUAL_RC_UPLOAD_SCRIPT)
+    manual_p.add_argument("--validate-script", default=DEFAULT_MANUAL_RC_VALIDATE_SCRIPT)
+    manual_p.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="print upload/validation commands and exit",
+    )
+    manual_p.set_defaults(handler=cmd_manual_rc)
+
+    def add_station_hw_parser(name: str, *, diagnose_only: bool) -> None:
+        station_p = sub.add_parser(
+            name,
+            help=(
+                "read-only physical station hardware link diagnostic"
+                if diagnose_only else
+                "physical station hardware manual rover control"
+            ),
+        )
+        station_p.add_argument("--port", default=None)
+        station_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+        station_p.add_argument("--duration-s", type=float, default=20.0 if diagnose_only else 45.0)
+        station_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
+        station_p.add_argument("--from-log", default=None)
+        station_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
+        station_p.add_argument(
+            "--print-cmd",
+            action="store_true",
+            help="print firmware commands and exit",
+        )
+        station_p.add_argument("--print-command", choices=["true", "false"], default="false")
+        station_p.add_argument(
+            "--out-dir",
+            default=(
+                "outputs/physical_path_planning/station_hw_diagnose"
+                if diagnose_only else
+                "outputs/physical_path_planning/station_hw_manual"
+            ),
+        )
+        station_p.set_defaults(handler=cmd_station_hw_diagnose if diagnose_only else cmd_station_hw_manual)
+
+    add_station_hw_parser("station-hw-diagnose", diagnose_only=True)
+    add_station_hw_parser("station-hw-manual", diagnose_only=False)
+
+    station_drive_p = sub.add_parser(
+        "usb-pulse-test",
+        help="laptop USB bounded A/B pulse motor validation",
+    )
+    station_drive_p.add_argument("--port", default=None)
+    station_drive_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    station_drive_p.add_argument("--upload", choices=["true", "false", "auto"], default="auto")
+    station_drive_p.add_argument("--max-abs-a", type=float, default=0.35)
+    station_drive_p.add_argument("--max-abs-b", type=float, default=0.35)
+    station_drive_p.add_argument("--max-ms", type=int, default=1000)
+    station_drive_p.add_argument("--event-timeout-s", type=float, default=controller.DEFAULT_EVENT_TIMEOUT_S)
+    station_drive_p.add_argument("--heartbeat-timeout-s", type=float, default=controller.DEFAULT_HEARTBEAT_TIMEOUT_S)
+    station_drive_p.add_argument("--single", choices=["forward", "backward", "left", "right", "turn_left", "turn_right"], default=None)
+    station_drive_p.add_argument("--sequence", default=None)
+    station_drive_p.add_argument("--require-rc-input", choices=["true", "false"], default="false")
+    station_drive_p.add_argument("--require-enter", choices=["true", "false"], default="true")
+    station_drive_p.add_argument("--interactive-visible-motion", choices=["true", "false"], default="true")
+    station_drive_p.add_argument("--abort-on-invalid", choices=["true", "false"], default="true")
+    station_drive_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
+    station_drive_p.add_argument("--out-dir", default="outputs/physical_path_planning/usb_pulse_test")
+    station_drive_p.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="print bounded USB pulse serial commands and exit",
+    )
+    station_drive_p.add_argument("--print-command", choices=["true", "false"], default="false")
+    station_drive_p.set_defaults(handler=cmd_usb_pulse_test)
+
+    def add_guarded_pulse_ready_parser(name: str) -> None:
+        guarded_p = sub.add_parser(
+            name,
+            help="upload/check IMU-enabled guarded pulse firmware",
+        )
+        guarded_p.add_argument("--port", default=None)
+        guarded_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+        guarded_p.add_argument("--upload", choices=["true", "false", "auto"], default="true")
+        guarded_p.add_argument("--duration-s", type=float, default=15.0)
+        guarded_p.add_argument("--max-abs-a", type=float, default=0.35)
+        guarded_p.add_argument("--max-abs-b", type=float, default=0.35)
+        guarded_p.add_argument("--max-ms", type=int, default=1500)
+        guarded_p.add_argument("--out-dir", default="outputs/physical_path_planning/guarded_pulse_ready")
+        guarded_p.add_argument(
+            "--print-cmd",
+            action="store_true",
+            help="print firmware commands and exit",
+        )
+        guarded_p.set_defaults(handler=cmd_guarded_pulse_ready, deprecated_alias=False)
+
+    add_guarded_pulse_ready_parser("guarded-pulse-ready")
+
     for name in ("run", "execute-plan"):
         run_p = sub.add_parser(name, help="drive the continuous-motion controller over a plan")
-        _add_goal_arguments(run_p)
+        _add_goal_arguments(run_p, require_start=False)
         _add_calibration_arguments(run_p)
-        run_p.add_argument("--port", default=DEFAULT_PORT)
+        run_p.add_argument("--plan-dir", default=None)
+        run_p.add_argument("--port", default=None)
         run_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
         run_p.add_argument("--start-yaw-deg", type=float, default=None)
         run_p.add_argument("--event-timeout-s", type=float, default=controller.DEFAULT_EVENT_TIMEOUT_S)
@@ -441,7 +2160,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         run_p.add_argument(
             "--manual-override-mode",
-            choices=["abort", "continue"],
+            choices=["abort", "warn", "continue"],
             default=controller.DEFAULT_MANUAL_OVERRIDE_MODE,
         )
         run_p.add_argument("--left-fixed-pulses", type=int, default=12)
@@ -455,7 +2174,7 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.set_defaults(handler=cmd_run)
 
     diag_p = sub.add_parser("diagnose", help="read-only telemetry summary (live port or --from-log)")
-    diag_p.add_argument("--port", default=DEFAULT_PORT)
+    diag_p.add_argument("--port", default=None)
     diag_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     diag_p.add_argument("--from-log", default=None, help="parse a saved serial log instead of a port")
     diag_p.add_argument("--duration-s", type=float, default=5.0)
@@ -467,7 +2186,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    normalized_argv = list(sys.argv[1:] if argv is None else argv)
+    deprecated_station_manual_alias = False
+    deprecated_station_drive_alias = False
+    if normalized_argv and normalized_argv[0] == "station-manual":
+        normalized_argv[0] = "usb-pulse-test"
+        deprecated_station_manual_alias = True
+    if normalized_argv and normalized_argv[0] == "station-drive":
+        normalized_argv[0] = "usb-pulse-test"
+        deprecated_station_drive_alias = True
+    args = parser.parse_args(normalized_argv)
+    if deprecated_station_manual_alias:
+        args.deprecated_station_manual_alias = True
+    if deprecated_station_drive_alias:
+        args.deprecated_station_drive_alias = True
     return int(args.handler(args))
 
 

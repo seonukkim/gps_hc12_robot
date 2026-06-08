@@ -88,7 +88,7 @@ Manual forward/backward driving works, but the integrated station joystick axes
 have required careful remapping. The current active firmware marker is:
 
 ```text
-openrb_robot_controller station-manual rc-arcade-manual-fwdneg 2026-05-30
+openrb_robot_controller station-hw-manual rc-arcade-manual-fwdneg 2026-05-30
 ```
 
 The current intent is:

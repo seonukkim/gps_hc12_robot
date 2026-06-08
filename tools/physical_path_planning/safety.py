@@ -1,13 +1,12 @@
 """Guarded-motion safety predicates over USBDBG telemetry rows.
 
-These are the abort/wait conditions that were copy-pasted across the stage
-runners, lifted here as named pure functions so the executor and controller
+These are the abort/wait conditions for guarded USB motion, lifted here as
+named pure functions so the executor and controller
 share one definition. Every predicate takes already-parsed rows (or a single
 row) and returns a plain bool / reason string -- no serial, no side effects --
 which makes them directly unit-testable with mock telemetry.
 
-Semantics mirror the legacy stage30 inline checks exactly (parity is asserted
-in ``tests/test_ppp_safety.py``) so stage30 can delegate without behavior drift.
+Semantics are covered in ``tests/test_ppp_safety.py``.
 """
 from __future__ import annotations
 
@@ -22,7 +21,13 @@ _ZERO_TOLERANCE = 1e-9
 
 
 def latest_reject_reason(rows: Sequence[dict[str, str]]) -> str:
-    """Most recent reject reason; prefers the stage20 channel, falls back to stage16."""
+    """Most recent reject reason; prefers current USB pulse fields, then compatibility fields."""
+    reason = telemetry._latest(rows, "usb_pulse_test_reject_reason", "")
+    if reason:
+        return reason
+    reason = telemetry._latest(rows, "station_drive_reject_reason", "")
+    if reason:
+        return reason
     reason = telemetry._latest(rows, "stage20_reject_reason", "")
     return reason if reason else telemetry._latest(rows, "stage16_reject_reason", "NONE")
 
@@ -73,7 +78,7 @@ def preflight_heartbeat(row: dict[str, str]) -> bool:
     Requires a HEARTBEAT event with RC ok, sticks neutral, physical output
     inactive, and both the path-following enable and motor-output gates OFF. This
     is the firmware-side safety state; it intentionally does NOT assert the
-    stage20 role/compat fields (callers add those if they need them).
+    guarded-mode role/compat fields (callers add those if they need them).
     """
     return (
         telemetry.event(row) == "HEARTBEAT"

@@ -49,37 +49,76 @@ Current code supports the Python-side protocol and mock planning pieces. It does
 not yet implement completed autonomous ROS2 execution or confirmed end-to-end
 station HC-12 operation.
 
-## Physical Path Planning (Integrated CLI)
+## Physical Path Planning (Unified CLI)
 
-A→B serpentine coverage, calibration, and guarded motion are consolidated into one
-package, `tools/physical_path_planning/`, behind a single entrypoint with five modes:
+Use one field-facing entrypoint:
 
 ```bash
-uv run python -m tools.physical_path_planning.cli <mode> [options]
-# launcher wrapper (adds the firmware flash for run/execute-plan):
-scripts/run_physical_path_planner.sh <mode> [options]
+bash scripts/run_physical_path_planner.sh diagnose \
+  --out-dir outputs/physical_path_planning/diagnose
+
+bash scripts/run_physical_path_planner.sh manual-rc \
+  --out-dir outputs/physical_path_planning/manual_rc
+
+bash scripts/run_physical_path_planner.sh station-hw-diagnose \
+  --out-dir outputs/physical_path_planning/station_hw_diagnose
+
+bash scripts/run_physical_path_planner.sh station-hw-manual \
+  --out-dir outputs/physical_path_planning/station_hw_manual
+
+bash scripts/run_physical_path_planner.sh usb-pulse-test \
+  --out-dir outputs/physical_path_planning/usb_pulse_test
+
+bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
+  --out-dir outputs/physical_path_planning/guarded_pulse_ready
+
+bash scripts/run_physical_path_planner.sh calibrate-turn \
+  --direction left --b-cmd 0.22 --pulse-ms 1200 \
+  --target-angle-deg 90 --angle-tolerance-deg 10 \
+  --out-dir outputs/physical_path_planning/calibration/left_022_1200
 ```
 
-- `preview` — build + render the A→B plan (no serial, no motion; works with no
-  calibration).
-- `calibrate-turn` — measure a 90° turn via the Stage20 probe with IMU yaw.
-- `run` / `execute-plan` — drive the guarded continuous-motion controller.
-- `diagnose` — read-only telemetry summary (live port or `--from-log`).
+OpenRB-150 is auto-detected when `--port` is omitted. Pass `--port "$PORT"` only
+when auto-detection fails.
+
+Field modes:
+
+- `diagnose` — read-only guarded pulse heartbeat, GPS, IMU, and RC telemetry.
+- `rc-input-diagnose` — read-only receiver input/channel diagnostic; no motors.
+- `manual-rc` — upload and validate manual RC recovery.
+- `station-hw-diagnose` — read-only physical station hardware link diagnostic.
+- `station-hw-manual` — physical station hardware manual rover control.
+- `usb-pulse-test` — laptop USB bounded A/B rover pulse validation.
+- `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
+- `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
+- `preview` — build + render a rectangle coverage plan without motor output.
+- `execute-plan` / `run` — supervised guarded pulse execution.
 
 `start` (A) and `goal` (B) are **opposite corners of a rectangle's diagonal**, not a
 straight line; `--workspace-width-m` is the short side and must be shorter than the
-diagonal. Use `--path-shape direct_line` for an actual straight A→B.
+diagonal. Use `--path-shape direct_line` only for an explicitly requested straight
+A→B plan.
 
-Safety posture is unchanged: `run`/`execute-plan` flash the STAGE20 *guarded-crawl*
-firmware behind the same 4-flag compile gate as
-`scripts/run_stage20_physical_ab_probe.sh` (that gate, not the CLI, is the real
-motor-output safety), and every summary carries `ready_for_full_path_following=false`.
-This is guarded, bounded motion, not full autonomous path following — station-side
-preview is always allowed, physical execution stays subject to the field
-preconditions noted throughout this README. `--print-plan` / `--print-cmd` /
-`--from-log` give fully no-hardware paths.
+Safety posture is unchanged: physical execution uses guarded pulse firmware with
+full path following disabled, and every summary carries
+`ready_for_full_path_following=false`. This is guarded, bounded motion, not full
+autonomous path following.
 
-This package supersedes the former `stage30`–`stage36` modules and their scripts.
+Every unified command writes `<out-dir>/summary.md` and `<out-dir>/summary.json`.
+If `manual-rc` reports `reason=RC_INPUT_ABSENT`, the receiver input is not reaching
+OpenRB; fix receiver power, binding, signal wiring, input mode, or channel mapping
+before expecting RC manual passthrough. If the separate station hardware is the
+operator control, use `station-hw-diagnose` and `station-hw-manual`. Motor/mapping
+validation can continue with `usb-pulse-test`, which does not use RC receiver
+input or station hardware input for command generation.
+
+For receiver-only diagnosis before manual passthrough:
+
+```bash
+bash scripts/run_physical_path_planner.sh rc-input-diagnose \
+  --out-dir outputs/physical_path_planning/rc_input_diagnose
+```
+
 See [docs/README_physical_path_planning.md](docs/README_physical_path_planning.md)
 (usage), [docs/physical_path_planning_architecture.md](docs/physical_path_planning_architecture.md)
 (module map + control law), and [docs/field_test_manual.md](docs/field_test_manual.md)
@@ -189,7 +228,7 @@ body frame must be fixed, measured, and modeled.
 - `target_distance_m` varied around `16.8..18.0` instead of monotonically
   decreasing. This is expected for the current straight-crawl test because no
   steering/course correction is active yet.
-- Next stage: station-side path planning preview only with no motor execution,
+- Next step: station-side path planning preview only with no motor execution,
   then single-waypoint steering dry-run, then heading/course estimation before
   any physical waypoint following. Do not approve full floor waypoint driving or
   coverage driving yet.
@@ -216,13 +255,13 @@ body frame must be fixed, measured, and modeled.
   `ppm_channel_map_probe` proves another channel is a stable 2-position switch.
   Selecting the channel does not weaken failsafe, GPS thresholds, or motion gates.
 
-## Legacy HC-12 References
+## Archived HC-12 References
 
-Legacy HC-12 scripts and notes from `~/Desktop/project-lab/hc12` have been
+Older HC-12 scripts and notes from `~/Desktop/project-lab/hc12` have been
 audited under [references/legacy_hc12](references/legacy_hc12). They are
 reference material only, not production station or rover code.
 
-The useful legacy patterns are mostly `9600` baud PC `readline()` loops,
+The useful archived patterns are mostly `9600` baud PC `readline()` loops,
 Arduino/Nano `SoftwareSerial` bridges, RP2040 UART bridge notes, and old
 OpenRB/Mega-style `Serial3` transmit experiments. Known problems include
 hardcoded `COM4` or `/dev/cu.usbserial-*` ports, blocking loops, inconsistent
@@ -572,7 +611,7 @@ motors and no rover chassis. Full details and exact commands are in
 Stack"). Summary:
 
 - IMU diagnostics: use `firmware/imu_bmi160_normal_probe` for the current BMI160
-  (`0x68`, `chip_id=0xD1`). The legacy `firmware/imu_probe` is MPU/ICM-only and
+  (`0x68`, `chip_id=0xD1`). The older `firmware/imu_probe` is MPU/ICM-only and
   is not a BMI160 health check. Gyro yaw remains relative and diagnostic-only.
 - Integrated GPS + IMU + HC-12 dry-run: `firmware/openrb_robot_controller` with
   `-DPATH_FOLLOWING_DRYRUN=1 -DIMU_ENABLE=1 -DIMU_HEADING_DRYRUN=1` (HC-12 on

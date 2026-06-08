@@ -1,157 +1,180 @@
-# Physical Path Planning — Field Test Manual
+# Physical Path Planning Field Test Manual
 
-Operator procedure for the unified path planner. Read
-[README_physical_path_planning.md](README_physical_path_planning.md) for the CLI
-overview and [physical_path_planning_architecture.md](physical_path_planning_architecture.md)
-for what each module does. This manual is the order of operations and what to watch.
-
-> The hardware modes (`calibrate-turn`, `run`/`execute-plan`) execute — flash firmware
-> and/or open serial — as soon as they are invoked. The operator is responsible for
-> satisfying the preconditions below before invoking them. The firmware 4-flag compile
-> gate bounds motor output; this CLI never weakens it. Nothing here is full autonomous
-> path following, and no summary ever reports `ready_for_full_path_following=true`.
-
-## 0. Preconditions (do not skip)
-
-Confirm against the root `README.md` and
-[current_hardware_status.md](current_hardware_status.md):
-
-- **GPS**: a stable outdoor fix — `gps_probe_state=STABLE_FIX`, RMC `A`, GGA quality
-  ≥ 1, `gps_sats` healthy, `gps_hdop` low, and a *fresh* `gps_age_ms`. NMEA bytes
-  arriving (`gps_chars>0`) is **not** a fix. For real navigation the GPS antenna must
-  be rover-mounted; a detached antenna gives the antenna's position, not the rover's.
-- **RC AUTO/MANUAL switch**: the mode channel must reliably hold. The known blocker is
-  CH5 not holding HIGH; verify with `firmware/ppm_channel_map_probe` +
-  `tools/analyze_ppm_log.py` and set `-DMODE_CHANNEL_INDEX` if a different channel is
-  the stable 2-position switch. MANUAL ≈ `mode_us≈1000`, `control_source=RC_MANUAL`;
-  AUTO ≈ `mode_us≈2000`, `mode=AUTO_READY`.
-- **RC transmitter on** and the **station/controller powered and linked** — an off
-  transmitter or controller can look like a stuck/failsafe RC.
-- **Wheels**: for any first motion, keep it wheel-off-ground or in a clear open area,
-  per the bench-test rule.
-- **IMU (BMI160)** healthy at `0x68` (`chip_id=0xD1`). Yaw is relative/diagnostic; it
-  supports heading-hold between pulses, not absolute localization.
-
-Determine your port. Default is `/dev/ttyACM0` (Ubuntu station); on the Mac dev
-machine it is `/dev/cu.usbmodem*` — pass `--port` explicitly. Telemetry baud is
-`115200`.
-
-## 1. Dry-run the plan first (no hardware)
-
-Always preview before driving. This opens no serial and flashes no firmware.
+Use the unified launcher for field work:
 
 ```bash
-uv run python -m tools.physical_path_planning.cli preview \
-  --start-lat <A_lat> --start-lon <A_lon> \
-  --goal-mode absolute --goal-lat <B_lat> --goal-lon <B_lon> \
-  --workspace-width-m <short_side_m>
+bash scripts/run_physical_path_planner.sh <mode> [options]
 ```
 
-Check `outputs/physical_path_planning/preview/preview_summary.json` and
-`preview.png`:
+OpenRB-150 is auto-detected when `--port` is omitted. Use `--port "$PORT"` only
+when auto-detection fails.
 
-- `path_shape=diagonal_rectangle_serpentine`, `lane_count ≥ 1`, and
-  `diagonal_length_m > workspace_width_m` (if width ≥ diagonal the build fails — A and
-  B are corners of a diagonal, not a straight line).
-- `connector_mode_effective`: `angle_calibrated` if you have a turn calibration, else
-  `repeated_pulses` with `fallback_to_repeated_pulses=true` (uncalibrated connectors).
+## Preconditions
 
-Remember: **A→B is the diagonal**, `--workspace-width-m` is the short side. For a
-literal straight line use `--path-shape direct_line` (no width needed).
+- RC transmitter on.
+- MANUAL / AUTO OFF available for recovery.
+- GPS antenna mounted for real rover position tests.
+- BMI160 IMU telemetry available for turn angle calibration and heading logs.
+- Clear test area or wheels off ground for first motion after firmware changes.
+- Full path following and HC-12 path control remain disabled.
 
-You can also preview a `run` exactly as it would execute, still with no serial:
+## 1. Diagnose (Read Only)
 
 ```bash
-uv run python -m tools.physical_path_planning.cli run --print-plan \
-  --start-lat <A_lat> --start-lon <A_lon> --goal-lat <B_lat> --goal-lon <B_lon> \
-  --workspace-width-m <short_side_m>
+bash scripts/run_physical_path_planner.sh diagnose \
+  --out-dir outputs/physical_path_planning/diagnose
 ```
 
-## 2. Calibrate the 90° connector turn (optional but recommended)
+This watches telemetry only. It sends no motor commands.
 
-Without a turn-angle calibration the connectors fall back to repeated fixed pulses.
-To calibrate, measure a real turn with IMU yaw. Inspect the shell-out first:
+## 2. Manual RC Recovery
+
+If manual RC telemetry shows all receiver channels at zero, run the receiver-only
+input diagnostic first:
 
 ```bash
-uv run python -m tools.physical_path_planning.cli calibrate-turn --mode turn_left --print-cmd
+bash scripts/run_physical_path_planner.sh rc-input-diagnose \
+  --out-dir outputs/physical_path_planning/rc_input_diagnose
 ```
 
-Then run it for real (this compiles the BMI160 yaw flags, uploads, and drives the
-guarded turn via `scripts/run_stage20_physical_ab_probe.sh`):
+This uploads a read-only PPM channel probe. It does not initialize motors and
+classifies whether receiver input is absent, present but invalid, or valid PPM.
 
 ```bash
-uv run python -m tools.physical_path_planning.cli calibrate-turn \
-  --port <PORT> --mode turn_left --target-angle-deg 90 \
-  --save-turn-calibration true
+bash scripts/run_physical_path_planner.sh manual-rc \
+  --out-dir outputs/physical_path_planning/manual_rc
 ```
 
-Only with `--save-turn-calibration true`, a clean ACK→STOP handshake, and your visual
-confirmation does it write
-`outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json`.
-If IMU yaw is unavailable it exits cleanly with
-`imu_heading_block_reason=IMU_YAW_NOT_AVAILABLE` and writes nothing — no traceback.
-Repeat for `--mode turn_right`. Once both are saved, re-run the `preview` and confirm
-`connector_mode_effective=angle_calibrated`.
+Follow the printed sequence:
 
-## 3. Run the guarded continuous motion
+1. neutral 5 seconds
+2. slight forward
+3. neutral
+4. slight backward
+5. neutral
+6. slight left/right steering
+7. neutral
 
-When the preview looks right and the preconditions hold:
+PASS requires `control_source=RC_MANUAL`, nonzero final motor commands while the
+sticks move, physical output active or motor writes during manual movement, and
+final commands returning to zero at neutral.
+
+If the summary reports `reason=RC_INPUT_ABSENT`, the receiver signal is not reaching
+OpenRB. Check receiver power, transmitter binding, signal wiring, PPM/SBUS/PWM
+output mode, firmware input mode, and channel mapping. This is not a motor
+calibration failure and it does not by itself invalidate GPS or IMU diagnostics.
+
+After wiring or binding changes:
 
 ```bash
-scripts/run_physical_path_planner.sh run \
-  --start-lat <A_lat> --start-lon <A_lon> --goal-lat <B_lat> --goal-lon <B_lon> \
-  --workspace-width-m <short_side_m>
+bash scripts/run_physical_path_planner.sh manual-rc \
+  --upload false --validate true --diagnose-only true \
+  --out-dir outputs/physical_path_planning/manual_rc_diagnose
 ```
 
-The launcher flashes the guarded-crawl firmware (bounded `MAX_ABS_A/B`, `MAX_MS`, IMU
-yaw enabled, all path-following/stage flags 0), re-resolves the upload port, then
-drives `controller.run_controller`. Keep the RC transmitter in hand — switching to
-MANUAL or moving the sticks off neutral is your override.
-
-Watch the live USBDBG stream and the run outputs under
-`outputs/physical_path_planning/run/` (`run_summary.json`, `run_rows.csv`,
-`run_serial.log`). The run stops cleanly and records an `abort_reason` on any field
-fault:
-
-| abort_reason | Meaning |
-|---|---|
-| `NONE` | Completed without an abort. |
-| `NO_STAGE20_HEARTBEAT` | Firmware not exposing the guarded-crawl role; re-flash / check the port. |
-| `RC_NOT_OK` | RC frame invalid at heartbeat; check transmitter/link. |
-| `MANUAL_OVERRIDE` | Operator took manual control (default policy: abort). |
-| `RC_NOT_NEUTRAL` | Sticks never settled to neutral within `--rc-neutral-wait-s`. |
-| `GPS_DEGRADED` | GPS degraded under an `abort` policy (default policy is `continue`, dead-reckoned). |
-| `RC_INVALID` | `RC_INVALID` reported during an active pulse — hard abort. |
-| `SERIAL_DISCONNECT` | Serial link dropped mid-loop — hard abort. |
-
-Per-pulse rows carry `valid_pulse`, `invalid_reason`, `gps_degraded`,
-`cross_track_error_m`, `heading_error_deg`, and the `a_cmd`/`b_cmd` actually issued.
-Useful knobs: `--gps-degradation-policy continue|pause|abort`,
-`--manual-override-mode abort|continue`, `--rc-neutral-wait-s`, `--start-yaw-deg`.
-
-## 4. Diagnose afterward (read-only)
-
-Summarize what happened from the saved log (no serial), or watch live:
+## 3. Physical Station Hardware Manual
 
 ```bash
-uv run python -m tools.physical_path_planning.cli diagnose \
-  --from-log outputs/physical_path_planning/run/run_serial.log
-# live:
-uv run python -m tools.physical_path_planning.cli diagnose --port <PORT> --duration-s 5
+bash scripts/run_physical_path_planner.sh station-hw-diagnose \
+  --out-dir outputs/physical_path_planning/station_hw_diagnose
+
+bash scripts/run_physical_path_planner.sh station-hw-manual \
+  --out-dir outputs/physical_path_planning/station_hw_manual
 ```
 
-The summary reports row/heartbeat counts, event tallies, the last heartbeat's
-GPS/IMU fields, and whether the firmware exposed the STAGE20 guarded-crawl role. It
-sends no commands.
+`station-hw-diagnose` is no-motion and reports whether station hardware frames,
+deadman, and estop are arriving. `station-hw-manual` is the separate physical
+station controller path; it maps station throttle to physical A and station
+steering to physical B.
 
-## Safety reminders
+## 4. USB Pulse Test
 
-- This is **guarded, bounded** motion via the STAGE20 guarded-crawl firmware — not
-  full autonomous path following. The firmware compile gate is the real motor-output
-  safety; never weaken it.
-- Recompute A/B from the *current* GPS fix before each attempt; do not reuse old
-  coordinates after moving the rover or antenna.
-- HC-12 RF is deferred/unproven; the planner uses the USB serial link. Do not infer
-  GPS, IMU, or motor readiness from HC-12, or from the wrong firmware mode.
-- Never run a real `run`/`calibrate-turn` to "test" software changes — use
-  `--print-plan` / `--print-cmd` / `--from-log` instead.
+```bash
+bash scripts/run_physical_path_planner.sh usb-pulse-test \
+  --out-dir outputs/physical_path_planning/usb_pulse_test
+```
+
+This does not use RC receiver input for command generation. The laptop sends
+bounded physical A/B commands over USB after Enter and asks for observed motion:
+
+- forward: `A=+0.30`, `B=0.00`, `800 ms`
+- backward: `A=-0.08`, `B=0.00`, `300 ms`
+- left: `A=0.00`, `B=+0.26`, `700 ms`
+- right: `A=0.00`, `B=-0.08`, `250 ms`
+
+To inspect the exact USB pulse commands without serial or upload:
+
+```bash
+bash scripts/run_physical_path_planner.sh usb-pulse-test \
+  --print-command true \
+  --out-dir outputs/physical_path_planning/usb_pulse_test_print
+```
+
+During the live run, the console should show concise operator status only:
+heartbeat ready, command sent, ACK seen, ACTIVE seen, STOP seen, final zero, and
+observed motion. Raw heartbeat and debug lines are saved to `raw_usbdbg.log`; use
+`--verbose-raw true` only when debugging serial telemetry.
+
+Use this only as laptop USB motor validation. It is not autonomous path planning,
+not RC manual passthrough, and not physical station hardware control. If
+`manual-rc` reports `RC_INPUT_ABSENT` but `usb-pulse-test` passes, the motor path
+works and the remaining issue is the RC receiver input path.
+
+## 5. Guarded Pulse Readiness
+
+```bash
+bash scripts/run_physical_path_planner.sh guarded-pulse-ready \
+  --out-dir outputs/physical_path_planning/guarded_pulse_ready
+```
+
+This uploads/checks IMU-enabled guarded pulse firmware and confirms the guarded
+pulse heartbeat, BMI160 yaw telemetry, RC OK, and neutral sticks. It is still not
+full path following.
+
+## 5. Turn Angle Calibration
+
+```bash
+bash scripts/run_physical_path_planner.sh calibrate-turn \
+  --direction left --b-cmd 0.22 --pulse-ms 1200 \
+  --target-angle-deg 90 --angle-tolerance-deg 10 \
+  --out-dir outputs/physical_path_planning/calibration/left_022_1200
+```
+
+This uses guarded pulse calibration with IMU yaw comparison.
+
+## 6. Preview
+
+```bash
+bash scripts/run_physical_path_planner.sh preview \
+  --goal-mode relative_enu --goal-east-m 4.0 --goal-north-m -1.2 \
+  --workspace-width-m 1.2 --step-spacing-m 0.25 \
+  --out-dir outputs/physical_path_planning/preview_relative_enu
+```
+
+Preview generates the rectangle coverage plan and images without motor output.
+A-B is the diagonal of the workspace rectangle.
+
+## 7. Execute A Reviewed Plan
+
+```bash
+bash scripts/run_physical_path_planner.sh execute-plan \
+  --plan-dir outputs/physical_path_planning/preview_relative_enu \
+  --out-dir outputs/physical_path_planning/execute_preview_relative_enu
+```
+
+Execution uses guarded pulse commands only. Abort conditions remain serial
+disconnect, `REJECT`, `RC_INVALID`, missing ACK/STOP, nonzero final commands after
+STOP, or output still active after STOP.
+
+Every output must keep:
+
+```text
+ready_for_full_path_following=false
+```
+
+Every command writes:
+
+```text
+<out-dir>/summary.md
+<out-dir>/summary.json
+```

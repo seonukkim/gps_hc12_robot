@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Deprecated. Use scripts/run_physical_path_planner.sh <mode>.
 set -euo pipefail
 
 PORT="/dev/ttyACM0"

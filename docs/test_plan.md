@@ -33,7 +33,7 @@
    - `uv run python tools/station_controller.py --port /dev/ttyACM0`
 5. Keyboard manual bench test
    - wheel-off-ground only
-   - start with RC transmitter off or RC invalid so station-manual takeover is exercised
+   - start with RC transmitter off or RC invalid so station-hw-manual takeover is exercised
    - run `uv run python tools/station_keyboard_manual.py --port /dev/ttyACM0 --baud 9600 --max-speed 0.25`
    - confirm heartbeat plus `STOP` on startup before pressing `e`
    - press `e` to arm station manual, then confirm neutral manual frames with `deadman` off
