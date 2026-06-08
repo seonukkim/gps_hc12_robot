@@ -140,6 +140,33 @@ def test_stage22_checker_passes_when_two_of_three_visible(tmp_path: Path) -> Non
     assert result["ready_for_full_path_following"] is False
 
 
+def test_stage22_checker_passes_single_visible_pulse(tmp_path: Path) -> None:
+    csv_path = tmp_path / "stage22_straight_segment.csv"
+    _write_csv(csv_path, [
+        _row(pulse_index=1, seq=1, body_motion_user_report="twitch", visible_forward_or_twitch=True),
+    ])
+    result = check_stage22_straight_segment.evaluate_path(
+        csv_path,
+        expected_repeat_count=1,
+        required_visible_count=2,
+    )
+    assert result["verdict"] == "PASS"
+    assert result["visible_forward_or_twitch_count"] == 1
+    assert result["ready_for_full_path_following"] is False
+
+
+def test_stage22_summary_passes_single_visible_pulse_for_next_stage() -> None:
+    summary = stage22_straight_segment.build_summary(
+        [_row(body_motion_user_report="twitch", visible_forward_or_twitch=True)],
+        repeat_count=1,
+        selected_a=0.30,
+        selected_b=0.0,
+        pulse_ms=800,
+    )
+    assert summary["ready_for_stage23_turn_calibration"] is True
+    assert summary["ready_for_full_path_following"] is False
+
+
 def test_stage22_checker_fails_final_nonzero(tmp_path: Path) -> None:
     csv_path = tmp_path / "stage22_straight_segment.csv"
     _write_csv(csv_path, [

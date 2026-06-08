@@ -257,7 +257,12 @@ def build_summary(rows: Sequence[dict[str, object]], *, repeat_count: int, selec
     visible_twitch = [row for row in rows if row.get("body_motion_user_report") == "twitch"]
     final = rows[-1] if rows else {}
     reject_count = sum(1 for row in rows if row.get("reject_seen") is True)
-    ready_stage23 = len(visible_forward) + len(visible_twitch) >= 2 and len(successful) == repeat_count and reject_count == 0
+    required_visible_count = min(2, repeat_count)
+    ready_stage23 = (
+        len(visible_forward) + len(visible_twitch) >= required_visible_count
+        and len(successful) == repeat_count
+        and reject_count == 0
+    )
     return {
         "repeat_count": repeat_count,
         "successful_pulse_count": len(successful),

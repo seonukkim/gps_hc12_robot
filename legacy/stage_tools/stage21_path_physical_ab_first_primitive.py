@@ -13,7 +13,8 @@ try:
 except ImportError:
     import _bootstrap  # type: ignore  # noqa: F401
 
-from tools import stage20_physical_ab_probe, station_path_package_tracker, station_virtual_path_controller
+from legacy.stage_tools import stage20_physical_ab_probe
+from tools import station_path_package_tracker, station_virtual_path_controller
 from tools.path_no_motion_validation import PathPackageResolutionError, resolve_path_package
 
 

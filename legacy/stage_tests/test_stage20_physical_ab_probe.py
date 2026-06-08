@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 from tools import check_stage20_physical_ab_probe
@@ -55,6 +56,8 @@ def _safe_row(**overrides: object) -> dict[str, object]:
         "allow_motor_output": False,
         "physical_output_active_seen": True,
         "physical_output_active_after_stop": False,
+        "valid_trial": True,
+        "invalid_reason": "NONE",
         "arm_ack_seen": True,
         "ack_seen": True,
         "stop_seen": True,
@@ -88,6 +91,11 @@ def test_stage20_script_uses_stage20_only_flags() -> None:
     assert "PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0" in text
     assert "STAGE17_FIRST_PRIMITIVE_CRAWL=0" in text
     assert "STAGE18_MOTOR_MAPPING_PROBE=0" in text
+    assert "--imu-angle-compare" in text
+    assert "--target-angle-deg" in text
+    assert "--angle-tolerance-deg" in text
+    assert "--save-turn-calibration" in text
+    assert "--turn-calibration-out" in text
 
 
 def test_stage20_default_signs_match_manual_rc_firmware() -> None:
@@ -286,6 +294,189 @@ def test_stage20_stable_precondition_requires_three_good_heartbeats() -> None:
     assert stage20_physical_ab_probe.stable_precondition_met(rows, consecutive=3) is True
 
 
+def test_stage20_yaw_unwrap_crosses_negative_positive_boundary() -> None:
+    assert stage20_physical_ab_probe.unwrap_yaw_delta_deg(-175.0, 170.0) == 15.0
+    assert stage20_physical_ab_probe.unwrap_yaw_delta_deg(170.0, -175.0) == -15.0
+
+
+def test_stage20_imu_angle_compare_records_before_after_yaw() -> None:
+    before_rows = stage20_physical_ab_probe.station_path_package_tracker.parse_usbdbg_rows(
+        "STAGE20 event=HEARTBEAT rc_ok=true neutral_ok=true physical_output_active=false imu_relative_yaw_deg=170.000\n"
+        "STAGE20 event=HEARTBEAT rc_ok=true neutral_ok=true physical_output_active=false imu_relative_yaw_deg=171.000\n"
+        "STAGE20 event=HEARTBEAT rc_ok=true neutral_ok=true physical_output_active=false imu_relative_yaw_deg=172.000\n"
+    )
+    after_rows = stage20_physical_ab_probe.station_path_package_tracker.parse_usbdbg_rows(
+        "STAGE20 event=HEARTBEAT rc_ok=true neutral_ok=true physical_output_active=false imu_relative_yaw_deg=-100.000\n"
+        "STAGE20 event=HEARTBEAT rc_ok=true neutral_ok=true physical_output_active=false imu_relative_yaw_deg=-99.000\n"
+        "STAGE20 event=HEARTBEAT rc_ok=true neutral_ok=true physical_output_active=false imu_relative_yaw_deg=-98.000\n"
+    )
+    angle = stage20_physical_ab_probe.angle_comparison_from_rows(
+        before_rows=before_rows,
+        after_rows=after_rows,
+        target_angle_deg=90.0,
+        angle_tolerance_deg=10.0,
+    )
+    assert angle["yaw_before_deg"] == 172.0
+    assert angle["yaw_after_deg"] == -98.0
+    assert angle["yaw_delta_deg"] == 90.0
+    assert angle["abs_yaw_delta_deg"] == 90.0
+    assert angle["error_to_target_deg"] == 0.0
+
+
+def test_stage20_row_from_trial_keeps_existing_behavior_when_imu_compare_false() -> None:
+    planned = stage20_physical_ab_probe.planned_probe_commands(seq=1, mode="forward", cmd=0.12, pulse_ms=500)
+    rows = stage20_physical_ab_probe.station_path_package_tracker.parse_usbdbg_rows(
+        "STAGE20 event=ACK stage20_cmd_state=ACTIVE requested_a_cmd=0.120 requested_b_cmd=0.000 physical_output_active=true\n"
+        "STAGE20 event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n"
+    )
+    row = stage20_physical_ab_probe.row_from_trial(
+        trial_index=1,
+        planned=planned,
+        rows=rows,
+        left_report="yes",
+        right_report="yes",
+        body_report="forward",
+        upper_limit_trial=False,
+    )
+    assert row["imu_angle_compare_enabled"] is False
+    assert row["yaw_before_deg"] == "NA"
+    assert row["yaw_after_deg"] == "NA"
+    assert row["turn_calibration_saved"] is False
+    assert row["ready_for_full_path_following"] is False
+
+
+def test_stage20_save_turn_calibration_only_on_visual_yes(tmp_path: Path) -> None:
+    path = tmp_path / "physical_ab_turn_angle_calibration.json"
+    planned = stage20_physical_ab_probe.planned_probe_commands(
+        seq=1,
+        mode="turn_left",
+        cmd=0.26,
+        pulse_ms=700,
+        max_abs_a=0.35,
+        max_abs_b=0.35,
+    )
+    angle = stage20_physical_ab_probe.angle_comparison_from_yaw(
+        yaw_before_deg=0.0,
+        yaw_after_deg=87.5,
+        target_angle_deg=90.0,
+        angle_tolerance_deg=10.0,
+    )
+    row = _safe_row(
+        mode="turn_left",
+        cmd=0.26,
+        pulse_ms=700,
+        requested_a_cmd=0.0,
+        requested_b_cmd=0.26,
+        final_left_cmd="0.000",
+        final_right_cmd="0.000",
+    )
+
+    assert stage20_physical_ab_probe.save_turn_calibration_result(
+        path=path,
+        planned=planned,
+        row=row,
+        angle=angle,
+        visual_confirmation="under",
+    ) is False
+    assert not path.exists()
+
+    assert stage20_physical_ab_probe.save_turn_calibration_result(
+        path=path,
+        planned=planned,
+        row=row,
+        angle=angle,
+        visual_confirmation="yes",
+    ) is True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["turn_left_90"] == {
+        "a_cmd": 0.0,
+        "b_cmd": 0.26,
+        "pulse_ms": 700,
+        "imu_yaw_delta_deg": 87.5,
+        "visual_confirmation": "yes",
+        "ready": True,
+    }
+    assert data["ready_for_angle_based_connectors"] is False
+    assert data["ready_for_full_path_following"] is False
+
+
+def test_stage20_turn_calibration_ready_after_left_and_right_yes(tmp_path: Path) -> None:
+    path = tmp_path / "physical_ab_turn_angle_calibration.json"
+    row = _safe_row(final_left_cmd="0.000", final_right_cmd="0.000")
+    left = stage20_physical_ab_probe.planned_probe_commands(
+        seq=1,
+        mode="turn_left",
+        cmd=0.26,
+        pulse_ms=700,
+        max_abs_a=0.35,
+        max_abs_b=0.35,
+    )
+    right = stage20_physical_ab_probe.planned_probe_commands(
+        seq=2,
+        mode="turn_right",
+        cmd=0.08,
+        pulse_ms=250,
+        max_abs_a=0.35,
+        max_abs_b=0.35,
+    )
+    assert stage20_physical_ab_probe.save_turn_calibration_result(
+        path=path,
+        planned=left,
+        row=row,
+        angle=stage20_physical_ab_probe.angle_comparison_from_yaw(
+            yaw_before_deg=0.0,
+            yaw_after_deg=87.5,
+            target_angle_deg=90.0,
+            angle_tolerance_deg=10.0,
+        ),
+        visual_confirmation="yes",
+    ) is True
+    assert stage20_physical_ab_probe.save_turn_calibration_result(
+        path=path,
+        planned=right,
+        row=row,
+        angle=stage20_physical_ab_probe.angle_comparison_from_yaw(
+            yaw_before_deg=0.0,
+            yaw_after_deg=-91.2,
+            target_angle_deg=90.0,
+            angle_tolerance_deg=10.0,
+        ),
+        visual_confirmation="yes",
+    ) is True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["turn_right_90"]["b_cmd"] == -0.08
+    assert data["turn_right_90"]["imu_yaw_delta_deg"] == -91.2
+    assert data["ready_for_angle_based_connectors"] is True
+    assert data["ready_for_full_path_following"] is False
+
+
+def test_stage20_no_ack_stop_does_not_save_turn_calibration(tmp_path: Path) -> None:
+    path = tmp_path / "physical_ab_turn_angle_calibration.json"
+    planned = stage20_physical_ab_probe.planned_probe_commands(
+        seq=1,
+        mode="turn_left",
+        cmd=0.26,
+        pulse_ms=700,
+        max_abs_a=0.35,
+        max_abs_b=0.35,
+    )
+    angle = stage20_physical_ab_probe.angle_comparison_from_yaw(
+        yaw_before_deg=0.0,
+        yaw_after_deg=87.5,
+        target_angle_deg=90.0,
+        angle_tolerance_deg=10.0,
+    )
+    row = _safe_row(ack_seen=False, stop_seen=False, final_left_cmd="0.000", final_right_cmd="0.000")
+    assert stage20_physical_ab_probe.save_turn_calibration_result(
+        path=path,
+        planned=planned,
+        row=row,
+        angle=angle,
+        visual_confirmation="yes",
+    ) is False
+    assert not path.exists()
+
+
 def test_stage20_stop_search_on_turn_twitch_reports() -> None:
     assert stage20_physical_ab_probe.stop_search_after_user_report({
         "body_motion_user_report": "none",
@@ -300,6 +491,60 @@ def test_stage20_checker_passes_safe_probe(tmp_path: Path) -> None:
     result = check_stage20_physical_ab_probe.evaluate_path(csv_path)
     assert result["verdict"] == "PASS"
     assert result["ready_for_full_path_following"] is False
+
+
+def test_stage20_checker_passes_turn_b_with_row_max_abs_b(tmp_path: Path) -> None:
+    csv_path = tmp_path / "stage20_physical_ab_probe.csv"
+    _write_csv(csv_path, [
+        _safe_row(
+            mode="turn_left",
+            cmd=0.26,
+            pulse_ms=700,
+            command_axis="B",
+            axis_limit_used=0.35,
+            max_abs_a=0.25,
+            max_abs_b=0.35,
+            stage20_command_text="STAGE20_CMD seq=1 a=0.000 b=0.260 ms=700",
+            requested_a_cmd=0.0,
+            requested_b_cmd=0.26,
+            physical_a_cmd=0.0,
+            physical_b_cmd=0.26,
+            manual_equivalent_forward_cmd=0.0,
+            manual_equivalent_turn_cmd=0.26,
+            final_left_cmd="0.000",
+            final_right_cmd="0.000",
+            body_motion_user_report="twitch",
+            turn_angle_report="small_under_15deg",
+        )
+    ])
+    result = check_stage20_physical_ab_probe.evaluate_path(csv_path)
+    assert result["verdict"] == "PASS"
+    assert "B_COMMAND_EXCEEDS_MAX" not in result["reasons"]
+    assert result["ready_for_full_path_following"] is False
+
+
+def test_stage20_checker_fails_turn_b_when_row_max_abs_b_too_low(tmp_path: Path) -> None:
+    csv_path = tmp_path / "stage20_physical_ab_probe.csv"
+    _write_csv(csv_path, [
+        _safe_row(
+            mode="turn_left",
+            cmd=0.26,
+            pulse_ms=700,
+            command_axis="B",
+            axis_limit_used=0.25,
+            max_abs_a=0.25,
+            max_abs_b=0.25,
+            requested_a_cmd=0.0,
+            requested_b_cmd=0.26,
+            physical_a_cmd=0.0,
+            physical_b_cmd=0.26,
+            final_left_cmd="0.000",
+            final_right_cmd="0.000",
+        )
+    ])
+    result = check_stage20_physical_ab_probe.evaluate_path(csv_path)
+    assert result["verdict"] == "FAIL"
+    assert "B_COMMAND_EXCEEDS_MAX" in result["reasons"]
 
 
 def test_stage20_checker_fails_final_nonzero(tmp_path: Path) -> None:

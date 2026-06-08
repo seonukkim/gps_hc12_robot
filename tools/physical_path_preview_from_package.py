@@ -175,9 +175,9 @@ def _write_summary(path: Path, inspection: dict[str, object], preview_paths: dic
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate Stage 11 physical path preview from path_package.json.")
+    parser = argparse.ArgumentParser(description="Generate a physical path preview from path_package.json.")
     parser.add_argument("--path-package", default="latest")
-    parser.add_argument("--out-dir", default="outputs/stage11_physical_preview/latest")
+    parser.add_argument("--out-dir", default="outputs/physical_path_preview/latest")
     return parser
 
 

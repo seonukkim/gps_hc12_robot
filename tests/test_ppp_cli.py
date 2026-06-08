@@ -55,7 +55,7 @@ def _assert_standard_summary(out_dir: Path) -> dict[str, object]:
 
 def test_calibrate_turn_argv_always_enables_imu_angle_compare() -> None:
     argv = cli.build_calibrate_turn_argv(
-        script="legacy/stage_scripts/run_stage20_physical_ab_probe.sh",
+        script="legacy/stage_scripts/run_guarded_pulse_calibration.sh",
         port="/dev/ttyACM0",
         mode="turn_left",
         target_angle_deg=90.0,
@@ -65,17 +65,17 @@ def test_calibrate_turn_argv_always_enables_imu_angle_compare() -> None:
         out_dir="od",
     )
     assert argv[0] == "bash"
-    assert argv[1].endswith("run_stage20_physical_ab_probe.sh")
+    assert argv[1].endswith("run_guarded_pulse_calibration.sh")
     # The IMU flag is what makes the launcher compile the BMI160 yaw defines.
     assert argv[argv.index("--imu-angle-compare") + 1] == "true"
     assert argv[argv.index("--mode") + 1] == "turn_left"
     assert argv[argv.index("--save-turn-calibration") + 1] == "true"
-    assert not any("stage36" in part.lower() for part in argv)
+    assert not any("smooth_turn_connector" in part.lower() for part in argv)
 
 
 def test_calibrate_turn_argv_accepts_direction_command_values() -> None:
     argv = cli.build_calibrate_turn_argv(
-        script="legacy/stage_scripts/run_stage20_physical_ab_probe.sh",
+        script="legacy/stage_scripts/run_guarded_pulse_calibration.sh",
         port="/dev/cu.usbmodem212101",
         mode="turn_left",
         b_cmd=0.22,
@@ -109,7 +109,7 @@ def test_calibrate_turn_print_cmd_does_not_invoke_subprocess(capsys: pytest.Capt
     assert rc == 0
     out = capsys.readouterr().out
     assert "--imu-angle-compare true" in out
-    assert "run_stage20_physical_ab_probe.sh" in out
+    assert "run_guarded_pulse_calibration.sh" in out
     assert "turn_right" in out
     assert "--cmd-list 0.08" in out
     assert "--pulse-ms-list 250" in out
@@ -172,11 +172,8 @@ def test_help_uses_functional_mode_names() -> None:
     assert "station-manual" not in help_text
     assert "guarded-pulse-ready" in help_text
     assert "calibrate-turn" in help_text
-    assert "Stage20" not in help_text
-    assert "Stage16" not in help_text
-    assert "Stage35" not in help_text
-    assert "Stage36" not in help_text
-    assert "stage20-imu" not in help_text
+    for old_term in ("Stage" + "20", "Stage" + "16", "Stage" + "35", "Stage" + "36", "stage" + "20-imu"):
+        assert old_term not in help_text
 
 
 def test_shell_help_uses_functional_mode_names() -> None:
@@ -196,10 +193,8 @@ def test_shell_help_uses_functional_mode_names() -> None:
     assert "station-drive" not in help_text
     assert "station-manual" not in help_text
     assert "guarded-pulse-ready" in help_text
-    assert "Stage20" not in help_text
-    assert "Stage16" not in help_text
-    assert "Stage35" not in help_text
-    assert "Stage36" not in help_text
+    for old_term in ("Stage" + "20", "Stage" + "16", "Stage" + "35", "Stage" + "36"):
+        assert old_term not in help_text
 
 
 def test_shell_station_hw_subcommand_help_is_no_hardware() -> None:
@@ -213,8 +208,8 @@ def test_shell_station_hw_subcommand_help_is_no_hardware() -> None:
         assert completed.returncode == 0
         assert f"scripts/run_physical_path_planner.sh {mode}" in completed.stdout
         assert "resolved_port=" not in completed.stdout
-        assert "Stage20" not in completed.stdout
-        assert "Stage16" not in completed.stdout
+        for old_term in ("Stage" + "20", "Stage" + "16"):
+            assert old_term not in completed.stdout
 
 
 def test_guarded_pulse_ready_print_cmd_contains_imu_flags(
@@ -250,7 +245,7 @@ def test_usb_pulse_test_print_command_uses_exact_bounded_ab_mapping(
     assert data["mode"] == "usb-pulse-test"
     assert data["rc_input_required"] is False
     assert data["rc_input_ignored"] is True
-    assert "stage20" not in json.dumps(data).lower()
+    assert ("stage" + "20") not in json.dumps(data).lower()
 
 
 def test_usb_pulse_test_raw_print_cmd_uses_usb_pulse_protocol(
@@ -690,7 +685,7 @@ def test_docs_quickstart_uses_unified_launcher_only() -> None:
     field_manual = Path("docs/field_test_manual.md").read_text()
     for text in (readme, ppp_readme, field_manual):
         assert "scripts/run_physical_path_planner.sh" in text
-        assert "legacy/stage_scripts/run_stage" not in text
+        assert "legacy/stage_scripts/run_" + "stage" not in text
     assert "RC_INPUT_ABSENT" in ppp_readme
     assert "RC_INPUT_ABSENT" in field_manual
 

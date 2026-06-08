@@ -67,7 +67,7 @@ def inspect_package(package: dict[str, object], selected_path: Path) -> dict[str
         "primitive_sequence_allowed": primitive_sequence_valid,
         "motor_command_generated_false": motor_command_generated is False,
     }
-    validation["path_package_valid_for_stage11_preview"] = all(bool(value) for value in validation.values())
+    validation["path_package_valid_for_preview"] = all(bool(value) for value in validation.values())
     return {
         "selected_path_package": str(selected_path),
         "normalized_workspace": workspace,
@@ -126,9 +126,9 @@ def _write_markdown(path: Path, inspection: dict[str, object]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Inspect a generated Stage 11 path package.")
+    parser = argparse.ArgumentParser(description="Inspect a generated path package.")
     parser.add_argument("--path-package", default="latest")
-    parser.add_argument("--out-dir", default="outputs/stage11_path_package_inspection/latest")
+    parser.add_argument("--out-dir", default="outputs/path_package_inspection/latest")
     return parser
 
 
@@ -152,14 +152,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     md_path = out_dir / "path_package_inspection.md"
     json_path.write_text(json.dumps(inspection, indent=2) + "\n", encoding="utf-8")
     _write_markdown(md_path, inspection)
-    print("Stage 11 path package inspection complete.")
+    print("Path package inspection complete.")
     print(f"selected_path_package={selected}")
     print(f"path_package_inspection_json={json_path}")
     print(f"path_package_inspection_md={md_path}")
     for key, value in inspection["validation"].items():  # type: ignore[union-attr]
         print(f"{key}={value}")
     print("motor_command_generated=false")
-    return 0 if inspection["validation"]["path_package_valid_for_stage11_preview"] else 1  # type: ignore[index]
+    return 0 if inspection["validation"]["path_package_valid_for_preview"] else 1  # type: ignore[index]
 
 
 if __name__ == "__main__":

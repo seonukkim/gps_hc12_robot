@@ -29,7 +29,7 @@ def _resolved_or_fallback(calibration: dict[str, object] | None) -> dict[str, ob
 
 def _motion_calibrated(calibration: dict[str, object] | None, direction: str) -> dict[str, object]:
     name = "forward" if direction == "forward" else "backward"
-    return calibration_resolver.stage35_primitive(_resolved_or_fallback(calibration), name)
+    return calibration_resolver.planner_primitive(_resolved_or_fallback(calibration), name)
 
 
 def _turn_calibrated(calibration: dict[str, object] | None, direction: str) -> dict[str, object]:

@@ -190,7 +190,7 @@ fi
 echo "post_upload_port=${POST_UPLOAD_PORT}"
 
 CMD=(
-  uv run python tools/station_first_primitive_crawl.py
+  uv run python legacy/stage_tools/station_first_primitive_crawl.py
   --path-package "$PATH_PACKAGE"
   --port "$POST_UPLOAD_PORT"
   --pose-mode "$POSE_MODE"
@@ -215,6 +215,6 @@ if [[ -n "$CURRENT_HEADING_DEG" ]]; then
 fi
 "${CMD[@]}"
 
-uv run python tools/check_stage17_first_primitive_crawl_log.py "$OUT_DIR" \
+uv run python legacy/stage_tools/check_stage17_first_primitive_crawl_log.py "$OUT_DIR" \
   --max-cmd "$MAX_CMD" \
   --max-ms "$PULSE_MS"

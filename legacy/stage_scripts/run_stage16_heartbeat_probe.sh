@@ -77,7 +77,7 @@ if [[ -z "$POST_UPLOAD_PORT" ]]; then
 fi
 echo "post_upload_port=${POST_UPLOAD_PORT}"
 
-uv run python tools/stage16_heartbeat_probe.py \
+uv run python legacy/stage_tools/stage16_heartbeat_probe.py \
   --port "$POST_UPLOAD_PORT" \
   --duration-s "$DURATION_S" \
   --out-dir "$OUT_DIR"

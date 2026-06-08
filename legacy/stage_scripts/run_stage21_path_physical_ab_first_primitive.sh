@@ -289,7 +289,7 @@ echo "command_port=${POST_UPLOAD_PORT}"
 echo "post_upload_port=${POST_UPLOAD_PORT}"
 
 ARGS=(
-  uv run python tools/stage21_path_physical_ab_first_primitive.py
+  uv run python legacy/stage_tools/stage21_path_physical_ab_first_primitive.py
   --port "$POST_UPLOAD_PORT"
   --path-package "$PATH_PACKAGE"
   --pose-mode "$POSE_MODE"

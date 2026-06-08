@@ -12,7 +12,7 @@ except ImportError:
     import _bootstrap  # type: ignore  # noqa: F401
 
 from tools import station_path_package_tracker
-from tools.station_guarded_path_crawl import format_stage16_command
+from legacy.stage_tools.station_guarded_path_crawl import format_stage16_command
 
 
 CALIBRATION_FIELDS = (

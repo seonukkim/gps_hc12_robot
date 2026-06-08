@@ -66,12 +66,16 @@ def evaluate_rows(
         requested_a = _parse_float(row.get("requested_a_cmd"))
         requested_b = _parse_float(row.get("requested_b_cmd"))
         pulse_ms = _parse_float(row.get("pulse_ms"))
+        row_max_abs_a = _parse_float(row.get("max_abs_a"))
+        row_max_abs_b = _parse_float(row.get("max_abs_b"))
+        limit_a = row_max_abs_a if row_max_abs_a is not None else max_abs_a
+        limit_b = row_max_abs_b if row_max_abs_b is not None else max_abs_b
         if requested_a is None or requested_b is None:
             reasons.append("REQUESTED_COMMAND_NA")
         else:
-            if abs(requested_a) > max_abs_a + 1e-9:
+            if abs(requested_a) > limit_a + 1e-9:
                 reasons.append("A_COMMAND_EXCEEDS_MAX")
-            if abs(requested_b) > max_abs_b + 1e-9:
+            if abs(requested_b) > limit_b + 1e-9:
                 reasons.append("B_COMMAND_EXCEEDS_MAX")
         if pulse_ms is None:
             reasons.append("PULSE_MS_NA")

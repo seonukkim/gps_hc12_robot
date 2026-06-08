@@ -315,7 +315,7 @@ def resolve_physical_calibration(
     }
 
 
-def stage35_primitive(calibration: dict[str, object], name: str) -> dict[str, object]:
+def planner_primitive(calibration: dict[str, object], name: str) -> dict[str, object]:
     key = {
         "move_forward": "forward",
         "move_backward": "backward",

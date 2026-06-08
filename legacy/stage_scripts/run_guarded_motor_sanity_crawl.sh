@@ -130,7 +130,7 @@ arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_PATH" \
   --build-property "compiler.cpp.extra_flags=${FLAGS}" "$SKETCH"
 arduino-cli upload -p "$PORT" --fqbn "$FQBN" --build-path "$BUILD_PATH" "$SKETCH"
 
-uv run python tools/stage15_guarded_crawl_runner.py \
+uv run python legacy/stage_tools/stage15_guarded_crawl_runner.py \
   --port "$PORT" \
   --max-cmd "$MAX_CMD" \
   --pulse-ms "$PULSE_MS" \
@@ -138,7 +138,7 @@ uv run python tools/stage15_guarded_crawl_runner.py \
   --require-enter "$REQUIRE_ENTER" \
   --out-dir "$OUT_DIR"
 
-uv run python tools/check_guarded_crawl_log.py \
+uv run python legacy/stage_tools/check_guarded_crawl_log.py \
   "$OUT_DIR/guarded_crawl.log" \
   --max-cmd "$MAX_CMD" \
   --max-duration-ms "$PULSE_MS"

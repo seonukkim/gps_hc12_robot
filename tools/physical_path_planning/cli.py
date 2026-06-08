@@ -34,9 +34,9 @@ from tools.physical_path_planning import calibration, checks, controller, execut
 
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
-DEFAULT_GUARDED_PULSE_CALIBRATION_SCRIPT = "legacy/stage_scripts/run_stage20_physical_ab_probe.sh"
-DEFAULT_MANUAL_RC_UPLOAD_SCRIPT = "scripts/upload_manual_rc_recovery_firmware.sh"
-DEFAULT_MANUAL_RC_VALIDATE_SCRIPT = "scripts/run_manual_rc_passthrough_validation.sh"
+DEFAULT_GUARDED_PULSE_CALIBRATION_SCRIPT = "legacy/stage_scripts/run_guarded_pulse_calibration.sh"
+DEFAULT_MANUAL_RC_UPLOAD_SCRIPT = "legacy/stage_scripts/upload_manual_rc_recovery_firmware.sh"
+DEFAULT_MANUAL_RC_VALIDATE_SCRIPT = "legacy/stage_scripts/run_manual_rc_passthrough_validation.sh"
 DEFAULT_RC_INPUT_DIAGNOSE_SKETCH = "firmware/ppm_channel_map_probe"
 DEFAULT_TURN_CALIBRATION_OUT = (
     "outputs/stage23_turn_calibration/calibration/physical_ab_turn_angle_calibration.json"

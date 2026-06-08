@@ -316,7 +316,7 @@ if [[ -z "$POST_UPLOAD_PORT" ]]; then
 fi
 echo "post_upload_port=${POST_UPLOAD_PORT}"
 
-uv run python tools/stage20_physical_ab_probe.py \
+uv run python legacy/stage_tools/stage20_physical_ab_probe.py \
   --port "$POST_UPLOAD_PORT" \
   --mode "$MODE" \
   --cmd-list "$CMD_LIST" \
@@ -337,7 +337,7 @@ uv run python tools/stage20_physical_ab_probe.py \
   --continue-after-visible "$CONTINUE_AFTER_VISIBLE" \
   --out-dir "$OUT_DIR"
 
-uv run python tools/check_stage20_physical_ab_probe.py "$OUT_DIR" \
+uv run python legacy/stage_tools/check_stage20_physical_ab_probe.py "$OUT_DIR" \
   --max-abs-a "$MAX_ABS_A" \
   --max-abs-b "$MAX_ABS_B" \
   --max-ms "$MAX_MS"

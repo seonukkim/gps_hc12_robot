@@ -134,7 +134,7 @@ if [[ -z "$POST_UPLOAD_PORT" ]]; then
 fi
 echo "post_upload_port=${POST_UPLOAD_PORT}"
 
-uv run python tools/stage18_motor_mapping_probe.py \
+uv run python legacy/stage_tools/stage18_motor_mapping_probe.py \
   --port "$POST_UPLOAD_PORT" \
   --mode "$MODE" \
   --cmd-list "$CMD_LIST" \
@@ -144,4 +144,4 @@ uv run python tools/stage18_motor_mapping_probe.py \
   --continue-after-visible "$CONTINUE_AFTER_VISIBLE" \
   --out-dir "$OUT_DIR"
 
-uv run python tools/check_stage18_motor_mapping_probe.py "$OUT_DIR"
+uv run python legacy/stage_tools/check_stage18_motor_mapping_probe.py "$OUT_DIR"

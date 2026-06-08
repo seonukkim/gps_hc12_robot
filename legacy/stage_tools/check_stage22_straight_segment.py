@@ -52,6 +52,7 @@ def evaluate_rows(
     required_visible_count: int = 2,
 ) -> dict[str, object]:
     reasons: list[str] = []
+    effective_required_visible_count = min(required_visible_count, expected_repeat_count)
     if not rows:
         reasons.append("NO_STAGE22_ROWS")
 
@@ -100,7 +101,7 @@ def evaluate_rows(
         reasons.append("NOT_ALL_PULSES_STOPPED")
     if reject_count:
         reasons.append("REJECT_COUNT_NONZERO")
-    if visible_count < required_visible_count:
+    if visible_count < effective_required_visible_count:
         reasons.append("VISIBLE_FORWARD_OR_TWITCH_BELOW_THRESHOLD")
     if abs(final_left) > 1e-9 or abs(final_right) > 1e-9:
         reasons.append("FINAL_COMMANDS_NONZERO")

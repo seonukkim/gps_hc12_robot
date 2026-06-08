@@ -181,7 +181,7 @@ fi
 echo "post_upload_port=${POST_UPLOAD_PORT}"
 
 CMD=(
-  uv run python tools/station_guarded_path_crawl.py
+  uv run python legacy/stage_tools/station_guarded_path_crawl.py
   --path-package "$PATH_PACKAGE" \
   --port "$POST_UPLOAD_PORT" \
   --duration-s "$DURATION_S" \
