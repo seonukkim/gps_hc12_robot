@@ -45,6 +45,15 @@ DEFAULT_TURN_CALIBRATION_OUT = (
 )
 DEFAULT_GPS_CACHE = Path("outputs/physical_path_planning/gps_cache/latest_start.json")
 MAC_PHYSICAL_SUPERVISED_PROFILE = "MAC_PHYSICAL_SUPERVISED"
+MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE = "old-working-ppm"
+MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE = "full-telemetry-ppm"
+MANUAL_CONTROL_PROFILES = (
+    MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
+    MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
+)
+MANUAL_CONTROL_OLD_WORKING_LOG = "outputs/logs/manual_forward_neg_turn_pos_20260530_141846.log"
+MANUAL_CONTROL_OLD_WORKING_BUILD_PATH = "/private/tmp/openrb-manual-forward-neg-turn-pos"
+MANUAL_CONTROL_FULL_TELEMETRY_BUILD_PATH = "/private/tmp/openrb-manual-control-ppm"
 RC_INPUT_ABSENT_ACTION = (
     "Check RC receiver power; check receiver signal wire to OpenRB RC input; "
     "check whether receiver output mode is PPM/SBUS/PWM and firmware input mode matches; "
@@ -218,25 +227,47 @@ def manual_rc_recovery_flags(*, mode_channel_index: int | None = None) -> str:
     return flags
 
 
-def manual_control_firmware_flags(*, mode_channel_index: int | None = 4) -> str:
-    flags = (
-        "-DMANUAL_CONTROL_PPM=1 "
-        "-DMANUAL_FORWARD_SIGN=-1 "
-        "-DMANUAL_TURN_SIGN=1 "
-        "-DMOTOR_OUTPUT_SWAP_LR=0 "
-        "-DDRIVE_CALIBRATION_ENABLE=0 "
-        "-DIMU_ENABLE=1 "
-        "-DIMU_YAW_DIAG=1 "
-        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
-        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
-        "-DPATH_FOLLOWING_DRYRUN=0 "
-        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
-        "-DGROUND_CRAWL_TEST_MODE=0 "
-        "-DAUTO_MOTION_ARMED=0"
-    )
+def manual_control_firmware_flags(
+    *,
+    profile: str = MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
+    mode_channel_index: int | None = 4,
+) -> str:
+    if profile == MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE:
+        flags = (
+            "-DMANUAL_FORWARD_SIGN=-1 "
+            "-DMANUAL_TURN_SIGN=1 "
+            "-DMOTOR_OUTPUT_SWAP_LR=0 "
+            "-DDRIVE_CALIBRATION_ENABLE=0"
+        )
+    elif profile == MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE:
+        flags = (
+            "-DMANUAL_CONTROL_PPM=1 "
+            "-DMANUAL_FORWARD_SIGN=-1 "
+            "-DMANUAL_TURN_SIGN=1 "
+            "-DMOTOR_OUTPUT_SWAP_LR=0 "
+            "-DDRIVE_CALIBRATION_ENABLE=0 "
+            "-DIMU_ENABLE=1 "
+            "-DIMU_YAW_DIAG=1 "
+            "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+            "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+            "-DPATH_FOLLOWING_DRYRUN=0 "
+            "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+            "-DGROUND_CRAWL_TEST_MODE=0 "
+            "-DAUTO_MOTION_ARMED=0"
+        )
+    else:
+        raise ValueError(f"unknown manual-control profile: {profile}")
     if mode_channel_index is not None:
         flags += f" -DMODE_CHANNEL_INDEX={mode_channel_index}"
     return flags
+
+
+def manual_control_build_path(profile: str) -> str:
+    if profile == MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE:
+        return MANUAL_CONTROL_OLD_WORKING_BUILD_PATH
+    if profile == MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE:
+        return MANUAL_CONTROL_FULL_TELEMETRY_BUILD_PATH
+    raise ValueError(f"unknown manual-control profile: {profile}")
 
 
 def manual_control_mapping(
@@ -285,17 +316,61 @@ def _row_rc_input_detected(row: dict[str, str]) -> bool:
     return telemetry._parse_bool(row.get("rc_input_detected"), default=False) or _row_input_nonzero(row)
 
 
+def _row_optional_int(row: dict[str, str], key: str) -> int | None:
+    value = telemetry._optional_float(row.get(key))
+    if value is None:
+        return None
+    return int(value)
+
+
+def _row_ppm_edge_mismatch(row: dict[str, str]) -> bool:
+    edge = _row_value(row, ["ppm_interrupt_edge"], default="")
+    return bool(edge and edge.upper() != "RISING")
+
+
+def _row_no_ppm_frame_capture(row: dict[str, str]) -> bool:
+    frame_count = _row_optional_int(row, "ppm_frame_count")
+    last_channel_count = _row_optional_int(row, "ppm_last_channel_count")
+    has_ppm_counters = frame_count is not None or last_channel_count is not None
+    return (
+        has_ppm_counters
+        and (frame_count is None or frame_count <= 0)
+        and (last_channel_count is None or last_channel_count <= 0)
+        and _row_input_zero(row)
+    )
+
+
+def _row_mode_channel_capture_known(row: dict[str, str]) -> bool:
+    if _row_input_zero(row):
+        return False
+    last_channel_count = _row_optional_int(row, "ppm_last_channel_count")
+    frame_count = _row_optional_int(row, "ppm_frame_count")
+    if last_channel_count is not None:
+        return last_channel_count >= 5 and (frame_count is None or frame_count > 0)
+    if frame_count is not None and frame_count <= 0:
+        return False
+    return _row_rc_input_detected(row)
+
+
 def manual_control_mode_decode(row: dict[str, str]) -> tuple[str, str]:
     if not row:
         return "UNKNOWN_NO_USBDBG_TELEMETRY", "NO_USBDBG_TELEMETRY"
+    if _row_ppm_edge_mismatch(row):
+        return "UNKNOWN_PPM_EDGE_MISMATCH", "PPM_EDGE_MISMATCH"
+    if _row_no_ppm_frame_capture(row):
+        return "UNKNOWN_PPM_ABSENT", "PPM_INPUT_ABSENT"
     row_manual_switch = _row_value(row, ["manual_switch"], default="")
     row_mode_decode_reason = _row_value(row, ["mode_decode_reason"], default="")
+    if row_mode_decode_reason == "NO_MODE_CHANNEL" and not _row_mode_channel_capture_known(row):
+        return "UNKNOWN_PPM_ABSENT", "PPM_INPUT_ABSENT"
     if row_manual_switch and row_mode_decode_reason:
         return row_manual_switch, row_mode_decode_reason
     if not _row_rc_input_detected(row):
         return "UNKNOWN_PPM_ABSENT", "PPM_INPUT_ABSENT"
     mode_us = telemetry._optional_float(row.get("mode_us") or row.get("raw_mode_channel_us"))
     if mode_us is None or mode_us <= 0.0:
+        if not _row_mode_channel_capture_known(row):
+            return "UNKNOWN_PPM_ABSENT", "PPM_INPUT_ABSENT"
         return "UNKNOWN_MODE_CHANNEL_MISSING", "NO_MODE_CHANNEL"
     if mode_us < 900.0 or mode_us > 2100.0:
         return "UNKNOWN_MODE_CHANNEL_INVALID", "MODE_CHANNEL_OUT_OF_RANGE"
@@ -432,6 +507,8 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
     rc_bad_rows = sum(1 for row in rc_status_rows if telemetry._parse_bool(row.get("rc_ok")) is False)
     rc_ok_ratio = (rc_ok_rows / len(rc_status_rows)) if rc_status_rows else 0.0
     ppm_signal_stable = not rc_status_rows or len(rc_status_rows) < 3 or rc_ok_ratio >= 0.6
+    ppm_edge_mismatch_seen = any(_row_ppm_edge_mismatch(row) for row in rows)
+    no_ppm_frame_capture_seen = any(_row_no_ppm_frame_capture(row) for row in rows)
     pass_ready = (
         rc_ok_seen
         and manual_mode_seen
@@ -460,13 +537,15 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         reason = "MANUAL_CONTROL_PASS"
     elif not rows or not last:
         reason = "NO_USBDBG_TELEMETRY"
+    elif ppm_edge_mismatch_seen:
+        reason = "PPM_EDGE_MISMATCH"
     elif rc_ok_seen and not ppm_signal_stable:
         reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
     elif ppm_invalid_decode_seen and not rc_ok_seen:
         reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
-    elif input_absent:
+    elif input_absent or no_ppm_frame_capture_seen:
         reason = "PPM_INPUT_ABSENT"
-    elif mode_decode_reason == "NO_MODE_CHANNEL":
+    elif mode_decode_reason == "NO_MODE_CHANNEL" and _row_mode_channel_capture_known(last):
         reason = "MODE_CHANNEL_MISSING"
     elif rc_input_detected and not rc_ok_seen:
         reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
@@ -481,6 +560,7 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         "MANUAL_CONTROL_READY": "PPM telemetry is present; set CH5 to MANUAL and move the sticks to verify output.",
         "PPM_INPUT_ABSENT": PPM_INPUT_ABSENT_ACTION,
         "PPM_CHANNELS_PRESENT_BUT_INVALID": "PPM is present but unstable or invalid; charge/check the station controller battery, receiver power, D6 signal wire, shared ground, channel order, and pulse widths.",
+        "PPM_EDGE_MISMATCH": "Firmware is not using the old moving PPM decoder edge. Rebuild manual-control with --profile old-working-ppm, which uses RISING edge capture.",
         "MODE_CHANNEL_MISSING": "PPM steering/throttle are present but CH5 mode is missing; verify the receiver mode channel.",
         "MOTOR_OUTPUT_BLOCKED": "Manual A/B commands changed, but final motor output stayed zero; inspect manual control priority and motor gating.",
         "NO_USBDBG_TELEMETRY": "No USBDBG rows were parsed; check USB serial, firmware mode, baud rate, and --verbose-raw output.",
@@ -493,6 +573,9 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
         "manual_switch": manual_switch,
         "mode_decode_reason": mode_decode_reason,
         "ppm_decode_reason_latest": ppm_decode_reason_latest,
+        "ppm_interrupt_edge_latest": _latest_non_na(rows, ["ppm_interrupt_edge"]),
+        "expected_ppm_interrupt_edge": "RISING",
+        "ppm_edge_mismatch_seen": ppm_edge_mismatch_seen,
         "mode_us_latest": _latest_non_na(rows, ["mode_us", "raw_mode_channel_us"]),
         "rc_input_detected": rc_input_detected,
         "rc_ok_rows": rc_ok_rows,
@@ -1983,14 +2066,15 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
     if not args.print_cmd and not args.from_log and not ensure_port(args):
         return 2
 
-    flags = manual_control_firmware_flags(mode_channel_index=args.mode_channel_index)
+    flags = manual_control_firmware_flags(profile=args.profile, mode_channel_index=args.mode_channel_index)
+    build_path = manual_control_build_path(args.profile)
     compile_cmd = [
         "arduino-cli",
         "compile",
         "--fqbn",
         "OpenRB-150:samd:OpenRB-150",
         "--build-path",
-        "/private/tmp/openrb-manual-control-ppm",
+        build_path,
         "--build-property",
         f"compiler.cpp.extra_flags={flags}",
         "firmware/openrb_robot_controller",
@@ -2003,11 +2087,14 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
         "--fqbn",
         "OpenRB-150:samd:OpenRB-150",
         "--build-path",
-        "/private/tmp/openrb-manual-control-ppm",
+        build_path,
         "firmware/openrb_robot_controller",
     ]
     config = {
         "mode": "manual-control",
+        "profile": args.profile,
+        "firmware_profile": args.profile,
+        "old_working_log": MANUAL_CONTROL_OLD_WORKING_LOG,
         "rc_input_mode": "ppm",
         "ppm_input_pin": "D6",
         "steer_channel": "CH1",
@@ -2029,6 +2116,7 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
             print(" ".join(shlex.quote(part) for part in compile_cmd))
             print(" ".join(shlex.quote(part) for part in upload_cmd))
         print(f"manual_control_firmware_flags={flags}")
+        print(f"manual_control_profile={args.profile}")
         print("PPM wiring: signal -> OpenRB D6; CH1 steering; CH2 throttle; CH5 mode/manual-auto.")
         print("ready_for_full_path_following=false")
         write_summary_files(
@@ -2093,6 +2181,7 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
         import serial
 
         print("Manual control: PPM input on OpenRB D6.")
+        print(f"Profile: {args.profile}. Default old-working-ppm matches the May 30 moving manual run.")
         print("Expected mapping: CH1 steering -> physical B, CH2 throttle -> physical A, CH5 mode/manual-auto.")
         print("GPS/IMU status remains visible as telemetry only; it does not gate manual motor output.")
         print("Set mode to MANUAL / AUTO OFF and move the physical station/controller.")
@@ -3602,6 +3691,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "motion_calibration_loaded": motion_calibration_loaded(cal),
             "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
             "continuous_drive_used": args.straight_motion_mode == "continuous",
+            "live_chunk_ms": args.live_chunk_ms,
+            "max_segment_chunks": args.max_segment_chunks,
+            "max_ms": args.max_ms,
+            "imu_heading_hold": telemetry._parse_bool(args.imu_heading_hold, default=True),
+            "cross_track_correction": telemetry._parse_bool(args.cross_track_correction, default=True),
             "gps_cache_used": bool(plan.get("gps_cached_used") or gps_cache_for_run is not None),
             "rc_ignored_for_usb_supervised": True,
             "gps_degraded_count": 0,
@@ -3642,6 +3736,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             straight_motion_mode=args.straight_motion_mode,
             live_update_hz=args.live_update_hz,
             live_ttl_ms=args.live_ttl_ms,
+            live_chunk_ms=args.live_chunk_ms,
+            max_segment_chunks=args.max_segment_chunks,
+            live_max_ms=args.max_ms,
+            imu_heading_hold=telemetry._parse_bool(args.imu_heading_hold, default=True),
+            cross_track_correction=telemetry._parse_bool(args.cross_track_correction, default=True),
         )
     finally:
         handle.close()
@@ -3685,6 +3784,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         "motion_calibration_loaded": motion_calibration_loaded(cal),
         "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "continuous_drive_used": summary.get("continuous_drive_used", args.straight_motion_mode == "continuous"),
+        "live_chunk_ms": args.live_chunk_ms,
+        "max_segment_chunks": args.max_segment_chunks,
+        "max_ms": summary.get("max_ms", args.max_ms),
+        "imu_heading_hold": telemetry._parse_bool(args.imu_heading_hold, default=True),
+        "cross_track_correction": telemetry._parse_bool(args.cross_track_correction, default=True),
         "gps_cache_used": bool(plan.get("gps_cached_used") or gps_cache_for_run is not None),
         "rc_ignored_for_usb_supervised": True,
         "rc_warning": (
@@ -3923,6 +4027,12 @@ def build_parser() -> argparse.ArgumentParser:
     manual_control_p.add_argument("--validate", choices=["true", "false"], default="true")
     manual_control_p.add_argument("--duration-s", type=float, default=0.0)
     manual_control_p.add_argument("--from-log", default=None)
+    manual_control_p.add_argument(
+        "--profile",
+        choices=MANUAL_CONTROL_PROFILES,
+        default=MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
+        help="firmware compile profile; default restores the old moving PPM manual build",
+    )
     manual_control_p.add_argument("--mode-channel-index", type=int, default=4)
     manual_control_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
     manual_control_p.add_argument("--out-dir", default="outputs/physical_path_planning/manual_control")
@@ -4117,6 +4227,11 @@ def build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--straight-motion-mode", choices=["continuous", "pulse"], default="continuous")
         run_p.add_argument("--live-update-hz", type=float, default=8.0)
         run_p.add_argument("--live-ttl-ms", type=int, default=350)
+        run_p.add_argument("--live-chunk-ms", type=int, default=700)
+        run_p.add_argument("--max-segment-chunks", type=int, default=20)
+        run_p.add_argument("--max-ms", type=int, default=1000)
+        run_p.add_argument("--imu-heading-hold", choices=["true", "false"], default="true")
+        run_p.add_argument("--cross-track-correction", choices=["true", "false"], default="true")
         run_p.add_argument("--out-dir", default="outputs/physical_path_planning/run")
         run_p.add_argument(
             "--print-plan",

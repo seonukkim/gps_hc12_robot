@@ -372,15 +372,31 @@ def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
 
 def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
     flags = cli.manual_control_firmware_flags(mode_channel_index=4)
-    assert "MANUAL_CONTROL_PPM=1" in flags
+    assert "MANUAL_CONTROL_PPM=1" not in flags
+    assert "MANUAL_RC_RECOVERY=1" not in flags
     assert "MODE_CHANNEL_INDEX=4" in flags
     assert "MANUAL_FORWARD_SIGN=-1" in flags
     assert "MANUAL_TURN_SIGN=1" in flags
-    assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
-    assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
+    assert "MOTOR_OUTPUT_SWAP_LR=0" in flags
+    assert "DRIVE_CALIBRATION_ENABLE=0" in flags
+    assert "IMU_ENABLE=1" not in flags
+    assert "IMU_YAW_DIAG=1" not in flags
+    assert cli.manual_control_build_path(cli.MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE) == (
+        "/private/tmp/openrb-manual-forward-neg-turn-pos"
+    )
+    assert "STAGE" not in flags
+
+
+def test_manual_control_full_telemetry_profile_keeps_new_sensor_flags() -> None:
+    flags = cli.manual_control_firmware_flags(
+        profile=cli.MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
+        mode_channel_index=4,
+    )
+    assert "MANUAL_CONTROL_PPM=1" in flags
+    assert "MODE_CHANNEL_INDEX=4" in flags
     assert "IMU_ENABLE=1" in flags
     assert "IMU_YAW_DIAG=1" in flags
-    assert "STAGE" not in flags
+    assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
 
 
 def test_integrated_ppm_decoder_matches_old_moving_controller_edge() -> None:
@@ -411,43 +427,41 @@ def test_manual_control_ppm_ch2_maps_to_physical_a() -> None:
 def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
     rows = [
         {
-            "manual_control": "true",
-            "manual_control_ppm": "true",
             "mode": "MANUAL",
             "control_source": "RC_MANUAL",
             "rc_ok": "true",
-            "raw_ch1_us": "1001",
-            "raw_ch2_us": "1001",
-            "raw_ch5_us": "1001",
-            "steer_us": "1001",
-            "throttle_us": "1001",
-            "mode_us": "1001",
-            "physical_a_cmd": "0.300",
-            "physical_b_cmd": "0.260",
-            "final_left_cmd": "0.040",
-            "final_right_cmd": "0.560",
+            "auto_sw": "false",
+            "ppm_age_ms": "12",
+            "steer_us": "1000",
+            "throttle_us": "1309",
+            "mode_us": "1000",
+            "manual_forward_sign": "-1.0",
+            "manual_turn_sign": "1.0",
+            "old_angle_remap_active": "false",
+            "control_source": "RC_MANUAL",
+            "physical_a_cmd": "0.191",
+            "physical_b_cmd": "0.809",
+            "final_left_cmd": "-0.618",
+            "final_right_cmd": "1.000",
             "motor_write_called": "true",
             "physical_output_active": "true",
-            "gps_block_reason": "OK",
-            "current_lat": "35.5705010",
-            "current_lon": "129.1872696",
-            "gps_sats": "9",
-            "gps_hdop": "1.20",
-            "imu_present": "true",
-            "imu_relative_yaw_deg": "12.5",
-            "imu_heading_block_reason": "OK",
+            "physical_a_role": "throttle",
+            "physical_b_role": "turn",
+            "wheel_to_physical_mapping": "diff_to_throttle_turn",
+            "gps_block_reason": "NO_LOCATION",
+            "gps_chars": "0",
         }
     ]
     summary = cli.evaluate_manual_control_rows(rows)
     assert summary["manual_control_ok"] is True
     assert summary["reason"] == "MANUAL_CONTROL_PASS"
     assert summary["manual_switch"] == "MANUAL"
-    assert summary["mode_us_latest"] == "1001"
+    assert summary["mode_us_latest"] == "1000"
     assert summary["gps_status_available"] is True
-    assert summary["imu_status_available"] is True
-    assert summary["last_current_lat"] == "35.5705010"
-    assert summary["last_current_lon"] == "129.1872696"
-    assert summary["last_imu_yaw"] == "12.5"
+    assert summary["imu_status_available"] is False
+    assert summary["last_current_lat"] == "NA"
+    assert summary["last_current_lon"] == "NA"
+    assert summary["last_imu_yaw"] == "NA"
     assert summary["control_source_rc_manual_seen"] is True
     assert summary["gps_required"] is False
     assert summary["imu_required"] is False
@@ -505,6 +519,85 @@ def test_manual_control_all_zero_ppm_reports_absent() -> None:
     assert summary["rc_input_detected"] is False
     assert summary["ppm_input_pin"] == "D6"
     assert "CH1" in summary["next_recommended_action"]
+
+
+def test_manual_control_no_frame_captured_does_not_report_missing_mode_channel() -> None:
+    rows = [
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "ppm_interrupt_edge": "RISING",
+            "ppm_decode_reason": "NO_PPM_FRAME",
+            "rc_input_detected": "true",
+            "rc_ok": "false",
+            "mode": "FAILSAFE",
+            "auto_sw": "false",
+            "manual_switch": "UNKNOWN_MODE_CHANNEL_MISSING",
+            "mode_decode_reason": "NO_MODE_CHANNEL",
+            "ppm_frame_count": "0",
+            "ppm_last_channel_count": "0",
+            "steer_us": "0",
+            "throttle_us": "0",
+            "mode_us": "0",
+            "control_source": "STOP",
+        }
+    ]
+    line = cli.format_manual_control_status(elapsed_s=1, rows=rows)
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert summary["manual_control_ok"] is False
+    assert summary["reason"] == "PPM_INPUT_ABSENT"
+    assert summary["manual_switch"] == "UNKNOWN_PPM_ABSENT"
+    assert summary["mode_decode_reason"] == "PPM_INPUT_ABSENT"
+    assert "mode_decode_reason=PPM_INPUT_ABSENT" in line
+
+
+def test_manual_control_mode_missing_requires_captured_mode_channel_slot() -> None:
+    rows = [
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "ppm_interrupt_edge": "RISING",
+            "ppm_decode_reason": "OK",
+            "rc_input_detected": "true",
+            "rc_ok": "false",
+            "mode": "FAILSAFE",
+            "ppm_frame_count": "3",
+            "ppm_last_channel_count": "5",
+            "steer_us": "1504",
+            "throttle_us": "1500",
+            "mode_us": "0",
+            "control_source": "STOP",
+        }
+    ]
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert summary["reason"] == "MODE_CHANNEL_MISSING"
+    assert summary["manual_switch"] == "UNKNOWN_MODE_CHANNEL_MISSING"
+    assert summary["mode_decode_reason"] == "NO_MODE_CHANNEL"
+
+
+def test_manual_control_ppm_edge_mismatch_classifies_separately() -> None:
+    rows = [
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "ppm_interrupt_edge": "FALLING",
+            "ppm_decode_reason": "NO_PPM_FRAME",
+            "rc_input_detected": "false",
+            "rc_ok": "false",
+            "mode": "FAILSAFE",
+            "ppm_frame_count": "0",
+            "ppm_last_channel_count": "0",
+            "steer_us": "0",
+            "throttle_us": "0",
+            "mode_us": "0",
+            "control_source": "STOP",
+        }
+    ]
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert summary["reason"] == "PPM_EDGE_MISMATCH"
+    assert summary["manual_switch"] == "UNKNOWN_PPM_EDGE_MISMATCH"
+    assert summary["ppm_edge_mismatch_seen"] is True
+    assert summary["expected_ppm_interrupt_edge"] == "RISING"
 
 
 def test_manual_control_status_line_includes_full_telemetry_snapshot() -> None:
@@ -644,11 +737,14 @@ def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.
     rc = cli.main(["manual-control", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "MANUAL_CONTROL_PPM=1" in out
-    assert "IMU_ENABLE=1" in out
+    assert "manual_control_profile=old-working-ppm" in out
+    assert "MANUAL_CONTROL_PPM=1" not in out
+    assert "IMU_ENABLE=1" not in out
+    assert "/private/tmp/openrb-manual-forward-neg-turn-pos" in out
     assert "OpenRB D6" in out
     data = _assert_standard_summary(tmp_path)
     assert data["mode"] == "manual-control"
+    assert data["profile"] == "old-working-ppm"
     assert data["ppm_input_pin"] == "D6"
 
 
@@ -932,6 +1028,7 @@ def test_manual_control_default_duration_is_continuous() -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["manual-control"])
     assert args.duration_s == 0.0
+    assert args.profile == "old-working-ppm"
 
 
 def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:

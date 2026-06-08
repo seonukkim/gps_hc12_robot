@@ -8,6 +8,13 @@ and how the current code maps joystick input to motor commands.
 sensor-disabled mode: GPS and IMU status continue to print when available, but
 they are diagnostic-only and do not gate manual motor output.
 
+The default `manual-control` firmware profile is `old-working-ppm`. It restores
+the exact compile flags from the 2026-05-30 moving PPM manual run:
+`MANUAL_FORWARD_SIGN=-1`, `MANUAL_TURN_SIGN=1`, `MOTOR_OUTPUT_SWAP_LR=0`, and
+`DRIVE_CALIBRATION_ENABLE=0`. Use `--profile full-telemetry-ppm` only when
+diagnosing the newer sensor-heavy PPM build; it is not the default movement
+compatibility profile.
+
 All motor and ESC checks are wheel-off-ground only.
 
 ## Active Files
@@ -335,9 +342,15 @@ Recommended current manual RC test build:
 ```bash
 arduino-cli compile \
   --fqbn OpenRB-150:samd:OpenRB-150 \
-  --build-path /private/tmp/openrb-manual-final-sign \
+  --build-path /private/tmp/openrb-manual-forward-neg-turn-pos \
   --build-property 'compiler.cpp.extra_flags=-DMANUAL_FORWARD_SIGN=-1 -DMANUAL_TURN_SIGN=1 -DMOTOR_OUTPUT_SWAP_LR=0 -DDRIVE_CALIBRATION_ENABLE=0' \
   firmware/openrb_robot_controller
+```
+
+Unified launcher equivalent:
+
+```bash
+bash scripts/run_physical_path_planner.sh manual-control --profile old-working-ppm
 ```
 
 The current correction was chosen from the observed failure sequence:

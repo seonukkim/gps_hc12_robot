@@ -43,6 +43,7 @@ Examples:
     --out-dir outputs/physical_path_planning/manual_rc
 
   bash scripts/run_physical_path_planner.sh manual-control \
+    --profile old-working-ppm \
     --out-dir outputs/physical_path_planning/manual_control
 
   bash scripts/run_physical_path_planner.sh station-hw-diagnose \
@@ -127,6 +128,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --max-ms)
       MAX_MS="$2"
+      PASSTHRU+=("--max-ms" "$2")
       shift 2
       ;;
     --print-plan)
@@ -229,6 +231,8 @@ Options:
   --duration-s SECONDS     Monitor duration; <=0 means continuous until Ctrl-C.
                             Default: 0.
   --upload true|false|auto Upload PPM manual firmware. Default: true.
+  --profile PROFILE        Firmware compile profile. Default: old-working-ppm.
+                            Other option: full-telemetry-ppm.
   --from-log PATH          Parse an existing raw USB debug log instead of serial.
   --verbose-raw true|false Print raw telemetry in addition to concise status.
   --print-cmd              Print firmware commands and exit.
@@ -316,7 +320,7 @@ flash_guarded_crawl_firmware() {
 -DUSB_DRIVE_LIVE_IGNORE_RC_INPUT=1 \
 -DUSB_DRIVE_LIVE_MAX_ABS_A=${MAX_ABS_A} \
 -DUSB_DRIVE_LIVE_MAX_ABS_B=${MAX_ABS_B} \
--DUSB_DRIVE_LIVE_MAX_DURATION_MS=3000 \
+-DUSB_DRIVE_LIVE_MAX_DURATION_MS=${MAX_MS} \
 -DUSB_DRIVE_LIVE_UPDATE_TIMEOUT_MS=350 \
 -DIMU_ENABLE=1 \
 -DIMU_YAW_DIAG=1 \
