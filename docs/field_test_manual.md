@@ -210,7 +210,11 @@ bash scripts/run_physical_path_planner.sh preview \
 ```
 
 Preview generates the rectangle coverage plan and images without motor output.
-A-B is the diagonal of the workspace rectangle.
+A-B is the diagonal of the workspace rectangle. If `--start-lat` and
+`--start-lon` are omitted, preview captures the current rover GPS from OpenRB
+telemetry and falls back to a fresh cached GPS coordinate. If neither is
+available, the summary reports `reason=NO_USABLE_START_GPS`; wait outside longer
+for GPS or pass explicit start coordinates.
 
 ## 10. Execute A Reviewed Plan
 
@@ -226,8 +230,10 @@ STOP, or output still active after STOP.
 
 Approved `motion_calibration.json` entries are loaded automatically. If approved
 90-degree turn commands exist, connectors use them before falling back to
-repeated small turn pulses. GPS degradation is not fatal under the default
-continue policy when IMU heading hold can continue.
+repeated small turn pulses. Straight coverage segments use continuous USB live
+drive updates by default, with approved forward/backward A/B/ms as the base. GPS
+degradation is not fatal under the default continue policy when IMU heading hold
+can continue.
 
 Every output must keep:
 

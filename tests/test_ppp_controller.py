@@ -180,6 +180,30 @@ def test_controller_summary_is_guarded_not_ready() -> None:
         checks.assert_not_ready_for_full_path_following(summary)
 
 
+def test_controller_summary_reports_continuous_drive_and_imu_heading() -> None:
+    summary = controller.build_controller_summary(
+        [
+            {
+                "row_type": "pulse",
+                "valid_pulse": True,
+                "drive_mode": "continuous",
+                "imu_relative_yaw_deg": 3.5,
+                "gps_degraded": True,
+            }
+        ],
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.001,
+        goal_lon=129.001,
+        goal_distance_m=10.0,
+        fallback_to_repeated_pulses=False,
+    )
+    assert summary["continuous_drive_used"] is True
+    assert summary["continuous_drive_count"] == 1
+    assert summary["imu_heading_used_count"] == 1
+    assert summary["gps_degraded_count"] == 1
+
+
 # --- end-to-end loop over a fake serial handle -------------------------------
 
 

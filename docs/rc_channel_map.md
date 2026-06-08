@@ -21,6 +21,8 @@ The station panel can physically look like `CH7`, but the firmware uses the rece
 - `STEERING_CHANNEL_INDEX = 0`
 - `THROTTLE_CHANNEL_INDEX = 1`
 - `MODE_CHANNEL_INDEX = 4`
+- PPM decoder edge/sync: `FALLING`, frame gap `>4000 us`, matching
+  `firmware/rc_mix_test/rc_mix_test.ino`
 - `STEERING_CENTER_US = 1504`
 - `THROTTLE_CENTER_US = 1500`
 - `RC_DEADBAND_US = 80`

@@ -360,8 +360,16 @@ def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
     assert "MANUAL_TURN_SIGN=1" in flags
     assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
     assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
-    assert "IMU_ENABLE=1" not in flags
+    assert "IMU_ENABLE=1" in flags
+    assert "IMU_YAW_DIAG=1" in flags
     assert "STAGE" not in flags
+
+
+def test_integrated_ppm_decoder_matches_verified_rc_mix_edge() -> None:
+    source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
+    assert "constexpr uint16_t PPM_SYNC_US = 4000;" in source
+    assert 'constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";' in source
+    assert "attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);" in source
 
 
 def test_manual_control_ppm_ch1_maps_to_physical_b() -> None:
@@ -400,11 +408,26 @@ def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
             "final_right_cmd": "0.560",
             "motor_write_called": "true",
             "physical_output_active": "true",
+            "gps_block_reason": "OK",
+            "current_lat": "35.5705010",
+            "current_lon": "129.1872696",
+            "gps_sats": "9",
+            "gps_hdop": "1.20",
+            "imu_present": "true",
+            "imu_relative_yaw_deg": "12.5",
+            "imu_heading_block_reason": "OK",
         }
     ]
     summary = cli.evaluate_manual_control_rows(rows)
     assert summary["manual_control_ok"] is True
     assert summary["reason"] == "MANUAL_CONTROL_PASS"
+    assert summary["manual_switch"] == "MANUAL"
+    assert summary["mode_us_latest"] == "1001"
+    assert summary["gps_status_available"] is True
+    assert summary["imu_status_available"] is True
+    assert summary["last_current_lat"] == "35.5705010"
+    assert summary["last_current_lon"] == "129.1872696"
+    assert summary["last_imu_yaw"] == "12.5"
     assert summary["control_source_rc_manual_seen"] is True
     assert summary["gps_required"] is False
     assert summary["imu_required"] is False
@@ -414,9 +437,143 @@ def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
 def test_manual_control_all_zero_ppm_reports_absent() -> None:
     summary = cli.evaluate_manual_control_rows(cli.telemetry.parse_usbdbg_rows(_RC_ABSENT_LOG))
     assert summary["reason"] == "PPM_INPUT_ABSENT"
+    assert summary["manual_switch"] == "UNKNOWN_PPM_ABSENT"
     assert summary["rc_input_detected"] is False
     assert summary["ppm_input_pin"] == "D6"
     assert "CH1" in summary["next_recommended_action"]
+
+
+def test_manual_control_status_line_includes_full_telemetry_snapshot() -> None:
+    rows = [
+        {
+            "rc_input_detected": "true",
+            "rc_ok": "true",
+            "mode": "MANUAL",
+            "auto_sw": "false",
+            "ppm_interrupt_edge": "FALLING",
+            "ppm_decode_reason": "OK",
+            "ppm_frame_count": "12",
+            "ppm_last_channel_count": "8",
+            "ppm_short_rejects": "0",
+            "ppm_long_rejects": "0",
+            "ppm_last_rejected_us": "0",
+            "steer_us": "1001",
+            "throttle_us": "1001",
+            "mode_us": "1001",
+            "physical_a_cmd": "0.300",
+            "physical_b_cmd": "0.260",
+            "control_source": "RC_MANUAL",
+            "motor_write_called": "true",
+            "physical_output_active": "true",
+            "final_left_cmd": "0.040",
+            "final_right_cmd": "0.560",
+            "gps_block_reason": "OK",
+            "current_lat": "35.5705010",
+            "current_lon": "129.1872696",
+            "gps_sats": "9",
+            "gps_hdop": "1.20",
+            "imu_present": "true",
+            "imu_relative_yaw_deg": "12.5",
+            "imu_heading_block_reason": "OK",
+        }
+    ]
+    line = cli.format_manual_control_status(elapsed_s=7, rows=rows)
+    for field in [
+        "rc_input_detected=true",
+        "rc_ok=true",
+        "mode=MANUAL",
+        "auto_sw=false",
+        "manual_switch=MANUAL",
+        "mode_decode_reason=MODE_CHANNEL_MANUAL",
+        "ppm_interrupt_edge=FALLING",
+        "ppm_decode_reason=OK",
+        "ppm_frame_count=12",
+        "ppm_last_channel_count=8",
+        "ppm_short_rejects=0",
+        "ppm_long_rejects=0",
+        "ppm_last_rejected_us=0",
+        "steer_us=1001",
+        "throttle_us=1001",
+        "mode_us=1001",
+        "physical_a_cmd=0.300",
+        "physical_b_cmd=0.260",
+        "control_source=RC_MANUAL",
+        "motor_write_called=true",
+        "physical_output_active=true",
+        "final_left_cmd=0.040",
+        "final_right_cmd=0.560",
+        "gps_block_reason=OK",
+        "current_lat=35.5705010",
+        "current_lon=129.1872696",
+        "gps_sats=9",
+        "gps_hdop=1.20",
+        "imu_present=true",
+        "imu_relative_yaw_deg=12.5",
+        "imu_heading_block_reason=OK",
+    ]:
+        assert field in line
+
+
+def test_manual_control_status_line_uses_raw_mode_channel_fallback() -> None:
+    rows = [
+        {
+            "rc_input_detected": "true",
+            "rc_ok": "true",
+            "mode": "MANUAL",
+            "auto_sw": "false",
+            "steer_us": "1504",
+            "throttle_us": "1500",
+            "raw_mode_channel_us": "1001",
+            "control_source": "RC_MANUAL",
+        }
+    ]
+    line = cli.format_manual_control_status(elapsed_s=1, rows=rows)
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert "manual_switch=MANUAL" in line
+    assert "mode_decode_reason=MODE_CHANNEL_MANUAL" in line
+    assert "mode_us=1001" in line
+    assert summary["manual_switch"] == "MANUAL"
+    assert summary["mode_us_latest"] == "1001"
+
+
+def test_manual_control_short_ppm_pulses_classify_as_invalid_channels() -> None:
+    rows = [
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "ppm_interrupt_edge": "RISING",
+            "ppm_decode_reason": "PPM_SHORT_PULSE_NO_VALID_FRAME",
+            "ppm_short_rejects": "27",
+            "ppm_last_rejected_us": "204",
+            "rc_input_detected": "false",
+            "rc_ok": "false",
+            "mode": "FAILSAFE",
+            "manual_switch": "UNKNOWN_PPM_INVALID",
+            "mode_decode_reason": "PPM_SHORT_PULSE_NO_VALID_FRAME",
+            "steer_us": "0",
+            "throttle_us": "0",
+            "mode_us": "0",
+            "control_source": "STOP",
+        }
+    ]
+    line = cli.format_manual_control_status(elapsed_s=4, rows=rows)
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert "manual_switch=UNKNOWN_PPM_INVALID" in line
+    assert "ppm_decode_reason=PPM_SHORT_PULSE_NO_VALID_FRAME" in line
+    assert "ppm_last_rejected_us=204" in line
+    assert summary["reason"] == "PPM_CHANNELS_PRESENT_BUT_INVALID"
+    assert summary["ppm_decode_reason_latest"] == "PPM_SHORT_PULSE_NO_VALID_FRAME"
+
+
+def test_manual_control_no_usbdbg_rows_classifies_without_all_na() -> None:
+    summary = cli.evaluate_manual_control_rows([])
+    assert summary["reason"] == "NO_USBDBG_TELEMETRY"
+    assert summary["manual_switch"] == "UNKNOWN_NO_USBDBG_TELEMETRY"
+    assert summary["mode_decode_reason"] == "NO_USBDBG_TELEMETRY"
+    assert summary["gps_status_available"] is False
+    assert summary["imu_status_available"] is False
+    line = cli.format_manual_control_status(elapsed_s=0, rows=[])
+    assert "mode_decode_reason=NO_USBDBG_TELEMETRY" in line
 
 
 def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -424,6 +581,7 @@ def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.
     assert rc == 0
     out = capsys.readouterr().out
     assert "MANUAL_CONTROL_PPM=1" in out
+    assert "IMU_ENABLE=1" in out
     assert "OpenRB D6" in out
     data = _assert_standard_summary(tmp_path)
     assert data["mode"] == "manual-control"
@@ -706,6 +864,12 @@ def test_station_hw_manual_default_duration_is_continuous() -> None:
     assert diagnose_args.duration_s > 0.0
 
 
+def test_manual_control_default_duration_is_continuous() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["manual-control"])
+    assert args.duration_s == 0.0
+
+
 def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:
     source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
     assert "bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;" in source
@@ -840,6 +1004,101 @@ def test_preview_diagonal_without_width_fails_cleanly(tmp_path: Path) -> None:
     assert summary["reason"] == "PLAN_INPUT_INVALID"
 
 
+def test_preview_captures_live_gps_start_from_log_when_omitted(tmp_path: Path) -> None:
+    log = tmp_path / "gps.log"
+    log.write_text(
+        "USBDBG event=HEARTBEAT current_lat=35.5709000 current_lon=129.1871000 "
+        "gps_block_reason=OK gps_sats=7 gps_hdop=1.20\n"
+    )
+    rc = cli.main(
+        [
+            "preview",
+            "--from-log",
+            str(log),
+            "--goal-mode",
+            "relative_enu",
+            "--goal-east-m",
+            "4.0",
+            "--goal-north-m",
+            "-1.2",
+            "--workspace-width-m",
+            "1.2",
+            "--step-spacing-m",
+            "0.25",
+            "--no-png",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["start_source"] == "live_gps"
+    assert summary["current_lat"] == pytest.approx(35.5709)
+    assert summary["current_lon"] == pytest.approx(129.1871)
+    assert summary["gps_cached_used"] is False
+
+
+def test_preview_uses_fresh_cached_gps_when_live_gps_missing(tmp_path: Path) -> None:
+    log = tmp_path / "gps.log"
+    log.write_text(
+        "USBDBG event=HEARTBEAT current_lat=NA current_lon=NA gps_cached_lat=35.5709000 "
+        "gps_cached_lon=129.1871000 gps_cached_age_ms=5000 gps_block_reason=BAD_HDOP\n"
+    )
+    rc = cli.main(
+        [
+            "preview",
+            "--from-log",
+            str(log),
+            "--goal-mode",
+            "relative_enu",
+            "--goal-east-m",
+            "4.0",
+            "--goal-north-m",
+            "-1.2",
+            "--workspace-width-m",
+            "1.2",
+            "--step-spacing-m",
+            "0.25",
+            "--no-png",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["start_source"] == "cached_gps"
+    assert summary["gps_cached_used"] is True
+
+
+def test_preview_without_live_or_cached_gps_fails_cleanly(tmp_path: Path) -> None:
+    log = tmp_path / "gps.log"
+    log.write_text("USBDBG event=HEARTBEAT current_lat=NA current_lon=NA gps_block_reason=NO_LOCATION\n")
+    rc = cli.main(
+        [
+            "preview",
+            "--from-log",
+            str(log),
+            "--goal-mode",
+            "relative_enu",
+            "--goal-east-m",
+            "4.0",
+            "--goal-north-m",
+            "-1.2",
+            "--workspace-width-m",
+            "1.2",
+            "--step-spacing-m",
+            "0.25",
+            "--no-png",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 2
+    summary = _assert_standard_summary(tmp_path)
+    assert summary["reason"] == "NO_USABLE_START_GPS"
+    assert "pass --start-lat and --start-lon" in summary["next_recommended_action"]
+
+
 # --- run / execute-plan: --print-plan stays no-serial -------------------------
 
 
@@ -875,6 +1134,55 @@ def test_execute_plan_can_load_existing_plan_dir_without_start_coords(tmp_path: 
     )
     assert rc == 0
     assert (out_dir / "plan.json").exists()
+
+
+def test_execute_plan_loads_default_motion_calibration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cal_dir = tmp_path / "outputs" / "physical_path_planning" / "calibration"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "motion_calibration.json").write_text(
+        json.dumps(
+            {
+                "forward": {"a": 0.30, "b": 0.0, "ms": 900, "approved_by_user": True},
+                "backward": {"a": -0.08, "b": 0.0, "ms": 350, "approved_by_user": True},
+                "turn_left_90": {
+                    "a": 0.0,
+                    "b": 0.24,
+                    "ms": 1300,
+                    "target_angle_deg": 90,
+                    "approved_by_user": True,
+                },
+                "turn_right_90": {
+                    "a": 0.0,
+                    "b": -0.12,
+                    "ms": 850,
+                    "target_angle_deg": 90,
+                    "approved_by_user": True,
+                },
+            }
+        )
+    )
+    out_dir = tmp_path / "execute"
+    rc = cli.main(
+        [
+            "execute-plan",
+            *_PREVIEW_GOAL,
+            "--workspace-width-m",
+            "2",
+            "--print-plan",
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+    summary = _assert_standard_summary(out_dir)
+    assert summary["motion_calibration_loaded"] is True
+    assert summary["connector_mode_effective"] == "angle_calibrated"
+    assert summary["continuous_drive_used"] is True
+    plan = json.loads((out_dir / "plan.json").read_text())
+    primitives = plan["primitives"]
+    assert any(p["primitive_type"] == "move_forward" and p["pulse_ms"] == 900 for p in primitives)
+    assert any(p["primitive_type"] == "move_backward" and p["pulse_ms"] == 350 for p in primitives)
 
 
 # --- diagnose --from-log (no serial) -----------------------------------------

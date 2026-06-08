@@ -3,6 +3,8 @@
 
 constexpr uint8_t PPM_PIN = 6;
 constexpr uint8_t CHANNEL_COUNT = 8;
+constexpr uint16_t PPM_SYNC_US = 4000;
+constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";
 
 volatile uint16_t ppmChannels[CHANNEL_COUNT] = {0};
 volatile uint8_t ppmIndex = 0;
@@ -14,7 +16,7 @@ void ppmISR() {
   uint32_t pulseWidth = now - lastEdgeMicros;
   lastEdgeMicros = now;
 
-  if (pulseWidth > 3000) {
+  if (pulseWidth > PPM_SYNC_US) {
     ppmIndex = 0;
     return;
   }
@@ -31,8 +33,12 @@ void ppmISR() {
 void setup() {
   Serial.begin(115200);
   pinMode(PPM_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);
   Serial.println("PPM test ready. Confirm pin 6 supports interrupts on the target board.");
+  Serial.print("PPM decoder edge=");
+  Serial.print(PPM_INTERRUPT_EDGE_NAME);
+  Serial.print(" sync_us=");
+  Serial.println(PPM_SYNC_US);
 }
 
 void loop() {

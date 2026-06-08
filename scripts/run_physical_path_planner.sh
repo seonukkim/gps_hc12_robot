@@ -160,11 +160,13 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 PASSTHRU_HELP="false"
-for arg in "${PASSTHRU[@]}"; do
-  if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
-    PASSTHRU_HELP="true"
-  fi
-done
+if [[ ${#PASSTHRU[@]} -gt 0 ]]; then
+  for arg in "${PASSTHRU[@]}"; do
+    if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+      PASSTHRU_HELP="true"
+    fi
+  done
+fi
 
 if [[ "$PASSTHRU_HELP" == "true" ]]; then
   case "$MODE" in
@@ -219,7 +221,8 @@ visible as telemetry and does not gate manual drive.
 Options:
   --port PORT              OpenRB USB debug port; auto-detected when omitted.
   --baud BAUD              OpenRB USB debug baudrate. Default: 115200.
-  --duration-s SECONDS     Monitor duration. Default: 45.
+  --duration-s SECONDS     Monitor duration; <=0 means continuous until Ctrl-C.
+                            Default: 0.
   --upload true|false|auto Upload PPM manual firmware. Default: true.
   --from-log PATH          Parse an existing raw USB debug log instead of serial.
   --verbose-raw true|false Print raw telemetry in addition to concise status.
@@ -347,25 +350,43 @@ resolve_post_upload_port() {
   printf '%s' "$detected"
 }
 
+exec_cli() {
+  if [[ ${#PASSTHRU[@]} -gt 0 ]]; then
+    exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
+  else
+    exec uv run python -m tools.physical_path_planning.cli "$MODE"
+  fi
+}
+
+exec_cli_with_port() {
+  local post_upload_port="$1"
+  if [[ ${#PASSTHRU[@]} -gt 0 ]]; then
+    exec uv run python -m tools.physical_path_planning.cli "$MODE" \
+      "${PASSTHRU[@]}" --port "$post_upload_port"
+  else
+    exec uv run python -m tools.physical_path_planning.cli "$MODE" \
+      --port "$post_upload_port"
+  fi
+}
+
 case "$MODE" in
   preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|station-drive|station-manual|guarded-pulse-ready)
-    exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
+    exec_cli
     ;;
   run|execute-plan)
     if [[ "$PRINT_PLAN" == "true" ]]; then
       # No motion, no serial: build/write the plan only.
-      exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
+      exec_cli
     fi
     if [[ -z "$PORT" ]]; then
-      exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
+      exec_cli
     fi
     flash_guarded_crawl_firmware "$PORT"
     POST_UPLOAD_PORT="$(resolve_post_upload_port "$PORT")"
     echo "post_upload_port=${POST_UPLOAD_PORT}"
     # The trailing --port wins in argparse, pinning the controller to the
     # re-enumerated board.
-    exec uv run python -m tools.physical_path_planning.cli "$MODE" \
-      "${PASSTHRU[@]}" --port "$POST_UPLOAD_PORT"
+    exec_cli_with_port "$POST_UPLOAD_PORT"
     ;;
   *)
     echo "Unknown mode: ${MODE}" >&2

@@ -78,8 +78,9 @@ The probe uses the same PPM input pin and frame decoder style as
 
 - PPM input: OpenRB `D6`
 - channels: `ch1_us` through `ch8_us`
-- frame sync: pulse width greater than `3000 us`
-- interrupt edge: `RISING`
+- frame sync: pulse width greater than `4000 us`
+- interrupt edge: `FALLING` (matches the verified `firmware/rc_mix_test`
+  decoder; the wrong edge can show short invalid pulses such as about `200 us`)
 
 It does not attach Servo or motor outputs. It prints current values, min/max
 observed values, and `changed_channels` every `0.5` seconds.

@@ -675,6 +675,12 @@ constexpr uint16_t RC_DEADBAND_US = 80;
 constexpr uint16_t RC_MIN_VALID_US = 900;
 constexpr uint16_t RC_MAX_VALID_US = 2100;
 constexpr uint16_t RC_AUTO_SWITCH_ON_US = 1600;
+constexpr uint16_t PPM_SYNC_US = 4000;
+constexpr uint16_t PPM_CAPTURE_MIN_US = 800;
+constexpr uint16_t PPM_CAPTURE_MAX_US = 2200;
+constexpr uint32_t RC_FRAME_TIMEOUT_MS = 500;
+constexpr uint8_t PPM_REQUIRED_CHANNEL_COUNT = MODE_CHANNEL_INDEX_VALUE + 1;
+constexpr const char *PPM_INTERRUPT_EDGE_NAME = "FALLING";
 constexpr float RC_MANUAL_AXIS_ROTATION_SCALE = 0.70710678f;
 constexpr uint16_t ESC_NEUTRAL_US = 1500;
 constexpr uint16_t ESC_RANGE_US = 300;
@@ -718,9 +724,16 @@ Servo escLeft;
 Servo escRight;
 
 volatile uint16_t ppmChannels[CHANNEL_COUNT] = {0};
+volatile uint16_t ppmWorkingChannels[CHANNEL_COUNT] = {0};
 volatile uint8_t ppmIndex = 0;
+volatile uint8_t ppmLastFrameChannelCount = 0;
 volatile uint32_t lastPpmEdgeMicros = 0;
 volatile uint32_t lastPpmFrameMs = 0;
+volatile uint32_t ppmAcceptedFrameCount = 0;
+volatile uint32_t ppmIncompleteFrameCount = 0;
+volatile uint32_t ppmShortPulseRejectCount = 0;
+volatile uint32_t ppmLongPulseRejectCount = 0;
+volatile uint16_t ppmLastRejectedPulseUs = 0;
 
 RobotMode currentMode = DISARMED;
 String hc12Line;
@@ -852,14 +865,37 @@ void ppmISR() {
   uint32_t width = now - lastPpmEdgeMicros;
   lastPpmEdgeMicros = now;
 
-  if (width > 3000) {
+  if (width > PPM_SYNC_US) {
+    if (ppmIndex >= PPM_REQUIRED_CHANNEL_COUNT) {
+      for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
+        ppmChannels[i] = (i < ppmIndex) ? ppmWorkingChannels[i] : 0;
+      }
+      ppmLastFrameChannelCount = ppmIndex;
+      lastPpmFrameMs = millis();
+      ppmAcceptedFrameCount++;
+    } else if (ppmIndex > 0) {
+      ppmIncompleteFrameCount++;
+    }
     ppmIndex = 0;
-    lastPpmFrameMs = millis();
+    return;
+  }
+
+  if (width < PPM_CAPTURE_MIN_US) {
+    ppmShortPulseRejectCount++;
+    ppmLastRejectedPulseUs = static_cast<uint16_t>(width);
+    ppmIndex = 0;
+    return;
+  }
+
+  if (width > PPM_CAPTURE_MAX_US) {
+    ppmLongPulseRejectCount++;
+    ppmLastRejectedPulseUs = static_cast<uint16_t>(width);
+    ppmIndex = 0;
     return;
   }
 
   if (ppmIndex < CHANNEL_COUNT) {
-    ppmChannels[ppmIndex] = width;
+    ppmWorkingChannels[ppmIndex] = static_cast<uint16_t>(width);
     ppmIndex++;
   }
 }
@@ -1528,7 +1564,7 @@ void clearStationManualCommand() {
 }
 
 bool rcFrameRecent() {
-  return millis() - lastPpmFrameMs < 200;
+  return lastPpmFrameMs != 0 && millis() - lastPpmFrameMs < RC_FRAME_TIMEOUT_MS;
 }
 
 void readRcChannels(uint16_t &steering, uint16_t &throttle, uint16_t &mode) {
@@ -2614,19 +2650,67 @@ void debugPrintStatus() {
   uint16_t throttleUs = 0;
   uint16_t modeUs = 0;
   uint32_t ppmFrameMs = 0;
+  uint8_t ppmFrameChannelCount = 0;
+  uint32_t ppmFrameCount = 0;
+  uint32_t ppmIncompleteCount = 0;
+  uint32_t ppmShortRejectCount = 0;
+  uint32_t ppmLongRejectCount = 0;
+  uint16_t ppmRejectedUs = 0;
   uint16_t rawChannelUs[CHANNEL_COUNT] = {0};
   noInterrupts();
   for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
     rawChannelUs[i] = ppmChannels[i];
   }
   ppmFrameMs = lastPpmFrameMs;
+  ppmFrameChannelCount = ppmLastFrameChannelCount;
+  ppmFrameCount = ppmAcceptedFrameCount;
+  ppmIncompleteCount = ppmIncompleteFrameCount;
+  ppmShortRejectCount = ppmShortPulseRejectCount;
+  ppmLongRejectCount = ppmLongPulseRejectCount;
+  ppmRejectedUs = ppmLastRejectedPulseUs;
   interrupts();
+  bool rcInputDetected = ppmFrameMs != 0 && (now - ppmFrameMs) < RC_FRAME_TIMEOUT_MS;
+  bool ppmInvalidPulseSeen = ppmShortRejectCount > 0 || ppmLongRejectCount > 0;
+  const char *ppmDecodeReason = "OK";
+  if (!rcInputDetected) {
+    if (ppmFrameMs == 0 && ppmShortRejectCount > 0) {
+      ppmDecodeReason = "PPM_SHORT_PULSE_NO_VALID_FRAME";
+    } else if (ppmFrameMs == 0 && ppmLongRejectCount > 0) {
+      ppmDecodeReason = "PPM_LONG_PULSE_NO_VALID_FRAME";
+    } else if (ppmFrameMs == 0 && ppmIncompleteCount > 0) {
+      ppmDecodeReason = "PPM_INCOMPLETE_FRAME_NO_VALID_FRAME";
+    } else if (ppmFrameMs == 0) {
+      ppmDecodeReason = "NO_PPM_FRAME";
+    } else {
+      ppmDecodeReason = "PPM_FRAME_STALE";
+    }
+  }
   steeringUs = rawChannelUs[STEERING_CHANNEL_INDEX];
   throttleUs = rawChannelUs[THROTTLE_CHANNEL_INDEX];
   modeUs = rawChannelUs[MODE_CHANNEL_INDEX_VALUE];
 
   bool rcValid = rcChannelsValid(steeringUs, throttleUs, modeUs);
   bool autoSwitchOn = rcAutoSwitchOn(modeUs);
+  const char *manualSwitch = "UNKNOWN_PPM_ABSENT";
+  const char *modeDecodeReason = "PPM_INPUT_ABSENT";
+  if (rcInputDetected) {
+    if (modeUs == 0) {
+      manualSwitch = "UNKNOWN_MODE_CHANNEL_MISSING";
+      modeDecodeReason = "NO_MODE_CHANNEL";
+    } else if (!rcPulseValid(modeUs)) {
+      manualSwitch = "UNKNOWN_MODE_CHANNEL_INVALID";
+      modeDecodeReason = "MODE_CHANNEL_OUT_OF_RANGE";
+    } else if (autoSwitchOn) {
+      manualSwitch = "AUTO";
+      modeDecodeReason = "MODE_CHANNEL_AUTO";
+    } else {
+      manualSwitch = "MANUAL";
+      modeDecodeReason = "MODE_CHANNEL_MANUAL";
+    }
+  } else if (ppmInvalidPulseSeen || ppmIncompleteCount > 0) {
+    manualSwitch = "UNKNOWN_PPM_INVALID";
+    modeDecodeReason = ppmDecodeReason;
+  }
   float steeringNorm = normRcCentered(steeringUs, STEERING_CENTER_US);
   float throttleNorm = normRcCentered(throttleUs, THROTTLE_CENTER_US);
   float manualForward = 0.0f;
@@ -2650,18 +2734,46 @@ void debugPrintStatus() {
   Serial.print(F(" manual_control="));
   Serial.print(MANUAL_CONTROL_PPM_ENABLED ? F("true") : F("false"));
   Serial.print(F(" manual_control_ppm=true ppm_input_pin=D6 ppm_ch1=steering ppm_ch2=throttle ppm_ch5=mode"));
+  Serial.print(F(" ppm_interrupt_edge="));
+  Serial.print(PPM_INTERRUPT_EDGE_NAME);
+  Serial.print(F(" ppm_sync_us="));
+  Serial.print(PPM_SYNC_US);
+  Serial.print(F(" ppm_capture_min_us="));
+  Serial.print(PPM_CAPTURE_MIN_US);
+  Serial.print(F(" ppm_capture_max_us="));
+  Serial.print(PPM_CAPTURE_MAX_US);
+  Serial.print(F(" ppm_decode_reason="));
+  Serial.print(ppmDecodeReason);
+  Serial.print(F(" rc_input_detected="));
+  Serial.print(rcInputDetected ? F("true") : F("false"));
   Serial.print(F(" mode="));
   Serial.print(modeName(currentMode));
   Serial.print(F(" rc_ok="));
   Serial.print(rcValid ? F("true") : F("false"));
   Serial.print(F(" auto_sw="));
   Serial.print(autoSwitchOn ? F("true") : F("false"));
+  Serial.print(F(" manual_switch="));
+  Serial.print(manualSwitch);
+  Serial.print(F(" mode_decode_reason="));
+  Serial.print(modeDecodeReason);
   Serial.print(F(" ppm_age_ms="));
   if (ppmFrameMs == 0) {
     Serial.print(F("NA"));
   } else {
     Serial.print(now - ppmFrameMs);
   }
+  Serial.print(F(" ppm_frame_count="));
+  Serial.print(ppmFrameCount);
+  Serial.print(F(" ppm_last_channel_count="));
+  Serial.print(ppmFrameChannelCount);
+  Serial.print(F(" ppm_incomplete_frames="));
+  Serial.print(ppmIncompleteCount);
+  Serial.print(F(" ppm_short_rejects="));
+  Serial.print(ppmShortRejectCount);
+  Serial.print(F(" ppm_long_rejects="));
+  Serial.print(ppmLongRejectCount);
+  Serial.print(F(" ppm_last_rejected_us="));
+  Serial.print(ppmRejectedUs);
   Serial.print(F(" steer_us="));
   Serial.print(steeringUs);
   Serial.print(F(" throttle_us="));
@@ -2872,6 +2984,20 @@ void debugPrintStatus() {
   Serial.print(gpsIsReady ? F("true") : F("false"));
   Serial.print(F(" gps_block_reason="));
   Serial.print(gpsBlockReason());
+  Serial.print(F(" position_source="));
+  Serial.print(gpsLocValid ? F("gps") : F("NA"));
+  Serial.print(F(" current_lat="));
+  if (gpsLocValid) {
+    Serial.print(gps.location.lat(), 7);
+  } else {
+    Serial.print(F("NA"));
+  }
+  Serial.print(F(" current_lon="));
+  if (gpsLocValid) {
+    Serial.print(gps.location.lng(), 7);
+  } else {
+    Serial.print(F("NA"));
+  }
   Serial.print(F(" gps_stale_ms="));
   Serial.print(GPS_STALE_MS);
   Serial.print(F(" gps_min_sats="));
@@ -3158,6 +3284,7 @@ void debugPrintStatus() {
   Serial.print(F(" unclamped_final_right_cmd="));
   Serial.print(groundCrawlUnclampedRightCmd, 3);
 #endif
+  printImuDiagFields();
   Serial.println();
 }
 
@@ -4799,7 +4926,7 @@ void setup() {
 #endif
 
   pinMode(PPM_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(PPM_PIN), ppmISR, FALLING);
 
   escLeft.attach(ESC_LEFT_PIN);
   escRight.attach(ESC_RIGHT_PIN);
@@ -4892,8 +5019,10 @@ void setup() {
 #elif MANUAL_CONTROL_PPM || MANUAL_RC_RECOVERY
   Serial.println("MANUAL_CONTROL_PPM enabled.");
   Serial.println("PPM input: OpenRB D6; CH1 steering, CH2 throttle, CH5 manual/auto.");
+  Serial.println("PPM decoder matches verified rc_mix_test: FALLING edge, 4000us sync gap.");
   Serial.println("MANUAL mode maps throttle to physical A and steering to physical B through the manual control path.");
-  Serial.println("GPS, IMU, HC-12 command handling, path planning, and autonomous output gates are disabled.");
+  Serial.println("GPS and IMU status remain telemetry-only diagnostics and do not gate manual drive.");
+  Serial.println("HC-12 command handling, path planning, and autonomous output gates are disabled.");
 #elif FIXED_WIRING_GPS_SERIAL2_DIAG
   Serial.println("FIXED_WIRING_GPS_SERIAL2_DIAG enabled.");
   Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");

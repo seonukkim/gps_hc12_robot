@@ -133,7 +133,7 @@ def build_preview(
         [seg for seg in segments if str(seg["segment_type"]).endswith("_lane")]
     )
     summary: dict[str, object] = {
-        "stage": "preview",
+        "planner_mode": "preview",
         "preview_only": True,
         "path_shape": path_shape,
         "goal_mode": goal_mode,

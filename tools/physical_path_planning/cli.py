@@ -54,6 +54,10 @@ PPM_INPUT_ABSENT_ACTION = (
     "CH2 throttle; CH5 mode/manual-auto switch. Check station/controller power, "
     "PPM output mode, transmitter binding, and the D6 signal wire."
 )
+NO_USABLE_START_GPS_ACTION = (
+    "No usable current or fresh cached GPS coordinate was available for the plan start. "
+    "Move outside and wait longer for GPS, or pass --start-lat and --start-lon."
+)
 USB_PULSE_TEST_SEQUENCE = (
     {"primitive": "forward", "a": calibration.DEFAULT_FORWARD_A_CMD, "b": 0.0, "ms": calibration.DEFAULT_FORWARD_MS},
     {"primitive": "backward", "a": calibration.DEFAULT_BACKWARD_A_CMD, "b": 0.0, "ms": calibration.DEFAULT_BACKWARD_MS},
@@ -196,6 +200,8 @@ def manual_control_firmware_flags(*, mode_channel_index: int | None = 4) -> str:
         "-DMANUAL_TURN_SIGN=1 "
         "-DMOTOR_OUTPUT_SWAP_LR=0 "
         "-DDRIVE_CALIBRATION_ENABLE=0 "
+        "-DIMU_ENABLE=1 "
+        "-DIMU_YAW_DIAG=1 "
         "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
         "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
         "-DPATH_FOLLOWING_DRYRUN=0 "
@@ -228,7 +234,12 @@ def manual_control_mapping(
 
 
 def _row_input_zero(row: dict[str, str]) -> bool:
-    keys = [f"raw_ch{i}_us" for i in range(1, 9)] + ["steer_us", "throttle_us", "mode_us"]
+    keys = [f"raw_ch{i}_us" for i in range(1, 9)] + [
+        "steer_us",
+        "throttle_us",
+        "mode_us",
+        "raw_mode_channel_us",
+    ]
     present = [key for key in keys if key in row]
     if not present:
         return False
@@ -236,17 +247,145 @@ def _row_input_zero(row: dict[str, str]) -> bool:
 
 
 def _row_input_nonzero(row: dict[str, str]) -> bool:
-    keys = [f"raw_ch{i}_us" for i in range(1, 9)] + ["steer_us", "throttle_us", "mode_us"]
+    keys = [f"raw_ch{i}_us" for i in range(1, 9)] + [
+        "steer_us",
+        "throttle_us",
+        "mode_us",
+        "raw_mode_channel_us",
+    ]
     return any(abs(telemetry._optional_float(row.get(key)) or 0.0) > 1e-3 for key in keys)
+
+
+def _row_rc_input_detected(row: dict[str, str]) -> bool:
+    return telemetry._parse_bool(row.get("rc_input_detected"), default=False) or _row_input_nonzero(row)
+
+
+def manual_control_mode_decode(row: dict[str, str]) -> tuple[str, str]:
+    if not row:
+        return "UNKNOWN_NO_USBDBG_TELEMETRY", "NO_USBDBG_TELEMETRY"
+    row_manual_switch = _row_value(row, ["manual_switch"], default="")
+    row_mode_decode_reason = _row_value(row, ["mode_decode_reason"], default="")
+    if row_manual_switch and row_mode_decode_reason:
+        return row_manual_switch, row_mode_decode_reason
+    if not _row_rc_input_detected(row):
+        return "UNKNOWN_PPM_ABSENT", "PPM_INPUT_ABSENT"
+    mode_us = telemetry._optional_float(row.get("mode_us") or row.get("raw_mode_channel_us"))
+    if mode_us is None or mode_us <= 0.0:
+        return "UNKNOWN_MODE_CHANNEL_MISSING", "NO_MODE_CHANNEL"
+    if mode_us < 900.0 or mode_us > 2100.0:
+        return "UNKNOWN_MODE_CHANNEL_INVALID", "MODE_CHANNEL_OUT_OF_RANGE"
+    if mode_us > 1600.0:
+        return "AUTO", "MODE_CHANNEL_AUTO"
+    return "MANUAL", "MODE_CHANNEL_MANUAL"
+
+
+def _latest_manual_control_row(rows: Sequence[dict[str, str]]) -> dict[str, str]:
+    status_keys = {
+        "manual_control",
+        "manual_control_ppm",
+        "rc_input_detected",
+        "mode",
+        "auto_sw",
+        "rc_ok",
+        "steer_us",
+        "throttle_us",
+        "mode_us",
+        "raw_mode_channel_us",
+        *[f"raw_ch{i}_us" for i in range(1, 9)],
+        "ppm_interrupt_edge",
+        "ppm_decode_reason",
+        "ppm_frame_count",
+        "ppm_last_channel_count",
+        "ppm_short_rejects",
+        "ppm_long_rejects",
+        "ppm_last_rejected_us",
+        "gps_block_reason",
+        "gps_sats",
+        "gps_hdop",
+        "current_lat",
+        "current_lon",
+        "gps_cached_lat",
+        "gps_cached_lon",
+        "imu_present",
+        "imu_relative_yaw_deg",
+        "imu_heading_block_reason",
+    }
+    for row in reversed(rows):
+        if any(key in row for key in status_keys):
+            return row
+    return {}
+
+
+def _row_value(row: dict[str, str], keys: Sequence[str], default: str = "NA") -> str:
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip().upper() not in {"", "NA", "NAN", "NONE", "NULL"}:
+            return str(value)
+    return default
+
+
+def _latest_non_na(rows: Sequence[dict[str, str]], keys: Sequence[str], default: str = "NA") -> str:
+    for row in reversed(rows):
+        value = _row_value(row, keys, default="")
+        if value:
+            return value
+    return default
+
+
+def format_manual_control_status(*, elapsed_s: int, rows: Sequence[dict[str, str]]) -> str:
+    last = _latest_manual_control_row(rows)
+    manual_switch, mode_decode_reason = manual_control_mode_decode(last)
+    mode_us = _row_value(last, ["mode_us", "raw_mode_channel_us"])
+    current_lat = _row_value(last, ["current_lat", "gps_cached_lat", "gps_lat", "current_gps_lat"])
+    current_lon = _row_value(last, ["current_lon", "gps_cached_lon", "gps_lon", "current_gps_lon"])
+    fields = {
+        "elapsed_s": str(elapsed_s),
+        "rc_input_detected": str(_row_rc_input_detected(last)).lower() if last else "false",
+        "rc_ok": last.get("rc_ok", "NA"),
+        "mode": last.get("mode", "NA"),
+        "auto_sw": last.get("auto_sw", "NA"),
+        "manual_switch": manual_switch,
+        "mode_decode_reason": mode_decode_reason,
+        "ppm_interrupt_edge": last.get("ppm_interrupt_edge", "NA"),
+        "ppm_decode_reason": last.get("ppm_decode_reason", "NA"),
+        "ppm_frame_count": last.get("ppm_frame_count", "NA"),
+        "ppm_last_channel_count": last.get("ppm_last_channel_count", "NA"),
+        "ppm_short_rejects": last.get("ppm_short_rejects", "NA"),
+        "ppm_long_rejects": last.get("ppm_long_rejects", "NA"),
+        "ppm_last_rejected_us": last.get("ppm_last_rejected_us", "NA"),
+        "steer_us": last.get("steer_us", "NA"),
+        "throttle_us": last.get("throttle_us", "NA"),
+        "mode_us": mode_us,
+        "physical_a_cmd": last.get("physical_a_cmd", "NA"),
+        "physical_b_cmd": last.get("physical_b_cmd", "NA"),
+        "control_source": last.get("control_source", "NA"),
+        "motor_write_called": last.get("motor_write_called", "NA"),
+        "physical_output_active": last.get("physical_output_active", "NA"),
+        "final_left_cmd": last.get("final_left_cmd", "NA"),
+        "final_right_cmd": last.get("final_right_cmd", "NA"),
+        "gps_block_reason": last.get("gps_block_reason", "NA"),
+        "current_lat": current_lat,
+        "current_lon": current_lon,
+        "gps_sats": last.get("gps_sats", "NA"),
+        "gps_hdop": last.get("gps_hdop", "NA"),
+        "imu_present": last.get("imu_present", "NA"),
+        "imu_relative_yaw_deg": last.get("imu_relative_yaw_deg", "NA"),
+        "imu_heading_block_reason": last.get("imu_heading_block_reason", "NA"),
+    }
+    return " ".join(f"{key}={value}" for key, value in fields.items())
 
 
 def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, object]:
     rows_with_input = [
         row for row in rows
-        if any(key in row for key in [f"raw_ch{i}_us" for i in range(1, 9)] + ["steer_us", "throttle_us", "mode_us"])
+        if any(
+            key in row
+            for key in [f"raw_ch{i}_us" for i in range(1, 9)]
+            + ["steer_us", "throttle_us", "mode_us", "raw_mode_channel_us"]
+        )
     ]
     zero_rows = [row for row in rows_with_input if _row_input_zero(row)]
-    rc_input_detected = any(_row_input_nonzero(row) for row in rows)
+    rc_input_detected = any(_row_rc_input_detected(row) for row in rows)
     input_absent = bool(rows_with_input) and len(zero_rows) / max(1, len(rows_with_input)) >= 0.8 and not rc_input_detected
     rc_ok_seen = any(telemetry._parse_bool(row.get("rc_ok")) is True for row in rows)
     manual_mode_seen = any(row.get("mode") == "MANUAL" for row in rows)
@@ -261,39 +400,69 @@ def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, ob
     motor_write_seen = any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in rows)
     physical_output_seen = any(telemetry.physical_output_active(row) for row in rows)
     pass_ready = rc_ok_seen and manual_mode_seen and rc_manual_seen and final_motor_nonzero and (motor_write_seen or physical_output_seen)
+    last = _latest_manual_control_row(rows)
+    manual_switch, mode_decode_reason = manual_control_mode_decode(last)
+    ppm_decode_reason_latest = _latest_non_na(rows, ["ppm_decode_reason"])
+    ppm_invalid_decode_seen = any(
+        str(row.get("ppm_decode_reason", "")).startswith("PPM_")
+        and row.get("ppm_decode_reason") not in {"OK", "PPM_FRAME_STALE"}
+        for row in rows
+    )
+    gps_status_available = _latest_non_na(
+        rows,
+        ["gps_block_reason", "gps_sats", "gps_hdop", "current_lat", "current_lon", "gps_cached_lat", "gps_cached_lon"],
+    ) != "NA"
+    imu_status_available = _latest_non_na(
+        rows,
+        ["imu_present", "imu_relative_yaw_deg", "imu_heading_block_reason"],
+    ) != "NA"
     if pass_ready:
         reason = "MANUAL_CONTROL_PASS"
-    elif not rows:
-        reason = "SERIAL_ERROR"
+    elif not rows or not last:
+        reason = "NO_USBDBG_TELEMETRY"
+    elif ppm_invalid_decode_seen and not rc_ok_seen:
+        reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
     elif input_absent:
         reason = "PPM_INPUT_ABSENT"
+    elif mode_decode_reason == "NO_MODE_CHANNEL":
+        reason = "MODE_CHANNEL_MISSING"
     elif rc_input_detected and not rc_ok_seen:
         reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
     elif rc_ok_seen and not manual_mode_seen:
-        reason = "PPM_CHANNELS_PRESENT_BUT_MODE_NOT_MANUAL"
+        reason = "MANUAL_CONTROL_READY"
     elif (physical_a_nonzero or physical_b_nonzero) and not final_motor_nonzero:
         reason = "MOTOR_OUTPUT_BLOCKED"
     else:
-        reason = "MANUAL_CONTROL_NOT_VERIFIED"
+        reason = "MANUAL_CONTROL_READY"
     next_action = {
         "MANUAL_CONTROL_PASS": "PPM manual control is verified.",
+        "MANUAL_CONTROL_READY": "PPM telemetry is present; set CH5 to MANUAL and move the sticks to verify output.",
         "PPM_INPUT_ABSENT": PPM_INPUT_ABSENT_ACTION,
         "PPM_CHANNELS_PRESENT_BUT_INVALID": "PPM is present but invalid; check signal quality, channel order, and pulse widths.",
-        "PPM_CHANNELS_PRESENT_BUT_MODE_NOT_MANUAL": "Set the physical mode switch to MANUAL / AUTO OFF and verify CH5.",
+        "MODE_CHANNEL_MISSING": "PPM steering/throttle are present but CH5 mode is missing; verify the receiver mode channel.",
         "MOTOR_OUTPUT_BLOCKED": "Manual A/B commands changed, but final motor output stayed zero; inspect manual control priority and motor gating.",
-        "SERIAL_ERROR": "Check USB serial connection and rerun manual-control.",
+        "NO_USBDBG_TELEMETRY": "No USBDBG rows were parsed; check USB serial, firmware mode, baud rate, and --verbose-raw output.",
     }.get(reason, "Move the physical station/controller during the monitor window and inspect summary telemetry.")
     return {
         "mode": "manual-control",
         "success": pass_ready,
         "manual_control_ok": pass_ready,
         "reason": reason,
+        "manual_switch": manual_switch,
+        "mode_decode_reason": mode_decode_reason,
+        "ppm_decode_reason_latest": ppm_decode_reason_latest,
+        "mode_us_latest": _latest_non_na(rows, ["mode_us", "raw_mode_channel_us"]),
         "rc_input_detected": rc_input_detected,
         "ppm_input_pin": "D6",
         "steer_channel": "CH1",
         "throttle_channel": "CH2",
         "mode_channel": "CH5",
         "rc_ok_seen": rc_ok_seen,
+        "gps_status_available": gps_status_available,
+        "imu_status_available": imu_status_available,
+        "last_current_lat": _latest_non_na(rows, ["current_lat", "gps_cached_lat", "gps_lat", "current_gps_lat"]),
+        "last_current_lon": _latest_non_na(rows, ["current_lon", "gps_cached_lon", "gps_lon", "current_gps_lon"]),
+        "last_imu_yaw": _latest_non_na(rows, ["imu_relative_yaw_deg"]),
         "manual_mode_seen": manual_mode_seen,
         "control_source_rc_manual_seen": rc_manual_seen,
         "physical_a_nonzero_seen": physical_a_nonzero,
@@ -792,6 +961,129 @@ def resolve_calibration(args: argparse.Namespace) -> dict[str, object]:
     return calibration.resolve_physical_calibration(**kwargs)
 
 
+def motion_calibration_loaded(calibration_dict: dict[str, object]) -> bool:
+    files = calibration_dict.get("calibration_files")
+    if not isinstance(files, dict):
+        return False
+    motion_path = files.get("motion")
+    return bool(motion_path and Path(str(motion_path)).exists())
+
+
+def _lat_lon_from_row(row: dict[str, str], lat_keys: Sequence[str], lon_keys: Sequence[str]) -> tuple[float | None, float | None]:
+    lat = None
+    lon = None
+    for key in lat_keys:
+        lat = telemetry._optional_float(row.get(key))
+        if lat is not None:
+            break
+    for key in lon_keys:
+        lon = telemetry._optional_float(row.get(key))
+        if lon is not None:
+            break
+    return lat, lon
+
+
+def _fresh_cached_gps(row: dict[str, str], max_age_ms: int) -> bool:
+    age = telemetry._optional_float(row.get("gps_cached_age_ms", row.get("gps_age_ms")))
+    if age is not None:
+        return age <= max_age_ms
+    return telemetry._parse_bool(row.get("gps_location_fresh"), default=False)
+
+
+def resolve_start_gps_from_rows(
+    rows: Sequence[dict[str, str]],
+    *,
+    start_mode: str,
+    cached_start_max_age_ms: int,
+) -> dict[str, object] | None:
+    """Resolve the preview start coordinate from live/current or fresh cached GPS."""
+    if start_mode not in {"live_gps", "cached_gps"}:
+        return None
+    for row in reversed(rows):
+        if start_mode == "live_gps":
+            lat, lon = _lat_lon_from_row(
+                row,
+                ("current_lat", "gps_lat", "current_gps_lat"),
+                ("current_lon", "gps_lon", "current_gps_lon"),
+            )
+            if lat is not None and lon is not None:
+                return {
+                    "start_lat": lat,
+                    "start_lon": lon,
+                    "start_source": "live_gps",
+                    "start_gps_block_reason": row.get("gps_block_reason", "NA"),
+                    "start_gps_sats": row.get("gps_sats", "NA"),
+                    "start_gps_hdop": row.get("gps_hdop", "NA"),
+                    "gps_cached_used": False,
+                }
+        lat, lon = _lat_lon_from_row(
+            row,
+            ("gps_cached_lat", "gps_lat", "current_lat", "current_gps_lat"),
+            ("gps_cached_lon", "gps_lon", "current_lon", "current_gps_lon"),
+        )
+        if lat is not None and lon is not None and _fresh_cached_gps(row, cached_start_max_age_ms):
+            return {
+                "start_lat": lat,
+                "start_lon": lon,
+                "start_source": "cached_gps",
+                "start_gps_block_reason": row.get("gps_block_reason", "NA"),
+                "start_gps_sats": row.get("gps_sats", "NA"),
+                "start_gps_hdop": row.get("gps_hdop", "NA"),
+                "gps_cached_used": True,
+            }
+    return None
+
+
+def resolve_start_for_preview(args: argparse.Namespace) -> tuple[dict[str, object] | None, list[str]]:
+    """Resolve preview start coordinates, optionally opening serial for live GPS."""
+    if args.start_lat is not None and args.start_lon is not None:
+        return {
+            "start_lat": float(args.start_lat),
+            "start_lon": float(args.start_lon),
+            "start_source": "explicit",
+            "start_gps_block_reason": "NA",
+            "start_gps_sats": "NA",
+            "start_gps_hdop": "NA",
+            "gps_cached_used": False,
+        }, []
+    if getattr(args, "start_mode", "live_gps") == "explicit":
+        return None, []
+
+    raw_lines: list[str] = []
+    if getattr(args, "from_log", None):
+        log_path = Path(args.from_log)
+        raw_lines = log_path.read_text(encoding="utf-8").splitlines()
+        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+        return resolve_start_gps_from_rows(
+            rows,
+            start_mode=args.start_mode,
+            cached_start_max_age_ms=args.cached_start_max_age_ms,
+        ), raw_lines
+
+    if not ensure_port(args):
+        return None, []
+    import serial
+
+    deadline = time.monotonic() + float(args.start_timeout_s)
+    rows: list[dict[str, str]] = []
+    with serial.Serial(args.port, baudrate=args.baud, timeout=0.5) as handle:
+        while time.monotonic() < deadline:
+            raw = handle.readline()
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="replace").strip()
+            raw_lines.append(line)
+            rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+            resolved = resolve_start_gps_from_rows(
+                rows,
+                start_mode=args.start_mode,
+                cached_start_max_age_ms=args.cached_start_max_age_ms,
+            )
+            if resolved is not None:
+                return resolved, raw_lines
+    return None, raw_lines
+
+
 def resolve_plan(args: argparse.Namespace, calibration_dict: dict[str, object]) -> dict[str, object]:
     """Build the no-motion plan (segments + goal) shared by preview and run."""
     return preview.build_preview(
@@ -966,17 +1258,49 @@ def _fail_with_summary(args: argparse.Namespace, *, reason: str, message: str) -
 
 def cmd_preview(args: argparse.Namespace) -> int:
     cal = resolve_calibration(args)
+    start, raw_start_lines = resolve_start_for_preview(args)
+    if start is None:
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if raw_start_lines:
+            _write_raw_log(out_dir / "preview_start_usbdbg.log", raw_start_lines)
+        summary = {
+            "mode": "preview",
+            "success": False,
+            "reason": "NO_USABLE_START_GPS",
+            "message": NO_USABLE_START_GPS_ACTION,
+            "next_recommended_action": NO_USABLE_START_GPS_ACTION,
+            "start_mode": getattr(args, "start_mode", "live_gps"),
+            "motion_calibration_loaded": motion_calibration_loaded(cal),
+            "ready_for_full_path_following": False,
+        }
+        write_summary_files(out_dir, summary, title="Physical Path Planner Preview")
+        print(f"preview: reason=NO_USABLE_START_GPS. {NO_USABLE_START_GPS_ACTION}")
+        return 2
+    args.start_lat = float(start["start_lat"])
+    args.start_lon = float(start["start_lon"])
     try:
         plan = resolve_plan(args, cal)
     except ValueError as exc:
         return _fail_with_summary(args, reason="PLAN_INPUT_INVALID", message=str(exc))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if raw_start_lines:
+        _write_raw_log(out_dir / "preview_start_usbdbg.log", raw_start_lines)
     summary = {
         **plan,
         "mode": "preview",
         "success": True,
         "reason": "OK",
+        "start_source": start["start_source"],
+        "current_lat": start["start_lat"],
+        "current_lon": start["start_lon"],
+        "start_gps_block_reason": start["start_gps_block_reason"],
+        "start_gps_sats": start["start_gps_sats"],
+        "start_gps_hdop": start["start_gps_hdop"],
+        "gps_cached_used": start["gps_cached_used"],
+        "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
         "next_recommended_action": f"Inspect {out_dir / 'summary.md'} and preview outputs before execute-plan or run.",
         "ready_for_full_path_following": False,
     }
@@ -1331,42 +1655,27 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
 
         print("Manual control: PPM input on OpenRB D6.")
         print("Expected mapping: CH1 steering -> physical B, CH2 throttle -> physical A, CH5 mode/manual-auto.")
+        print("GPS/IMU status remains visible as telemetry only; it does not gate manual motor output.")
         print("Set mode to MANUAL / AUTO OFF and move the physical station/controller.")
+        if args.duration_s <= 0:
+            print("Monitor runs until Ctrl-C.")
         last_status_s = -1
-        deadline = time.monotonic() + args.duration_s
+        start_s = time.monotonic()
+        deadline = None if args.duration_s <= 0 else start_s + args.duration_s
         try:
             with serial.Serial(args.port, baudrate=args.baud, timeout=0.2) as handle:
-                while time.monotonic() < deadline:
+                while deadline is None or time.monotonic() < deadline:
                     raw = handle.readline()
                     if raw:
                         line = raw.decode("utf-8", errors="replace").strip()
                         raw_lines.append(line)
                         if args.verbose_raw == "true":
                             print(line)
-                    elapsed_s = int(args.duration_s - max(0.0, deadline - time.monotonic()))
+                    elapsed_s = int(time.monotonic() - start_s)
                     if elapsed_s != last_status_s:
                         last_status_s = elapsed_s
                         rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines[-10:]))
-                        last = rows[-1] if rows else {}
-                        print(
-                            "elapsed_s={elapsed} rc_input_detected={input_seen} rc_ok={rc_ok} "
-                            "mode={mode} steer_us={steer} throttle_us={throttle} mode_us={mode_us} "
-                            "A={a} B={b} control_source={source} motor_write_called={motor} "
-                            "physical_output_active={active}".format(
-                                elapsed=elapsed_s,
-                                input_seen=str(_row_input_nonzero(last)).lower() if last else "false",
-                                rc_ok=last.get("rc_ok", "NA"),
-                                mode=last.get("mode", "NA"),
-                                steer=last.get("steer_us", "NA"),
-                                throttle=last.get("throttle_us", "NA"),
-                                mode_us=last.get("mode_us", "NA"),
-                                a=last.get("physical_a_cmd", "NA"),
-                                b=last.get("physical_b_cmd", "NA"),
-                                source=last.get("control_source", "NA"),
-                                motor=last.get("motor_write_called", "NA"),
-                                active=last.get("physical_output_active", "NA"),
-                            )
-                        )
+                        print(format_manual_control_status(elapsed_s=elapsed_s, rows=rows))
         except KeyboardInterrupt:
             print("User aborted manual-control monitor; writing summaries.")
         except (OSError, serial.serialutil.SerialException) as exc:
@@ -2785,11 +3094,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.print_plan:
         _write_json(out_dir / "plan.json", plan)
+        start_source = str(plan.get("start_source", "plan_dir" if getattr(args, "plan_dir", None) else "explicit"))
         summary = {
             **plan,
             "mode": args.mode,
             "success": True,
             "reason": "PLAN_PRINTED",
+            "start_source": start_source,
+            "current_lat": plan["start_lat"],
+            "current_lon": plan["start_lon"],
+            "motion_calibration_loaded": motion_calibration_loaded(cal),
+            "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
+            "continuous_drive_used": args.straight_motion_mode == "continuous",
+            "gps_degraded_count": 0,
+            "imu_heading_used_count": 0,
             "next_recommended_action": "Inspect summary.md and plan.json before running physical execution.",
             "ready_for_full_path_following": False,
         }
@@ -2845,6 +3163,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "success": summary.get("aborted") is False,
         "reason": "OK" if summary.get("aborted") is False else str(abort_reason),
+        "start_source": str(plan.get("start_source", "plan_dir" if getattr(args, "plan_dir", None) else "explicit")),
+        "current_lat": plan["start_lat"],
+        "current_lon": plan["start_lon"],
+        "motion_calibration_loaded": motion_calibration_loaded(cal),
+        "connector_mode_effective": cal.get("connector_mode_effective", plan.get("connector_mode_effective")),
+        "continuous_drive_used": summary.get("continuous_drive_used", args.straight_motion_mode == "continuous"),
         "next_recommended_action": (
             "Inspect path trace and run summary before any longer test."
             if summary.get("aborted") is False else
@@ -2961,9 +3285,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="{diagnose,rc-input-diagnose,manual-rc,manual-control,station-hw-diagnose,station-hw-manual,usb-pulse-test,usb-drive-live,tune-motion,guarded-pulse-ready,calibrate-turn,preview,execute-plan,run}",
     )
 
-    preview_p = sub.add_parser("preview", help="build + render the plan (no serial, no motion)")
-    _add_goal_arguments(preview_p)
+    preview_p = sub.add_parser("preview", help="build + render the plan (captures live/cached GPS start when omitted)")
+    _add_goal_arguments(preview_p, require_start=False)
     _add_calibration_arguments(preview_p)
+    preview_p.add_argument("--port", default=None)
+    preview_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    preview_p.add_argument(
+        "--start-mode",
+        choices=["live_gps", "cached_gps", "explicit"],
+        default="live_gps",
+        help="how to resolve the plan start when --start-lat/--start-lon are omitted",
+    )
+    preview_p.add_argument("--start-timeout-s", type=float, default=120.0)
+    preview_p.add_argument("--cached-start-max-age-ms", type=int, default=10000)
+    preview_p.add_argument("--from-log", default=None, help="parse saved telemetry for start GPS instead of opening serial")
     preview_p.add_argument("--out-dir", default="outputs/physical_path_planning/preview")
     preview_p.add_argument("--png", dest="png", action="store_true", default=True)
     preview_p.add_argument("--no-png", dest="png", action="store_false")
@@ -3043,7 +3378,7 @@ def build_parser() -> argparse.ArgumentParser:
     manual_control_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     manual_control_p.add_argument("--upload", choices=["true", "false", "auto"], default="true")
     manual_control_p.add_argument("--validate", choices=["true", "false"], default="true")
-    manual_control_p.add_argument("--duration-s", type=float, default=45.0)
+    manual_control_p.add_argument("--duration-s", type=float, default=0.0)
     manual_control_p.add_argument("--from-log", default=None)
     manual_control_p.add_argument("--mode-channel-index", type=int, default=4)
     manual_control_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")

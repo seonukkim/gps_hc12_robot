@@ -344,8 +344,14 @@ def build_controller_summary(
     """Build the guarded controller run summary (routed through the readiness check)."""
     pulse_rows = [r for r in rows if r.get("row_type") == "pulse"]
     valid = sum(1 for r in pulse_rows if r.get("valid_pulse") is True)
+    continuous_drive_count = sum(1 for r in pulse_rows if r.get("drive_mode") == "continuous")
+    imu_heading_used_count = sum(
+        1
+        for r in pulse_rows
+        if r.get("imu_relative_yaw_deg") not in (None, "", "NA")
+    )
     summary = {
-        "stage": "controller",
+        "controller_mode": "continuous_motion",
         "start_lat": start_lat,
         "start_lon": start_lon,
         "goal_lat": goal_lat,
@@ -355,6 +361,9 @@ def build_controller_summary(
         "valid_pulse_count": valid,
         "invalid_pulse_count": len(pulse_rows) - valid,
         "gps_degraded_count": sum(1 for r in pulse_rows if r.get("gps_degraded") is True),
+        "continuous_drive_used": continuous_drive_count > 0,
+        "continuous_drive_count": continuous_drive_count,
+        "imu_heading_used_count": imu_heading_used_count,
         "fallback_to_repeated_pulses": bool(fallback_to_repeated_pulses),
         "abort_reason": abort_reason,
         "aborted": abort_reason != "NONE",

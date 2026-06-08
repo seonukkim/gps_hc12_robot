@@ -83,6 +83,12 @@ inspection step after every run.
 diagonal, not a direct driving line. `--workspace-width-m` is the short side and
 must be shorter than the A-B diagonal. `--step-spacing-m` controls lane spacing.
 
+When `--start-lat` / `--start-lon` are omitted, `preview` captures the current
+rover GPS from OpenRB telemetry. It uses a fresh cached GPS coordinate if the
+current fix is temporarily unavailable. If neither is usable, the summary reports
+`reason=NO_USABLE_START_GPS`; move outside and wait longer for GPS, or pass
+explicit start coordinates.
+
 Use `--path-shape direct_line` only when a literal straight A-B plan is explicitly
 wanted.
 
@@ -176,6 +182,11 @@ entries become the straight-pulse base, with IMU heading hold applying only a
 small clamped B correction. Approved `turn_left_90` and `turn_right_90` entries
 become the preferred connector commands; repeated small turn pulses remain a
 fallback when approved 90-degree turn calibration is missing.
+
+During physical execution, straight coverage segments use continuous USB live
+drive updates by default rather than dense stop-start micro-pulses. GPS is used
+for progress and cross-track correction when valid; temporary GPS degradation
+continues on IMU heading hold and calibrated progress.
 
 If `manual-rc` reports `reason=RC_INPUT_ABSENT`, all receiver channel inputs are
 zero or absent. Check receiver power, transmitter binding, receiver signal wiring,
