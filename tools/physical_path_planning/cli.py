@@ -2,6 +2,7 @@
 
     diagnose              read-only telemetry summary.
     manual-rc             restore and validate manual RC passthrough.
+    manual-control        upload and monitor PPM physical manual control.
     guarded-pulse-ready   upload/check IMU-enabled guarded pulse firmware.
     station-hw-diagnose  read-only physical station hardware link diagnostic.
     station-hw-manual    physical station hardware manual rover control.
@@ -47,6 +48,11 @@ RC_INPUT_ABSENT_ACTION = (
     "check mode channel index / channel mapping; check transmitter-receiver binding; "
     "if using individual PWM channels instead of PPM, firmware must read the correct pins; "
     "then run manual-rc --diagnose-only true after changing wiring or binding."
+)
+PPM_INPUT_ABSENT_ACTION = (
+    "PPM input is absent. Expected wiring: signal -> OpenRB D6; CH1 steering; "
+    "CH2 throttle; CH5 mode/manual-auto switch. Check station/controller power, "
+    "PPM output mode, transmitter binding, and the D6 signal wire."
 )
 USB_PULSE_TEST_SEQUENCE = (
     {"primitive": "forward", "a": calibration.DEFAULT_FORWARD_A_CMD, "b": 0.0, "ms": calibration.DEFAULT_FORWARD_MS},
@@ -156,6 +162,131 @@ def manual_rc_recovery_flags(*, mode_channel_index: int | None = None) -> str:
     if mode_channel_index is not None:
         flags += f" -DMODE_CHANNEL_INDEX={mode_channel_index}"
     return flags
+
+
+def manual_control_firmware_flags(*, mode_channel_index: int | None = 4) -> str:
+    flags = (
+        "-DMANUAL_CONTROL_PPM=1 "
+        "-DMANUAL_FORWARD_SIGN=-1 "
+        "-DMANUAL_TURN_SIGN=1 "
+        "-DMOTOR_OUTPUT_SWAP_LR=0 "
+        "-DDRIVE_CALIBRATION_ENABLE=0 "
+        "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0 "
+        "-DPATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 "
+        "-DPATH_FOLLOWING_DRYRUN=0 "
+        "-DPATH_FOLLOWING_HC12_ENABLED=0 "
+        "-DGROUND_CRAWL_TEST_MODE=0 "
+        "-DAUTO_MOTION_ARMED=0"
+    )
+    if mode_channel_index is not None:
+        flags += f" -DMODE_CHANNEL_INDEX={mode_channel_index}"
+    return flags
+
+
+def manual_control_mapping(
+    *,
+    steer_norm: float,
+    throttle_norm: float,
+    forward_sign: float = -1.0,
+    turn_sign: float = 1.0,
+) -> dict[str, float]:
+    """Return the physical A/B commands selected by the old PPM manual path.
+
+    The PPM wiring is CH1 steering, CH2 throttle, CH5 mode. The old working
+    controller used ``MANUAL_FORWARD_SIGN=-1`` and ``MANUAL_TURN_SIGN=1`` before
+    the logical-wheel-to-physical A/B conversion. This helper keeps the tested
+    sign contract explicit without touching path-planning logic.
+    """
+    physical_a = max(-1.0, min(1.0, forward_sign * throttle_norm))
+    physical_b = max(-1.0, min(1.0, -turn_sign * steer_norm))
+    return {"physical_a_cmd": physical_a, "physical_b_cmd": physical_b}
+
+
+def _row_input_zero(row: dict[str, str]) -> bool:
+    keys = [f"raw_ch{i}_us" for i in range(1, 9)] + ["steer_us", "throttle_us", "mode_us"]
+    present = [key for key in keys if key in row]
+    if not present:
+        return False
+    return all(abs(telemetry._optional_float(row.get(key)) or 0.0) <= 1e-3 for key in present)
+
+
+def _row_input_nonzero(row: dict[str, str]) -> bool:
+    keys = [f"raw_ch{i}_us" for i in range(1, 9)] + ["steer_us", "throttle_us", "mode_us"]
+    return any(abs(telemetry._optional_float(row.get(key)) or 0.0) > 1e-3 for key in keys)
+
+
+def evaluate_manual_control_rows(rows: Sequence[dict[str, str]]) -> dict[str, object]:
+    rows_with_input = [
+        row for row in rows
+        if any(key in row for key in [f"raw_ch{i}_us" for i in range(1, 9)] + ["steer_us", "throttle_us", "mode_us"])
+    ]
+    zero_rows = [row for row in rows_with_input if _row_input_zero(row)]
+    rc_input_detected = any(_row_input_nonzero(row) for row in rows)
+    input_absent = bool(rows_with_input) and len(zero_rows) / max(1, len(rows_with_input)) >= 0.8 and not rc_input_detected
+    rc_ok_seen = any(telemetry._parse_bool(row.get("rc_ok")) is True for row in rows)
+    manual_mode_seen = any(row.get("mode") == "MANUAL" for row in rows)
+    rc_manual_seen = any(row.get("control_source") == "RC_MANUAL" for row in rows)
+    physical_a_nonzero = any(abs(telemetry._optional_float(row.get("physical_a_cmd")) or 0.0) > 1e-3 for row in rows)
+    physical_b_nonzero = any(abs(telemetry._optional_float(row.get("physical_b_cmd")) or 0.0) > 1e-3 for row in rows)
+    final_motor_nonzero = any(
+        abs(telemetry._optional_float(row.get("final_left_cmd")) or 0.0) > 1e-3
+        or abs(telemetry._optional_float(row.get("final_right_cmd")) or 0.0) > 1e-3
+        for row in rows
+    )
+    motor_write_seen = any(telemetry._parse_bool(row.get("motor_write_called")) is True for row in rows)
+    physical_output_seen = any(telemetry.physical_output_active(row) for row in rows)
+    pass_ready = rc_ok_seen and manual_mode_seen and rc_manual_seen and final_motor_nonzero and (motor_write_seen or physical_output_seen)
+    if pass_ready:
+        reason = "MANUAL_CONTROL_PASS"
+    elif not rows:
+        reason = "SERIAL_ERROR"
+    elif input_absent:
+        reason = "PPM_INPUT_ABSENT"
+    elif rc_input_detected and not rc_ok_seen:
+        reason = "PPM_CHANNELS_PRESENT_BUT_INVALID"
+    elif rc_ok_seen and not manual_mode_seen:
+        reason = "PPM_CHANNELS_PRESENT_BUT_MODE_NOT_MANUAL"
+    elif (physical_a_nonzero or physical_b_nonzero) and not final_motor_nonzero:
+        reason = "MOTOR_OUTPUT_BLOCKED"
+    else:
+        reason = "MANUAL_CONTROL_NOT_VERIFIED"
+    next_action = {
+        "MANUAL_CONTROL_PASS": "PPM manual control is verified.",
+        "PPM_INPUT_ABSENT": PPM_INPUT_ABSENT_ACTION,
+        "PPM_CHANNELS_PRESENT_BUT_INVALID": "PPM is present but invalid; check signal quality, channel order, and pulse widths.",
+        "PPM_CHANNELS_PRESENT_BUT_MODE_NOT_MANUAL": "Set the physical mode switch to MANUAL / AUTO OFF and verify CH5.",
+        "MOTOR_OUTPUT_BLOCKED": "Manual A/B commands changed, but final motor output stayed zero; inspect manual control priority and motor gating.",
+        "SERIAL_ERROR": "Check USB serial connection and rerun manual-control.",
+    }.get(reason, "Move the physical station/controller during the monitor window and inspect summary telemetry.")
+    return {
+        "mode": "manual-control",
+        "success": pass_ready,
+        "manual_control_ok": pass_ready,
+        "reason": reason,
+        "rc_input_detected": rc_input_detected,
+        "ppm_input_pin": "D6",
+        "steer_channel": "CH1",
+        "throttle_channel": "CH2",
+        "mode_channel": "CH5",
+        "rc_ok_seen": rc_ok_seen,
+        "manual_mode_seen": manual_mode_seen,
+        "control_source_rc_manual_seen": rc_manual_seen,
+        "physical_a_nonzero_seen": physical_a_nonzero,
+        "physical_b_nonzero_seen": physical_b_nonzero,
+        "final_motor_nonzero_seen": final_motor_nonzero,
+        "motor_write_called_seen": motor_write_seen,
+        "physical_output_active_seen": physical_output_seen,
+        "gps_required": False,
+        "imu_required": False,
+        "path_package_required": False,
+        "station_frame_parser_required": False,
+        "hc12_required": False,
+        "physical_a_role": "throttle",
+        "physical_b_role": "turn",
+        "wheel_to_physical_mapping": "physical_ab_manual_equivalent",
+        "next_recommended_action": next_action,
+        "ready_for_full_path_following": False,
+    }
 
 
 def evaluate_rc_input_diagnose_rows(rows: Sequence[dict[str, str]]) -> dict[str, object]:
@@ -1053,6 +1184,182 @@ def cmd_manual_rc(args: argparse.Namespace) -> int:
         title="Manual RC Diagnostic",
     )
     return 0 if upload_success else 2
+
+
+def cmd_manual_control(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.print_cmd:
+        args.port = printable_port(args.port)
+    if not args.print_cmd and not args.from_log and not ensure_port(args):
+        return 2
+
+    flags = manual_control_firmware_flags(mode_channel_index=args.mode_channel_index)
+    compile_cmd = [
+        "arduino-cli",
+        "compile",
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        "/private/tmp/openrb-manual-control-ppm",
+        "--build-property",
+        f"compiler.cpp.extra_flags={flags}",
+        "firmware/openrb_robot_controller",
+    ]
+    upload_cmd = [
+        "arduino-cli",
+        "upload",
+        "-p",
+        str(args.port),
+        "--fqbn",
+        "OpenRB-150:samd:OpenRB-150",
+        "--build-path",
+        "/private/tmp/openrb-manual-control-ppm",
+        "firmware/openrb_robot_controller",
+    ]
+    config = {
+        "mode": "manual-control",
+        "rc_input_mode": "ppm",
+        "ppm_input_pin": "D6",
+        "steer_channel": "CH1",
+        "throttle_channel": "CH2",
+        "mode_channel": "CH5",
+        "mode_channel_index": args.mode_channel_index,
+        "manual_forward_sign": -1,
+        "manual_turn_sign": 1,
+        "gps_required": False,
+        "imu_required": False,
+        "path_package_required": False,
+        "station_frame_parser_required": False,
+        "hc12_required": False,
+        "ready_for_full_path_following": False,
+    }
+    _write_json(out_dir / "manual_control_config.json", config)
+    if args.print_cmd:
+        if args.upload in {"true", "auto"}:
+            print(" ".join(shlex.quote(part) for part in compile_cmd))
+            print(" ".join(shlex.quote(part) for part in upload_cmd))
+        print(f"manual_control_firmware_flags={flags}")
+        print("PPM wiring: signal -> OpenRB D6; CH1 steering; CH2 throttle; CH5 mode/manual-auto.")
+        print("ready_for_full_path_following=false")
+        write_summary_files(
+            out_dir,
+            {
+                **config,
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "manual_control_ok": False,
+                "next_recommended_action": "Run without --print-cmd when ready to upload and monitor PPM manual control.",
+            },
+            title="Manual Control",
+        )
+        return 0
+
+    raw_lines: list[str] = []
+    if args.from_log:
+        raw_lines = Path(args.from_log).read_text(encoding="utf-8").splitlines()
+    else:
+        if args.upload in {"true", "auto"}:
+            completed = subprocess.run(compile_cmd, check=False)
+            if completed.returncode != 0:
+                write_summary_files(
+                    out_dir,
+                    {
+                        **config,
+                        "success": False,
+                        "reason": "MANUAL_CONTROL_COMPILE_FAILED",
+                        "returncode": completed.returncode,
+                        "next_recommended_action": "Inspect Arduino compile output for the PPM manual control firmware.",
+                    },
+                    title="Manual Control",
+                )
+                return completed.returncode
+            completed = subprocess.run(upload_cmd, check=False)
+            if completed.returncode != 0:
+                write_summary_files(
+                    out_dir,
+                    {
+                        **config,
+                        "success": False,
+                        "reason": "MANUAL_CONTROL_UPLOAD_FAILED",
+                        "returncode": completed.returncode,
+                        "next_recommended_action": "Check OpenRB port and upload output.",
+                    },
+                    title="Manual Control",
+                )
+                return completed.returncode
+        if args.validate == "false":
+            write_summary_files(
+                out_dir,
+                {
+                    **config,
+                    "success": True,
+                    "reason": "UPLOAD_ONLY",
+                    "manual_control_ok": False,
+                    "next_recommended_action": "Run manual-control --upload false --validate true to monitor PPM control.",
+                },
+                title="Manual Control",
+            )
+            return 0
+        import serial
+
+        print("Manual control: PPM input on OpenRB D6.")
+        print("Expected mapping: CH1 steering -> physical B, CH2 throttle -> physical A, CH5 mode/manual-auto.")
+        print("Set mode to MANUAL / AUTO OFF and move the physical station/controller.")
+        last_status_s = -1
+        deadline = time.monotonic() + args.duration_s
+        try:
+            with serial.Serial(args.port, baudrate=args.baud, timeout=0.2) as handle:
+                while time.monotonic() < deadline:
+                    raw = handle.readline()
+                    if raw:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        raw_lines.append(line)
+                        if args.verbose_raw == "true":
+                            print(line)
+                    elapsed_s = int(args.duration_s - max(0.0, deadline - time.monotonic()))
+                    if elapsed_s != last_status_s:
+                        last_status_s = elapsed_s
+                        rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines[-10:]))
+                        last = rows[-1] if rows else {}
+                        print(
+                            "elapsed_s={elapsed} rc_input_detected={input_seen} rc_ok={rc_ok} "
+                            "mode={mode} steer_us={steer} throttle_us={throttle} mode_us={mode_us} "
+                            "A={a} B={b} control_source={source} motor_write_called={motor} "
+                            "physical_output_active={active}".format(
+                                elapsed=elapsed_s,
+                                input_seen=str(_row_input_nonzero(last)).lower() if last else "false",
+                                rc_ok=last.get("rc_ok", "NA"),
+                                mode=last.get("mode", "NA"),
+                                steer=last.get("steer_us", "NA"),
+                                throttle=last.get("throttle_us", "NA"),
+                                mode_us=last.get("mode_us", "NA"),
+                                a=last.get("physical_a_cmd", "NA"),
+                                b=last.get("physical_b_cmd", "NA"),
+                                source=last.get("control_source", "NA"),
+                                motor=last.get("motor_write_called", "NA"),
+                                active=last.get("physical_output_active", "NA"),
+                            )
+                        )
+        except KeyboardInterrupt:
+            print("User aborted manual-control monitor; writing summaries.")
+        except (OSError, serial.serialutil.SerialException) as exc:
+            print(f"manual-control serial error: {exc}")
+            raw_lines.append(f"SERIAL_ERROR error={str(exc).replace(' ', '_')}")
+
+    rows = telemetry.parse_usbdbg_rows("\n".join(raw_lines))
+    summary = {**config, **evaluate_manual_control_rows(rows)}
+    if summary.get("reason") == "PPM_INPUT_ABSENT":
+        print("reason=PPM_INPUT_ABSENT")
+        print("Expected wiring: signal -> OpenRB D6; CH1 steering; CH2 throttle; CH5 mode/manual-auto.")
+    _write_raw_log(out_dir / "raw_usbdbg.log", raw_lines)
+    _write_rows_csv(out_dir / "manual_control.csv", rows)
+    _write_json(out_dir / "manual_control_summary.json", summary)
+    write_summary_files(out_dir, summary, title="Manual Control")
+    print(f"manual_control_ok={str(summary['manual_control_ok']).lower()}")
+    print(f"reason={summary['reason']}")
+    print("ready_for_full_path_following=false")
+    return 0 if summary["manual_control_ok"] is True else 2
 
 
 def cmd_rc_input_diagnose(args: argparse.Namespace) -> int:
@@ -2227,13 +2534,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manual_p.set_defaults(handler=cmd_manual_rc)
 
+    manual_control_p = sub.add_parser(
+        "manual-control",
+        help="upload and monitor PPM physical manual control",
+    )
+    manual_control_p.add_argument("--port", default=None)
+    manual_control_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    manual_control_p.add_argument("--upload", choices=["true", "false", "auto"], default="true")
+    manual_control_p.add_argument("--validate", choices=["true", "false"], default="true")
+    manual_control_p.add_argument("--duration-s", type=float, default=45.0)
+    manual_control_p.add_argument("--from-log", default=None)
+    manual_control_p.add_argument("--mode-channel-index", type=int, default=4)
+    manual_control_p.add_argument("--verbose-raw", choices=["true", "false"], default="false")
+    manual_control_p.add_argument("--out-dir", default="outputs/physical_path_planning/manual_control")
+    manual_control_p.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="print upload commands and exit",
+    )
+    manual_control_p.set_defaults(handler=cmd_manual_control)
+
     def add_station_hw_parser(name: str, *, diagnose_only: bool) -> None:
         station_p = sub.add_parser(
             name,
             help=(
                 "read-only physical station hardware link diagnostic"
                 if diagnose_only else
-                "physical station hardware manual rover control"
+                "deprecated serial-frame hardware monitor; use manual-control for PPM control"
             ),
         )
         station_p.add_argument("--port", default=None)

@@ -15,8 +15,9 @@ Modes:
   diagnose              Read-only telemetry summary. No motor commands.
   rc-input-diagnose     Read-only receiver input/channel diagnostic. No motors.
   manual-rc             Upload and validate manual RC recovery.
+  manual-control        Upload and monitor PPM physical manual control.
   station-hw-diagnose   Read-only physical station hardware link diagnostic.
-  station-hw-manual     Physical station hardware manual rover control.
+  station-hw-manual     Deprecated serial-frame monitor; use manual-control for PPM.
   usb-pulse-test        Laptop USB bounded A/B pulse motor validation.
   guarded-pulse-ready   Upload/check IMU-enabled guarded pulse firmware.
   calibrate-turn        Run guarded pulse turn angle calibration.
@@ -33,6 +34,9 @@ Examples:
 
   bash scripts/run_physical_path_planner.sh manual-rc \
     --out-dir outputs/physical_path_planning/manual_rc
+
+  bash scripts/run_physical_path_planner.sh manual-control \
+    --out-dir outputs/physical_path_planning/manual_control
 
   bash scripts/run_physical_path_planner.sh station-hw-diagnose \
     --out-dir outputs/physical_path_planning/station_hw_diagnose
@@ -172,9 +176,7 @@ USAGE
 Usage:
   scripts/run_physical_path_planner.sh station-hw-manual [options]
 
-Physical station hardware manual rover control. The rover listens continuously
-to station hardware frames and drives while frames are valid, deadman is active,
-and estop is not active.
+Deprecated for the current PPM station/controller path. Use manual-control.
 
 Options:
   --port PORT              OpenRB USB debug port; auto-detected when omitted.
@@ -185,6 +187,26 @@ Options:
   --from-log PATH          Parse an existing raw USB debug log instead of serial.
   --verbose-raw true|false Print raw telemetry in addition to concise status.
   --print-command true     Print firmware commands and exit.
+  --out-dir DIR            Output directory.
+USAGE
+      exit 0
+      ;;
+    manual-control)
+      cat <<'USAGE'
+Usage:
+  scripts/run_physical_path_planner.sh manual-control [options]
+
+PPM physical manual control. Uploads/monitors firmware using OpenRB D6:
+CH1 steering, CH2 throttle, CH5 manual/auto mode.
+
+Options:
+  --port PORT              OpenRB USB debug port; auto-detected when omitted.
+  --baud BAUD              OpenRB USB debug baudrate. Default: 115200.
+  --duration-s SECONDS     Monitor duration. Default: 45.
+  --upload true|false|auto Upload PPM manual firmware. Default: true.
+  --from-log PATH          Parse an existing raw USB debug log instead of serial.
+  --verbose-raw true|false Print raw telemetry in addition to concise status.
+  --print-cmd              Print firmware commands and exit.
   --out-dir DIR            Output directory.
 USAGE
       exit 0
@@ -223,7 +245,7 @@ mode_needs_port() {
     diagnose)
       [[ "$FROM_LOG" != "true" ]]
       ;;
-    calibrate-turn|rc-input-diagnose|manual-rc|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
+    calibrate-turn|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
       [[ "$PRINT_CMD" != "true" ]]
       ;;
     run|execute-plan)
@@ -300,7 +322,7 @@ resolve_post_upload_port() {
 }
 
 case "$MODE" in
-  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
+  preview|calibrate-turn|diagnose|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|station-drive|station-manual|guarded-pulse-ready)
     exec uv run python -m tools.physical_path_planning.cli "$MODE" "${PASSTHRU[@]}"
     ;;
   run|execute-plan)

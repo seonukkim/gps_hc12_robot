@@ -165,6 +165,7 @@ def test_help_uses_functional_mode_names() -> None:
     help_text = cli.build_parser().format_help()
     assert "rc-input-diagnose" in help_text
     assert "manual-rc" in help_text
+    assert "manual-control" in help_text
     assert "station-hw-diagnose" in help_text
     assert "station-hw-manual" in help_text
     assert "usb-pulse-test" in help_text
@@ -187,6 +188,7 @@ def test_shell_help_uses_functional_mode_names() -> None:
     help_text = completed.stdout
     assert "rc-input-diagnose" in help_text
     assert "manual-rc" in help_text
+    assert "manual-control" in help_text
     assert "station-hw-diagnose" in help_text
     assert "station-hw-manual" in help_text
     assert "usb-pulse-test" in help_text
@@ -313,6 +315,84 @@ def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
     assert "PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0" in flags
     assert "STAGE20_PHYSICAL_AB_GUARDED_CRAWL=0" in flags
     assert "IMU_ENABLE=1" not in flags
+
+
+def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
+    flags = cli.manual_control_firmware_flags(mode_channel_index=4)
+    assert "MANUAL_CONTROL_PPM=1" in flags
+    assert "MODE_CHANNEL_INDEX=4" in flags
+    assert "MANUAL_FORWARD_SIGN=-1" in flags
+    assert "MANUAL_TURN_SIGN=1" in flags
+    assert "PHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
+    assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
+    assert "IMU_ENABLE=1" not in flags
+    assert "STAGE" not in flags
+
+
+def test_manual_control_ppm_ch1_maps_to_physical_b() -> None:
+    low_left = cli.manual_control_mapping(steer_norm=-1.0, throttle_norm=0.0)
+    high_right = cli.manual_control_mapping(steer_norm=1.0, throttle_norm=0.0)
+    assert low_left["physical_a_cmd"] == pytest.approx(0.0)
+    assert low_left["physical_b_cmd"] == pytest.approx(1.0)
+    assert high_right["physical_b_cmd"] == pytest.approx(-1.0)
+
+
+def test_manual_control_ppm_ch2_maps_to_physical_a() -> None:
+    throttle_low_forward = cli.manual_control_mapping(steer_norm=0.0, throttle_norm=-1.0)
+    throttle_high_backward = cli.manual_control_mapping(steer_norm=0.0, throttle_norm=1.0)
+    assert throttle_low_forward["physical_a_cmd"] == pytest.approx(1.0)
+    assert throttle_low_forward["physical_b_cmd"] == pytest.approx(0.0)
+    assert throttle_high_backward["physical_a_cmd"] == pytest.approx(-1.0)
+
+
+def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
+    rows = [
+        {
+            "manual_control": "true",
+            "manual_control_ppm": "true",
+            "mode": "MANUAL",
+            "control_source": "RC_MANUAL",
+            "rc_ok": "true",
+            "raw_ch1_us": "1001",
+            "raw_ch2_us": "1001",
+            "raw_ch5_us": "1001",
+            "steer_us": "1001",
+            "throttle_us": "1001",
+            "mode_us": "1001",
+            "physical_a_cmd": "0.300",
+            "physical_b_cmd": "0.260",
+            "final_left_cmd": "0.040",
+            "final_right_cmd": "0.560",
+            "motor_write_called": "true",
+            "physical_output_active": "true",
+        }
+    ]
+    summary = cli.evaluate_manual_control_rows(rows)
+    assert summary["manual_control_ok"] is True
+    assert summary["reason"] == "MANUAL_CONTROL_PASS"
+    assert summary["control_source_rc_manual_seen"] is True
+    assert summary["gps_required"] is False
+    assert summary["imu_required"] is False
+    assert summary["path_package_required"] is False
+
+
+def test_manual_control_all_zero_ppm_reports_absent() -> None:
+    summary = cli.evaluate_manual_control_rows(cli.telemetry.parse_usbdbg_rows(_RC_ABSENT_LOG))
+    assert summary["reason"] == "PPM_INPUT_ABSENT"
+    assert summary["rc_input_detected"] is False
+    assert summary["ppm_input_pin"] == "D6"
+    assert "CH1" in summary["next_recommended_action"]
+
+
+def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = cli.main(["manual-control", "--print-cmd", "--out-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "MANUAL_CONTROL_PPM=1" in out
+    assert "OpenRB D6" in out
+    data = _assert_standard_summary(tmp_path)
+    assert data["mode"] == "manual-control"
+    assert data["ppm_input_pin"] == "D6"
 
 
 def test_usb_pulse_test_classifies_no_command_sent_waiting_for_user() -> None:

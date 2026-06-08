@@ -67,6 +67,10 @@
 #define MANUAL_RC_RECOVERY 0
 #endif
 
+#ifndef MANUAL_CONTROL_PPM
+#define MANUAL_CONTROL_PPM 0
+#endif
+
 #ifndef AUTO_MOTION_ARMED
 #define AUTO_MOTION_ARMED 0
 #endif
@@ -337,13 +341,13 @@
 #error "Stage 20 physical A/B guarded crawl must not enable path following, autonomous motion, Stage 15, Stage 16, Stage 17, Stage 18, or path motor-output gates."
 #endif
 
-#if MANUAL_RC_RECOVERY && \
+#if (MANUAL_RC_RECOVERY || MANUAL_CONTROL_PPM) && \
     (PHYSICAL_PATH_FOLLOWING_ENABLE != 0 || PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT != 0 || \
      PATH_FOLLOWING_DRYRUN != 0 || GROUND_CRAWL_TEST_MODE != 0 || AUTO_MOTION_ARMED != 0 || \
      STAGE15_GUARDED_CRAWL_TEST != 0 || STAGE16_USB_GUARDED_CRAWL != 0 || \
      STAGE17_FIRST_PRIMITIVE_CRAWL != 0 || STAGE18_MOTOR_MAPPING_PROBE != 0 || \
      STAGE20_PHYSICAL_AB_GUARDED_CRAWL != 0)
-#error "Manual RC recovery must not enable path following, autonomous motion, or guarded station pulse modes."
+#error "PPM manual control must not enable path following, autonomous motion, or guarded station pulse modes."
 #endif
 
 #ifndef GROUND_CRAWL_MAX_CMD
@@ -480,7 +484,7 @@
     FIXED_WIRING_GPS_SERIAL2_SINGLE_WAYPOINT_EXPERIMENT || PATH_FOLLOWING_DRYRUN || \
     STAGE15_GUARDED_CRAWL_TEST || STAGE16_USB_GUARDED_CRAWL || \
     STAGE17_FIRST_PRIMITIVE_CRAWL || STAGE18_MOTOR_MAPPING_PROBE || \
-    STAGE20_PHYSICAL_AB_GUARDED_CRAWL || MANUAL_RC_RECOVERY
+    STAGE20_PHYSICAL_AB_GUARDED_CRAWL || MANUAL_RC_RECOVERY || MANUAL_CONTROL_PPM
 // GPS owns Serial2 here. The legacy station HC-12 command stack (which can drive
 // motors via CMD,MANUAL/CMD,AUTO) stays disabled. Path-following mode runs its
 // own motor-free HC-12 waypoint protocol on a separate UART (Serial1/Serial3).
@@ -511,6 +515,7 @@ constexpr uint8_t GPS_MIN_SATS = GPS_MOTION_MIN_SATS;
 constexpr double GPS_MAX_HDOP = GPS_MOTION_MAX_HDOP;
 constexpr bool MOTOR_PULSE_ENABLED = MOTOR_PULSE_TEST_MODE != 0;
 constexpr bool MANUAL_RC_RECOVERY_ENABLED = MANUAL_RC_RECOVERY != 0;
+constexpr bool MANUAL_CONTROL_PPM_ENABLED = MANUAL_CONTROL_PPM != 0;
 constexpr float MOTOR_PULSE_CMD_VALUE = MOTOR_PULSE_CMD;
 constexpr float MOTOR_PULSE_LEFT_CMD_VALUE = MOTOR_PULSE_LEFT_CMD;
 constexpr float MOTOR_PULSE_RIGHT_CMD_VALUE = MOTOR_PULSE_RIGHT_CMD;
@@ -2421,6 +2426,9 @@ void debugPrintStatus() {
 
   Serial.print(F("USBDBG manual_rc_recovery="));
   Serial.print(MANUAL_RC_RECOVERY_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" manual_control="));
+  Serial.print(MANUAL_CONTROL_PPM_ENABLED ? F("true") : F("false"));
+  Serial.print(F(" manual_control_ppm=true ppm_input_pin=D6 ppm_ch1=steering ppm_ch2=throttle ppm_ch5=mode"));
   Serial.print(F(" mode="));
   Serial.print(modeName(currentMode));
   Serial.print(F(" rc_ok="));
@@ -2574,7 +2582,7 @@ void debugPrintStatus() {
   Serial.print(F(" physical_a_role=throttle"));
   Serial.print(F(" physical_b_role=turn"));
   Serial.print(F(" wheel_to_physical_mapping="));
-  Serial.print(MANUAL_RC_RECOVERY_ENABLED ? F("physical_ab_manual_equivalent") : F("diff_to_throttle_turn"));
+  Serial.print((MANUAL_RC_RECOVERY_ENABLED || MANUAL_CONTROL_PPM_ENABLED) ? F("physical_ab_manual_equivalent") : F("diff_to_throttle_turn"));
   Serial.print(F(" motor_output_swap_lr="));
   Serial.print(MOTOR_OUTPUT_SWAP_LR_ENABLED ? F("true") : F("false"));
   Serial.print(F(" mixer_bypassed_for_motor_pulse="));
@@ -4660,6 +4668,11 @@ void setup() {
 #endif
   Serial.println("OpenRB does not read path packages and does not run compile-time waypoint following.");
   Serial.println("PHYSICAL_PATH_FOLLOWING_ENABLE=0 PATH_FOLLOWING_ALLOW_MOTOR_OUTPUT=0 required by compile guard.");
+#elif MANUAL_CONTROL_PPM || MANUAL_RC_RECOVERY
+  Serial.println("MANUAL_CONTROL_PPM enabled.");
+  Serial.println("PPM input: OpenRB D6; CH1 steering, CH2 throttle, CH5 manual/auto.");
+  Serial.println("MANUAL mode maps throttle to physical A and steering to physical B through the manual control path.");
+  Serial.println("GPS, IMU, HC-12 command handling, path planning, and autonomous output gates are disabled.");
 #elif FIXED_WIRING_GPS_SERIAL2_DIAG
   Serial.println("FIXED_WIRING_GPS_SERIAL2_DIAG enabled.");
   Serial.println("HC-12 link is disabled/ignored to avoid Serial2 conflict.");
@@ -4784,7 +4797,7 @@ void loop() {
   return;
 #endif
 
-#if MANUAL_RC_RECOVERY
+#if MANUAL_CONTROL_PPM || MANUAL_RC_RECOVERY
   clearAutoCommand();
   clearStationManualCommand();
   if (!rcValid) {

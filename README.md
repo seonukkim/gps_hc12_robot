@@ -60,11 +60,11 @@ bash scripts/run_physical_path_planner.sh diagnose \
 bash scripts/run_physical_path_planner.sh manual-rc \
   --out-dir outputs/physical_path_planning/manual_rc
 
+bash scripts/run_physical_path_planner.sh manual-control \
+  --out-dir outputs/physical_path_planning/manual_control
+
 bash scripts/run_physical_path_planner.sh station-hw-diagnose \
   --out-dir outputs/physical_path_planning/station_hw_diagnose
-
-bash scripts/run_physical_path_planner.sh station-hw-manual \
-  --out-dir outputs/physical_path_planning/station_hw_manual
 
 bash scripts/run_physical_path_planner.sh usb-pulse-test \
   --out-dir outputs/physical_path_planning/usb_pulse_test

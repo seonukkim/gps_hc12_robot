@@ -72,27 +72,45 @@ bash scripts/run_physical_path_planner.sh manual-rc \
   --out-dir outputs/physical_path_planning/manual_rc_diagnose
 ```
 
-## 3. Physical Station Hardware Manual
+## 3. PPM Physical Manual Control
+
+The current physical station/controller manual path is PPM into OpenRB D6. It is
+not the serial station-frame monitor.
+
+```bash
+bash scripts/run_physical_path_planner.sh manual-control \
+  --out-dir outputs/physical_path_planning/manual_control
+```
+
+Expected wiring and channel mapping:
+
+- signal -> OpenRB D6
+- CH1 steering -> physical B
+- CH2 throttle -> physical A
+- CH5 mode/manual-auto
+
+If the summary reports `reason=PPM_INPUT_ABSENT`, all PPM channels are zero or
+missing. Check station/controller power, receiver binding, PPM output mode, and
+the D6 signal wire. GPS, IMU, path packages, and serial station frames are not
+required for this mode.
+
+## 4. Deprecated Serial Station-Frame Monitor
 
 ```bash
 bash scripts/run_physical_path_planner.sh station-hw-diagnose \
   --out-dir outputs/physical_path_planning/station_hw_diagnose
-
-bash scripts/run_physical_path_planner.sh station-hw-manual \
-  --out-dir outputs/physical_path_planning/station_hw_manual
 ```
 
-`station-hw-diagnose` is no-motion and reports whether station hardware frames,
-deadman, and estop are arriving. `station-hw-manual` is the separate physical
-station controller path; it maps station throttle to physical A and station
-steering to physical B.
+`station-hw-diagnose` is no-motion and reports whether serial station hardware
+frames, deadman, and estop are arriving. `station-hw-manual` is deprecated for
+the current hardware because the working manual path is PPM on D6.
 
 If station frames arrive but never parse, the result is
 `WRONG_STATION_FRAME_PARSER`. Inspect `raw_station_frames.txt` and
 `raw_station_frames_hex.txt` in the output directory; this means the station
 machine is transmitting a protocol the current rover parser does not match.
 
-## 4. USB Pulse Test
+## 5. USB Pulse Test
 
 ```bash
 bash scripts/run_physical_path_planner.sh usb-pulse-test \

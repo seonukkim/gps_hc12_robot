@@ -11,8 +11,9 @@ Modes:
 - `diagnose` — read-only guarded pulse heartbeat, GPS, IMU, and RC telemetry.
 - `rc-input-diagnose` — read-only receiver input/channel diagnostic; no motors.
 - `manual-rc` — upload and validate manual RC recovery.
+- `manual-control` — upload and monitor PPM physical manual control on D6.
 - `station-hw-diagnose` — read-only physical station hardware link diagnostic.
-- `station-hw-manual` — physical station hardware manual rover control.
+- `station-hw-manual` — deprecated serial-frame monitor; use `manual-control` for the current PPM controller.
 - `usb-pulse-test` — laptop USB bounded A/B pulse motor validation.
 - `guarded-pulse-ready` — upload/check IMU-enabled guarded pulse firmware.
 - `calibrate-turn` — run turn angle calibration with IMU yaw comparison.
@@ -34,11 +35,11 @@ bash scripts/run_physical_path_planner.sh rc-input-diagnose \
 bash scripts/run_physical_path_planner.sh manual-rc \
   --out-dir outputs/physical_path_planning/manual_rc
 
+bash scripts/run_physical_path_planner.sh manual-control \
+  --out-dir outputs/physical_path_planning/manual_control
+
 bash scripts/run_physical_path_planner.sh station-hw-diagnose \
   --out-dir outputs/physical_path_planning/station_hw_diagnose
-
-bash scripts/run_physical_path_planner.sh station-hw-manual \
-  --out-dir outputs/physical_path_planning/station_hw_manual
 
 bash scripts/run_physical_path_planner.sh usb-pulse-test \
   --out-dir outputs/physical_path_planning/usb_pulse_test
@@ -91,13 +92,20 @@ ready_for_full_path_following=false
 ```
 
 No mode sends motor output during `diagnose`, `station-hw-diagnose`, `manual-rc`
-validation monitoring, or `preview`. `station-hw-manual` listens to the separate
-physical station hardware and maps station throttle/steering to physical A/B.
-Station hardware transport/protocol are reported as `station_transport`,
-`station_protocol`, and `station_parser`; the workflow does not assume a fixed
-radio, UART, or baud setting. If frames arrive but no parser matches, the result
-is `WRONG_STATION_FRAME_PARSER` and the first unmatched frames are written to
-`raw_station_frames.txt` and `raw_station_frames_hex.txt`.
+validation monitoring, or `preview`. The current physical station/controller
+manual path is PPM, not serial station frames:
+
+```text
+signal -> OpenRB D6
+CH1 steering -> physical B
+CH2 throttle -> physical A
+CH5 mode/manual-auto
+```
+
+Run `manual-control` to upload and monitor that PPM manual path. If PPM channels
+are all zero, the result is `PPM_INPUT_ABSENT` and the issue is wiring, receiver
+power, binding, or PPM output mode. `station-hw-manual` is deprecated for this
+hardware unless a real serial station frame protocol is confirmed.
 `usb-pulse-test` sends only bounded A/B commands over USB after operator
 confirmation; it is not physical station hardware control, not RC manual
 passthrough, and not autonomous path planning. Guarded pulse execution remains
