@@ -74,6 +74,21 @@ DEFAULT_HEADING_CORRECTION_CHUNK_MS = 300
 SENSOR_TRUST_MODES = {"imu_gps_first", "calibration_fallback"}
 DEFAULT_SENSOR_TRUST_MODE = "imu_gps_first"
 
+# Connector turn semantics: the calibrated turn primitive is a PULSE whose real
+# per-pulse rotation is target_angle_deg (often 15-45 degrees on this rover,
+# despite the turn_*_90 key name). A 90 degree planned corner therefore takes
+# repeated pulses, stopped early by IMU yaw feedback when available.
+TURN_ANGLE_POLICIES = {"from_json", "assume_90"}
+DEFAULT_TURN_ANGLE_POLICY = "from_json"
+DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN = 6
+DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG = 10.0
+# How lane heading errors are referenced. "mission" chains one yaw reference
+# across the whole run, so an under-turned connector shows up (and gets
+# corrected) on the next lane. "per_lane" is the legacy behavior: each lane
+# re-captures its reference yaw, silently absorbing any connector error.
+HEADING_REFERENCES = {"mission", "per_lane"}
+DEFAULT_HEADING_REFERENCE = "mission"
+
 
 # --- Pure decision helpers (no serial; directly unit-testable) ----------------
 
@@ -263,6 +278,7 @@ def connector_command(
     primitive = geometry._turn_calibrated(resolved_calibration, direction)
     effective = str(resolved_calibration.get("connector_mode_effective", "repeated_pulses"))
     fallback = effective == "repeated_pulses"
+    target_angle = primitive.get("target_angle_deg")
     return {
         "a_cmd": float(primitive["a_cmd"]),
         "b_cmd": float(primitive["b_cmd"]),
@@ -270,7 +286,78 @@ def connector_command(
         "calibration_source": str(primitive.get("calibration_source", "unknown")),
         "connector_mode": effective,
         "fallback_to_repeated_pulses": fallback,
+        "target_angle_deg": float(target_angle) if target_angle is not None else None,
     }
+
+
+def connector_turn_angle_deg(segment: dict[str, object]) -> float:
+    """Signed rotation a connector segment requests (+left / -right).
+
+    Plans generated after the turn/step decomposition carry an explicit
+    ``turn_angle_deg``; older plans fall back to +/-90 from the expected motion
+    direction (the lawnmower corner has always been a quarter turn).
+    """
+    explicit = telemetry._optional_float(segment.get("turn_angle_deg"))
+    if explicit is not None:
+        return float(explicit)
+    return 90.0 if str(segment.get("expected_motion_direction")) == "turn_left" else -90.0
+
+
+def per_pulse_turn_angle_deg(
+    connector: dict[str, object],
+    *,
+    turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
+    turn_angle_override: float | None = None,
+) -> float | None:
+    """Rotation one calibrated turn pulse is expected to produce, or None.
+
+    ``None`` means unknown (repeated-pulse twitch calibration); callers then keep
+    the fixed-pulse budget. ``assume_90`` reproduces the legacy one-pulse-per-90
+    assumption; ``from_json`` (default) trusts the calibration's target_angle_deg.
+    """
+    if turn_angle_override is not None and float(turn_angle_override) > 0.0:
+        return float(turn_angle_override)
+    if turn_angle_policy == "assume_90":
+        return 90.0
+    target = connector.get("target_angle_deg")
+    if target is None:
+        return None
+    angle = abs(float(target))
+    return angle if angle > 1e-6 else None
+
+
+def connector_planned_pulses(requested_angle_deg: float, per_pulse_angle_deg: float | None) -> int:
+    """Open-loop pulse count to cover the requested rotation (>= 1)."""
+    if per_pulse_angle_deg is None or per_pulse_angle_deg <= 0.0:
+        return 1
+    return max(1, math.ceil(abs(requested_angle_deg) / per_pulse_angle_deg - 1e-9))
+
+
+def connector_pulse_budget(
+    requested_angle_deg: float,
+    per_pulse_angle_deg: float | None,
+    *,
+    max_pulses: int = DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+    imu_available: bool,
+) -> int:
+    """Pulse cap for one connector turn (anti-rotation-loop guard).
+
+    With IMU feedback the loop may use a couple of extra pulses beyond the
+    planned count because each one is verified against measured yaw; without
+    IMU it must stop exactly at the open-loop count rather than guess.
+    """
+    planned = connector_planned_pulses(requested_angle_deg, per_pulse_angle_deg)
+    budget = planned + 2 if imu_available else planned
+    return max(1, min(int(max_pulses), budget))
+
+
+def manual_switch_seen(rows: Sequence[dict[str, str]]) -> bool:
+    """True when any telemetry row reports the physical mode switch in MANUAL.
+
+    Rows without mode-channel fields (pulse ACK/STOP events) report ABSENT and
+    never count, so this only triggers on explicit MANUAL evidence.
+    """
+    return any(mode_switch_state(row) == "MANUAL" for row in rows if isinstance(row, dict))
 
 
 def manual_override_detected(row: dict[str, str] | None) -> bool:
@@ -787,14 +874,34 @@ def _segment_pulse_budget(
     *,
     left_fixed_pulses: int,
     right_fixed_pulses: int,
+    max_connector_pulses: int = DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+    turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
+    turn_angle_override: float | None = None,
+    imu_available: bool = False,
 ) -> tuple[int, bool, str]:
-    """Return (pulse_budget, is_connector, direction) for a planned segment."""
+    """Return (pulse_budget, is_connector, direction) for a planned segment.
+
+    Angle-calibrated connectors budget ``ceil(|requested| / per-pulse angle)``
+    pulses from the calibration's target_angle_deg instead of assuming one pulse
+    completes the corner; repeated-pulse twitch calibration keeps the fixed count.
+    """
     if str(segment["segment_type"]) in {"connector_turn", "path_connector"}:
         direction = "left" if str(segment["expected_motion_direction"]) == "turn_left" else "right"
         if str(resolved_calibration.get("connector_mode_effective")) == "repeated_pulses":
             budget = int(left_fixed_pulses if direction == "left" else right_fixed_pulses)
         else:
-            budget = 1
+            connector = connector_command(resolved_calibration, direction)
+            per_pulse = per_pulse_turn_angle_deg(
+                connector,
+                turn_angle_policy=turn_angle_policy,
+                turn_angle_override=turn_angle_override,
+            )
+            budget = connector_pulse_budget(
+                connector_turn_angle_deg(segment),
+                per_pulse,
+                max_pulses=max_connector_pulses,
+                imu_available=imu_available,
+            )
         return budget, True, direction
     return int(segment.get("pulse_budget", 1)), False, "forward"
 
@@ -830,6 +937,9 @@ def run_controller(
     max_correction_b: float = 0.08,
     gps_reanchor: bool = True,
     require_auto_switch: bool = False,
+    max_connector_pulses_per_turn: int = DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+    turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
+    turn_angle_override: float | None = None,
 ) -> tuple[list[dict[str, object]], list[str], str]:
     """Run the supervised pulse loop over ``segments``; return (rows, raw_lines, abort_reason).
 
@@ -866,12 +976,17 @@ def run_controller(
 
     for segment in segments:
         segment_ref_yaw: float | None = None
+        connector_yaw_ref: float | None = None
         budget, is_connector, direction = _segment_pulse_budget(
             segment,
             resolved_calibration,
             left_fixed_pulses=left_fixed_pulses,
             right_fixed_pulses=right_fixed_pulses,
+            max_connector_pulses=max_connector_pulses_per_turn,
+            turn_angle_policy=turn_angle_policy,
+            turn_angle_override=turn_angle_override,
         )
+        connector_requested_angle = connector_turn_angle_deg(segment) if is_connector else 0.0
         target_heading = float(segment["target_heading_deg"])
         if is_connector:
             connector = connector_command(resolved_calibration, direction)
@@ -1067,6 +1182,9 @@ def run_controller(
                 if row["valid_pulse"] is not True:
                     abort_reason = str(row["invalid_reason"])
                     break
+                if require_auto_switch and manual_switch_seen(live_rows):
+                    abort_reason = MANUAL_SWITCH_ABORT_REASON
+                    break
                 remaining = telemetry._optional_float(row.get("remaining_distance_m")) or 0.0
                 if remaining <= max(0.05, chunk_progress_m * 0.5):
                     break
@@ -1125,6 +1243,8 @@ def run_controller(
                 # Connectors hold against the global start yaw (the turn rotates the
                 # body); lanes hold against the per-lane captured reference.
                 if is_connector:
+                    if connector_yaw_ref is None:
+                        connector_yaw_ref = telemetry.imu_relative_yaw_deg(heartbeat)
                     effective_ref_yaw = provided_start_yaw
                 else:
                     if segment_ref_yaw is None:
@@ -1205,15 +1325,20 @@ def run_controller(
             if row["valid_pulse"] is not True:
                 abort_reason = str(row["invalid_reason"])
                 break
-            heading_error_after = telemetry._optional_float(row.get("heading_error_deg"))
-            if (
-                is_connector
-                and connector_mode != "repeated_pulses"
-                and row.get("imu_relative_yaw_deg") not in (None, "", "NA")
-                and heading_error_after is not None
-                and abs(heading_error_after) <= 10.0
-            ):
+            if require_auto_switch and manual_switch_seen(pulse_rows):
+                abort_reason = MANUAL_SWITCH_ABORT_REASON
                 break
+            # Connector early-stop: measure the rotation actually applied since
+            # the connector started (local yaw reference), not against a global
+            # start yaw that is usually absent. Without IMU evidence the loop
+            # must run its full angle-derived budget instead of assuming done.
+            if is_connector and connector_mode != "repeated_pulses":
+                yaw_after_turn = telemetry.imu_relative_yaw_deg(after)
+                if connector_yaw_ref is not None and yaw_after_turn is not None:
+                    applied_turn = geometry.wrap_deg(yaw_after_turn - connector_yaw_ref)
+                    remaining_turn = geometry.wrap_deg(connector_requested_angle - applied_turn)
+                    if abs(remaining_turn) <= DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG:
+                        break
             progress = telemetry._optional_float(row.get("along_track_progress_m")) or 0.0
             if str(segment["segment_type"]).endswith("_lane") and progress >= float(
                 segment.get("length_m", 0.0)
@@ -1371,13 +1496,15 @@ def _run_stop_correct_go_heading_turn(
     event_timeout_s: float,
     raw_lines: list[str],
     verbose_raw: bool = True,
+    abort_on_manual_switch: bool = False,
 ) -> dict[str, object]:
     """Rotate in place with IMU yaw feedback until the heading error is corrected.
 
     Issues bounded ``USB_DRIVE_LIVE_SET`` turn setpoints (A=0, B=correction) and a
     final ``USB_DRIVE_LIVE_STOP`` (same bounded-deadman pattern as the alignment
     turn and :func:`executor.send_live_drive`), breaking early on the IMU stop
-    condition rather than a fixed duration.
+    condition rather than a fixed duration. ``abort_on_manual_switch`` stops the
+    turn the moment a telemetry row reports the physical switch back in MANUAL.
     """
     seq = 1
     duration_ms = max(1, int(chunk_ms))
@@ -1388,6 +1515,7 @@ def _run_stop_correct_go_heading_turn(
     remaining = initial_heading_error_deg
     timed_out = False
     rejected = False
+    manual_switch = False
     while True:
         if time.monotonic() >= deadline:
             timed_out = True
@@ -1411,6 +1539,9 @@ def _run_stop_correct_go_heading_turn(
             if telemetry.event(row) == "REJECT":
                 rejected = True
                 break
+            if abort_on_manual_switch and mode_switch_state(row) == "MANUAL":
+                manual_switch = True
+                break
             yaw = telemetry.imu_relative_yaw_deg(row)
             if yaw is not None:
                 yaw_latest = yaw
@@ -1430,9 +1561,12 @@ def _run_stop_correct_go_heading_turn(
         "initial_heading_error_deg": initial_heading_error_deg,
         "final_heading_error_deg": remaining,
         "turn_duration_ms": int((time.monotonic() - start_time) * 1000.0),
-        "correction_success": abs(remaining) <= abs(heading_tolerance_deg) and not rejected,
+        "correction_success": abs(remaining) <= abs(heading_tolerance_deg)
+        and not rejected
+        and not manual_switch,
         "timed_out": timed_out,
         "rejected": rejected,
+        "manual_switch": manual_switch,
     }
 
 
@@ -1495,6 +1629,9 @@ def build_stop_correct_go_summary(
     sensor_trust_mode: str,
     allow_calibration_fallback: bool,
     abort_reason: str = "NONE",
+    heading_reference: str = DEFAULT_HEADING_REFERENCE,
+    turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
+    turn_calibration_angles: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Controller summary augmented with stop_correct_go-specific counters."""
     summary = build_controller_summary(
@@ -1509,11 +1646,20 @@ def build_stop_correct_go_summary(
     )
     cycle_rows = [r for r in rows if r.get("row_type") == "pulse"]
     heading_corrections = [r for r in cycle_rows if int(r.get("correction_duration_ms") or 0) > 0]
+    connector_rows = [r for r in cycle_rows if r.get("phase") == "connector"]
+    connector_segments = {r.get("segment_index") for r in connector_rows}
+    connector_completed_segments = {
+        r.get("segment_index")
+        for r in connector_rows
+        if r.get("connector_turn_completed") is True
+    }
     summary.update(
         {
             "path_control_mode": "stop_correct_go",
             "sensor_trust_mode": sensor_trust_mode,
             "allow_calibration_fallback": bool(allow_calibration_fallback),
+            "heading_reference": heading_reference,
+            "turn_calibration_angle_policy": turn_angle_policy,
             "heading_correction_count": len(heading_corrections),
             "heading_correction_success_count": sum(
                 1 for r in heading_corrections if r.get("correction_success") is True
@@ -1524,8 +1670,17 @@ def build_stop_correct_go_summary(
                 if abs(telemetry._optional_float(r.get("move_b_cmd")) or 0.0) > _ZERO_TOLERANCE
             ),
             "sensor_fallback_used_count": sum(1 for r in cycle_rows if r.get("fallback_used") is True),
+            "connector_turn_count": len(connector_segments),
+            "connector_pulse_count": len(connector_rows),
+            "connector_completed_count": len(connector_completed_segments),
+            "connector_incomplete_count": len(connector_segments - connector_completed_segments),
+            "connector_imu_measured_pulse_count": sum(
+                1 for r in connector_rows if r.get("turn_measured_by_imu") is True
+            ),
         }
     )
+    if turn_calibration_angles:
+        summary.update(turn_calibration_angles)
     return checks.assert_not_ready_for_full_path_following(summary)
 
 
@@ -1566,15 +1721,28 @@ def run_stop_correct_go(
     gps_reanchor: bool = True,
     require_auto_switch: bool = False,
     verbose_raw: bool = True,
+    max_connector_pulses_per_turn: int = DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+    connector_turn_tolerance_deg: float = DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG,
+    turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
+    turn_angle_override: float | None = None,
+    heading_reference: str = DEFAULT_HEADING_REFERENCE,
 ) -> tuple[list[dict[str, object]], list[str], str]:
     """Run the stop_correct_go loop over ``segments``; return (rows, raw_lines, abort).
 
     Lane segments advance one bounded guarded chunk at a time, fully stopping and
     confirming zero before reading a settled pose; heading errors over threshold
     are corrected by a discrete IMU turn-in-place and cross-track error is trimmed
-    onto the next chunk's B. Connector turns use the calibrated turn primitive (the
-    same path as :func:`run_controller`). Expected field faults set ``abort_reason``
-    and stop the loop cleanly rather than raising.
+    onto the next chunk's B.
+
+    Connector turns pulse the calibrated turn primitive repeatedly until the IMU
+    yaw delta (measured from the yaw at the connector's start) reaches the
+    segment's requested angle within ``connector_turn_tolerance_deg``, capped by
+    ``max_connector_pulses_per_turn``. The per-pulse rotation comes from the
+    calibration's ``target_angle_deg`` (``turn_angle_policy='from_json'``) -- a
+    turn_*_90 entry that physically turns only ~30 degrees therefore gets ~3
+    pulses, not 1. Without IMU yaw the open-loop pulse count derived from the
+    same angle is used. Expected field faults set ``abort_reason`` and stop the
+    loop cleanly rather than raising.
     """
     rows: list[dict[str, object]] = []
     raw_lines: list[str] = []
@@ -1586,8 +1754,53 @@ def run_stop_correct_go(
     first_lane_pending = True
     if sensor_trust_mode not in SENSOR_TRUST_MODES:
         sensor_trust_mode = DEFAULT_SENSOR_TRUST_MODE
+    if heading_reference not in HEADING_REFERENCES:
+        heading_reference = DEFAULT_HEADING_REFERENCE
+    if turn_angle_policy not in TURN_ANGLE_POLICIES:
+        turn_angle_policy = DEFAULT_TURN_ANGLE_POLICY
     effective_max_chunks = max(1, int(max_segment_chunks))
     dead_reckon_advance_m = max(0.01, 0.30 * (float(move_chunk_ms) / 700.0))
+
+    # Mission heading frame: heading = yaw + offset, captured once while the
+    # rover is still aligned with the first lane (operator alignment or the
+    # initial-heading-align step). Chaining one reference across the whole run
+    # keeps a connector under-turn visible as next-lane heading error instead of
+    # silently re-zeroing it per lane. The frame may only be captured before the
+    # first connector turn; if IMU yaw appears later the run degrades to the
+    # legacy per-lane behavior rather than capturing a frame mid-rotation.
+    first_lane_heading = next(
+        (
+            float(s["target_heading_deg"])
+            for s in segments
+            if str(s.get("segment_type")) not in {"connector_turn", "path_connector"}
+        ),
+        float(segments[0]["target_heading_deg"]) if segments else 0.0,
+    )
+    mission_frame_offset: float | None = None
+    mission_capture_allowed = True
+    if provided_start_yaw is not None:
+        mission_frame_offset = geometry.wrap_deg(first_lane_heading - provided_start_yaw)
+
+    def maybe_capture_mission_frame(row: dict[str, str] | None) -> None:
+        nonlocal mission_frame_offset
+        if (
+            heading_reference != "mission"
+            or mission_frame_offset is not None
+            or not mission_capture_allowed
+        ):
+            return
+        yaw_now = telemetry.imu_relative_yaw_deg(row) if row else None
+        if yaw_now is not None:
+            mission_frame_offset = geometry.wrap_deg(first_lane_heading - yaw_now)
+
+    def mission_heading(yaw_value: float | None) -> float | None:
+        if (
+            heading_reference != "mission"
+            or yaw_value is None
+            or mission_frame_offset is None
+        ):
+            return None
+        return geometry.wrap_deg(yaw_value + mission_frame_offset)
 
     for segment in segments:
         is_connector = str(segment["segment_type"]) in {"connector_turn", "path_connector"}
@@ -1595,19 +1808,34 @@ def run_stop_correct_go(
         length_m = float(segment.get("length_m", 0.0))
 
         if is_connector:
-            budget, _, direction = _segment_pulse_budget(
-                segment,
-                resolved_calibration,
-                left_fixed_pulses=left_fixed_pulses,
-                right_fixed_pulses=right_fixed_pulses,
-            )
+            mission_capture_allowed = False
+            direction = "left" if str(segment["expected_motion_direction"]) == "turn_left" else "right"
             connector = connector_command(resolved_calibration, direction)
             a_cmd = float(connector["a_cmd"])
             connector_b = float(connector["b_cmd"])
             pulse_ms = int(connector["pulse_ms"])
             calibration_source = str(connector["calibration_source"])
             connector_mode = str(connector["connector_mode"])
-            for chunk_index in range(1, budget + 1):
+            requested_angle = connector_turn_angle_deg(segment)
+            per_pulse = per_pulse_turn_angle_deg(
+                connector,
+                turn_angle_policy=turn_angle_policy,
+                turn_angle_override=turn_angle_override,
+            )
+            planned_pulses = connector_planned_pulses(requested_angle, per_pulse)
+            fixed_budget: int | None = None
+            if connector_mode == "repeated_pulses":
+                fixed_budget = int(
+                    left_fixed_pulses if direction == "left" else right_fixed_pulses
+                )
+            connector_yaw_ref: float | None = None
+            applied_delta = 0.0
+            remaining_angle = requested_angle
+            turn_completed = False
+            budget: int | None = fixed_budget
+            chunk_index = 0
+            while True:
+                chunk_index += 1
                 primitive_index += 1
                 try:
                     heartbeat, gate = _stop_correct_go_preflight(
@@ -1621,6 +1849,17 @@ def run_stop_correct_go(
                     if gate != "NONE":
                         abort_reason = gate
                         break
+                    if connector_yaw_ref is None:
+                        connector_yaw_ref = telemetry.imu_relative_yaw_deg(heartbeat)
+                    if budget is None:
+                        # Angle-calibrated turns: with IMU feedback allow a couple of
+                        # verified extra pulses; open loop must stop at the planned count.
+                        budget = connector_pulse_budget(
+                            requested_angle,
+                            per_pulse,
+                            max_pulses=max_connector_pulses_per_turn,
+                            imu_available=connector_yaw_ref is not None,
+                        )
                     gps = dead_reckon_gps(heartbeat, gps_cache)
                     planned = planned_pulse(
                         seq=primitive_index, a_cmd=a_cmd, b_cmd=connector_b, pulse_ms=pulse_ms
@@ -1628,6 +1867,7 @@ def run_stop_correct_go(
                     pulse_rows = executor.send_pulse(
                         handle, planned, raw_lines, event_timeout_s=event_timeout_s, verbose_raw=verbose_raw
                     )
+                    manual_after_pulse = require_auto_switch and manual_switch_seen(pulse_rows)
                     after = _collect_stabilized_heartbeat(
                         handle,
                         raw_lines,
@@ -1645,7 +1885,26 @@ def run_stop_correct_go(
                 x, y = geometry.goal_to_local(start_lat, start_lon, lat, lon)
                 along, signed_cte, _ = geometry.projection_metrics(segment, x, y)
                 yaw = telemetry.imu_relative_yaw_deg(after)
-                current_heading = current_heading_deg(target_heading, yaw, provided_start_yaw)
+                imu_valid = yaw is not None
+                # Measure how far the body has actually rotated since the
+                # connector started; fall back to assuming the calibrated
+                # per-pulse angle when yaw is unavailable.
+                if connector_yaw_ref is not None and imu_valid:
+                    applied_delta = geometry.wrap_deg(yaw - connector_yaw_ref)
+                    remaining_angle = geometry.wrap_deg(requested_angle - applied_delta)
+                    turn_completed = abs(remaining_angle) <= abs(connector_turn_tolerance_deg)
+                    turn_measured = True
+                else:
+                    if per_pulse is not None:
+                        applied_delta = math.copysign(per_pulse * chunk_index, requested_angle)
+                        remaining_angle = geometry.wrap_deg(requested_angle - applied_delta)
+                    turn_completed = chunk_index >= planned_pulses if per_pulse is not None else False
+                    turn_measured = False
+                mission_h = mission_heading(yaw)
+                if mission_h is not None:
+                    current_heading = mission_h
+                else:
+                    current_heading = current_heading_deg(target_heading, yaw, provided_start_yaw)
                 correction = {
                     "current_heading_deg": current_heading,
                     "heading_error_deg": geometry.wrap_deg(target_heading - current_heading),
@@ -1685,7 +1944,6 @@ def run_stop_correct_go(
                     base_a_cmd=a_cmd,
                     b_trim=0.0,
                 )
-                imu_valid = yaw is not None
                 row.update(
                     {
                         "drive_mode": "stop_correct_go",
@@ -1699,6 +1957,20 @@ def run_stop_correct_go(
                         "post_correction_heading_error_deg": telemetry._fmt(correction["heading_error_deg"]),
                         "sensor_source": "imu" if imu_valid else "calibration",
                         "fallback_used": not imu_valid,
+                        "heading_reference": heading_reference,
+                        "turn_angle_policy": turn_angle_policy,
+                        "requested_turn_angle_deg": telemetry._fmt(requested_angle),
+                        "calibration_target_angle_deg": (
+                            telemetry._fmt(per_pulse) if per_pulse is not None else "NA"
+                        ),
+                        "turn_pulse_index": chunk_index,
+                        "turn_pulse_budget": budget if budget is not None else "NA",
+                        "turn_planned_pulses": planned_pulses,
+                        "yaw_turn_ref_deg": telemetry._fmt(connector_yaw_ref),
+                        "applied_turn_delta_deg": telemetry._fmt(applied_delta),
+                        "remaining_turn_error_deg": telemetry._fmt(remaining_angle),
+                        "turn_measured_by_imu": turn_measured,
+                        "connector_turn_completed": turn_completed,
                     }
                 )
                 rows.append(row)
@@ -1707,13 +1979,10 @@ def run_stop_correct_go(
                 if row["valid_pulse"] is not True:
                     abort_reason = str(row["invalid_reason"])
                     break
-                heading_error_after = telemetry._optional_float(row.get("heading_error_deg"))
-                if (
-                    connector_mode != "repeated_pulses"
-                    and imu_valid
-                    and heading_error_after is not None
-                    and abs(heading_error_after) <= 10.0
-                ):
+                if manual_after_pulse:
+                    abort_reason = MANUAL_SWITCH_ABORT_REASON
+                    break
+                if turn_completed or chunk_index >= int(budget or 1):
                     break
             if abort_reason != "NONE":
                 break
@@ -1741,6 +2010,7 @@ def run_stop_correct_go(
                 if gate != "NONE":
                     abort_reason = gate
                     break
+                maybe_capture_mission_frame(heartbeat)
                 if segment_ref_yaw is None:
                     segment_ref_yaw = reference_yaw_for_segment(
                         heartbeat,
@@ -1765,6 +2035,7 @@ def run_stop_correct_go(
                 pulse_rows = executor.send_pulse(
                     handle, planned, raw_lines, event_timeout_s=event_timeout_s, verbose_raw=verbose_raw
                 )
+                manual_after_pulse = require_auto_switch and manual_switch_seen(pulse_rows)
                 # SETTLE + STABILIZE telemetry, then read a settled pose.
                 stabilized = _collect_stabilized_heartbeat(
                     handle,
@@ -1808,9 +2079,13 @@ def run_stop_correct_go(
             x = float(pose["x"])
             y = float(pose["y"])
             along, signed_cte, _ = geometry.projection_metrics(segment, x, y)
-            current_heading = current_heading_deg(
-                target_heading, yaw if imu_valid else None, segment_ref_yaw
-            )
+            mission_h = mission_heading(yaw if imu_valid else None)
+            if mission_h is not None:
+                current_heading = mission_h
+            else:
+                current_heading = current_heading_deg(
+                    target_heading, yaw if imu_valid else None, segment_ref_yaw
+                )
             heading_error = geometry.wrap_deg(target_heading - current_heading)
             remaining_m = max(0.0, length_m - along)
 
@@ -1826,8 +2101,9 @@ def run_stop_correct_go(
             correction_duration_ms = 0
             correction_success: object = "NA"
             post_correction_error = heading_error
+            correction_manual_switch = False
             phase = "move"
-            if decision["needs_correction"]:
+            if decision["needs_correction"] and not manual_after_pulse:
                 phase = "correction"
                 try:
                     turn = _run_stop_correct_go_heading_turn(
@@ -1843,6 +2119,7 @@ def run_stop_correct_go(
                         event_timeout_s=event_timeout_s,
                         raw_lines=raw_lines,
                         verbose_raw=verbose_raw,
+                        abort_on_manual_switch=require_auto_switch,
                     )
                 except OSError:
                     abort_reason = "SERIAL_DISCONNECT"
@@ -1851,6 +2128,7 @@ def run_stop_correct_go(
                 correction_duration_ms = int(turn["turn_duration_ms"])
                 correction_success = bool(turn["correction_success"])
                 post_correction_error = float(turn["final_heading_error_deg"])
+                correction_manual_switch = bool(turn.get("manual_switch"))
 
             # CROSS-TRACK: trim the next chunk's B when off the line.
             next_b_trim = stop_correct_go_cross_track_trim(
@@ -1913,6 +2191,8 @@ def run_stop_correct_go(
                     "next_b_trim": f"{next_b_trim:.3f}",
                     "sensor_source": str(sensor["source"]),
                     "fallback_used": bool(sensor["fallback_used"]),
+                    "heading_reference": heading_reference,
+                    "turn_angle_policy": turn_angle_policy,
                 }
             )
             rows.append(row)
@@ -1920,6 +2200,9 @@ def run_stop_correct_go(
                 print(stop_correct_go_status_line(row))
             if row["valid_pulse"] is not True:
                 abort_reason = str(row["invalid_reason"])
+                break
+            if manual_after_pulse or correction_manual_switch:
+                abort_reason = MANUAL_SWITCH_ABORT_REASON
                 break
             if remaining_m <= max(0.05, dead_reckon_advance_m * 0.5) or along >= length_m:
                 break

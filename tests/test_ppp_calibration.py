@@ -166,3 +166,106 @@ def test_smooth_calibration_is_used_when_angle_missing(tmp_path: Path) -> None:
     assert resolved["connector_mode_effective"] == "smooth_imu"
     assert resolved["ready_for_smooth_connectors"] is True
     assert resolver.connector_primitive(resolved, "left")["pulse_ms"] == 3000
+
+
+def test_connector_primitive_carries_target_angle_from_interactive_calibration(tmp_path: Path) -> None:
+    # A turn_*_90 key whose pulse really turns ~30 deg must surface that angle so
+    # the executor budgets repeated pulses instead of trusting the key name.
+    motion = _write_json(
+        tmp_path / "motion_calibration.json",
+        {
+            "turn_left_90": {
+                "approved_by_user": True,
+                "a_cmd": 0.0,
+                "b_cmd": 0.24,
+                "pulse_ms": 700,
+                "target_angle_deg": 30.0,
+            },
+            "turn_right_90": {
+                "approved_by_user": True,
+                "a_cmd": 0.0,
+                "b_cmd": -0.08,
+                "pulse_ms": 600,
+                "target_angle_deg": 30.0,
+            },
+        },
+    )
+    resolved = resolver.resolve_physical_calibration(
+        motion_calibration_json=motion,
+        fine_calibration_json=tmp_path / "missing_fine.json",
+        turn_calibration_json=tmp_path / "missing_turn.json",
+        turn_angle_calibration_json=tmp_path / "missing_angle.json",
+        smooth_turn_calibration_json=tmp_path / "missing_smooth.json",
+        calibration_mode="auto",
+    )
+    assert resolved["connector_mode_effective"] == "angle_calibrated"
+    left = resolver.connector_primitive(resolved, "left")
+    right = resolver.connector_primitive(resolved, "right")
+    assert left["target_angle_deg"] == 30.0
+    assert right["target_angle_deg"] == 30.0
+    assert right["b_cmd"] == -0.08
+
+
+def test_connector_primitive_defaults_to_90_and_repeated_pulses_has_no_angle(tmp_path: Path) -> None:
+    motion = _write_json(
+        tmp_path / "motion_calibration.json",
+        {
+            "turn_left_90": {"approved_by_user": True, "a_cmd": 0.0, "b_cmd": 0.24, "pulse_ms": 700},
+            "turn_right_90": {"approved_by_user": True, "a_cmd": 0.0, "b_cmd": -0.08, "pulse_ms": 600},
+        },
+    )
+    resolved = resolver.resolve_physical_calibration(
+        motion_calibration_json=motion,
+        fine_calibration_json=tmp_path / "missing_fine.json",
+        turn_calibration_json=tmp_path / "missing_turn.json",
+        turn_angle_calibration_json=tmp_path / "missing_angle.json",
+        smooth_turn_calibration_json=tmp_path / "missing_smooth.json",
+        calibration_mode="auto",
+    )
+    assert resolver.connector_primitive(resolved, "left")["target_angle_deg"] == 90.0
+    fallback = resolver.resolve_physical_calibration(
+        motion_calibration_json=None,
+        fine_calibration_json=tmp_path / "missing_fine.json",
+        turn_calibration_json=tmp_path / "missing_turn.json",
+        turn_angle_calibration_json=tmp_path / "missing_angle.json",
+        smooth_turn_calibration_json=tmp_path / "missing_smooth.json",
+        calibration_mode="repeated_pulses",
+    )
+    assert resolver.connector_primitive(fallback, "left")["target_angle_deg"] is None
+
+
+def test_turn_angle_summary_warns_on_small_pulse_stored_under_90_key(tmp_path: Path) -> None:
+    motion = _write_json(
+        tmp_path / "motion_calibration.json",
+        {
+            "turn_left_90": {
+                "approved_by_user": True,
+                "a_cmd": 0.0,
+                "b_cmd": 0.24,
+                "pulse_ms": 700,
+                "target_angle_deg": 30.0,
+            },
+            "turn_right_90": {
+                "approved_by_user": True,
+                "a_cmd": 0.0,
+                "b_cmd": -0.08,
+                "pulse_ms": 600,
+                "target_angle_deg": 90.0,
+            },
+        },
+    )
+    resolved = resolver.resolve_physical_calibration(
+        motion_calibration_json=motion,
+        fine_calibration_json=tmp_path / "missing_fine.json",
+        turn_calibration_json=tmp_path / "missing_turn.json",
+        turn_angle_calibration_json=tmp_path / "missing_angle.json",
+        smooth_turn_calibration_json=tmp_path / "missing_smooth.json",
+        calibration_mode="auto",
+    )
+    summary = resolver.turn_angle_summary(resolved)
+    assert summary["turn_left_90_target_angle_deg"] == 30.0
+    assert summary["turn_right_90_target_angle_deg"] == 90.0
+    warnings = summary["turn_angle_warnings"]
+    assert len(warnings) == 1
+    assert resolver.TURN_SMALL_PULSE_WARNING in warnings[0]
+    assert "turn_left_90" in warnings[0]

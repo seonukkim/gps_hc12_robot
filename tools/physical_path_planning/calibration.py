@@ -489,10 +489,55 @@ def connector_primitive(calibration: dict[str, object], direction: str) -> dict[
     entry = calibration[key]
     if not isinstance(entry, dict):
         raise KeyError(key)
+    # target_angle_deg is the measured/declared rotation of ONE pulse of this
+    # primitive. A turn_*_90 entry may legally hold a much smaller pulse (the
+    # operator calibrated a 15-45 degree twitch); the executor must budget
+    # repeated pulses / IMU feedback from this value instead of trusting the
+    # "90" in the key name. Repeated-pulse twitch entries carry no angle (None).
+    target_angle: float | None = None
+    if effective in {"angle_calibrated", "smooth_imu"}:
+        target_angle = _optional_float(entry.get("target_angle_deg"))
+        if target_angle is None:
+            # Older turn-angle calibrations carry only the measured IMU yaw
+            # delta of one pulse; that measurement beats assuming 90.
+            measured = _optional_float(entry.get("imu_yaw_delta_deg"))
+            if measured is not None and abs(measured) >= 5.0:
+                target_angle = abs(measured)
+        if target_angle is None:
+            target_angle = 90.0
     return {
         "a_cmd": float(entry["a"]),
         "b_cmd": float(entry["b"]),
         "pulse_ms": int(entry["ms"]),
         "calibration_source": str(entry.get("source", "unknown")),
         "connector_mode": effective,
+        "target_angle_deg": target_angle,
     }
+
+
+TURN_SMALL_PULSE_WARNING = "TURN_CALIBRATION_IS_SMALL_PULSE_NOT_90"
+SMALL_PULSE_ANGLE_THRESHOLD_DEG = 60.0
+
+
+def turn_angle_summary(calibration: dict[str, object]) -> dict[str, object]:
+    """Per-direction turn pulse angles plus small-pulse warnings for reports.
+
+    A ``turn_*_90`` entry whose ``target_angle_deg`` is below 60 degrees is a
+    small turn pulse, not a one-shot 90 degree turn; connectors then need
+    repeated pulses (or IMU feedback) to actually reach the planned corner
+    angle, and the warning makes that visible in calibration-check output.
+    """
+    out: dict[str, object] = {}
+    warnings: list[str] = []
+    for key in ("turn_left_90", "turn_right_90"):
+        entry = calibration.get(key)
+        angle: float | None = None
+        if isinstance(entry, dict) and entry.get("available"):
+            angle = _optional_float(entry.get("target_angle_deg"))
+            if angle is None:
+                angle = 90.0
+            if abs(angle) < SMALL_PULSE_ANGLE_THRESHOLD_DEG:
+                warnings.append(f"{TURN_SMALL_PULSE_WARNING}:{key}:target_angle_deg={angle:g}")
+        out[f"{key}_target_angle_deg"] = angle if angle is not None else "NA"
+    out["turn_angle_warnings"] = warnings
+    return out

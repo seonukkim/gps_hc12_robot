@@ -3568,6 +3568,14 @@ def cmd_set_motion_calibration(args: argparse.Namespace) -> int:
             reason="MOTION_CALIBRATION_OVERRIDE_INVALID",
             message=str(exc),
         )
+    small_pulse_warnings: list[str] = []
+    for key, entry in updates.items():
+        if key in {"turn_left_90", "turn_right_90"} and isinstance(entry, dict):
+            target = telemetry._optional_float(entry.get("target_angle_deg"))
+            if target is not None and abs(target) < calibration.SMALL_PULSE_ANGLE_THRESHOLD_DEG:
+                small_pulse_warnings.append(
+                    f"{calibration.TURN_SMALL_PULSE_WARNING}:{key}:target_angle_deg={target:g}"
+                )
     changed = {
         "mode": "set-motion-calibration",
         "preset": args.preset or "NONE",
@@ -3576,6 +3584,7 @@ def cmd_set_motion_calibration(args: argparse.Namespace) -> int:
         "backup_path": str(backup_path) if backup_path is not None else "NONE",
         "updated_primitives": sorted(updates.keys()),
         "updates": updates,
+        "turn_angle_warnings": small_pulse_warnings,
         "ready_for_full_path_following": False,
     }
     summary = {
@@ -3593,6 +3602,11 @@ def cmd_set_motion_calibration(args: argparse.Namespace) -> int:
     _write_json(out_dir / "set_motion_calibration_summary.json", summary)
     write_summary_files(out_dir, summary, title="Set Motion Calibration")
     print(f"set-motion-calibration: updated={','.join(sorted(updates.keys()))} -> {calibration_out}")
+    for warning in small_pulse_warnings:
+        print(
+            f"WARNING {warning} -- this is a small turn pulse, not a one-shot 90 degree "
+            "turn; connectors will use repeated pulses / IMU feedback to reach 90."
+        )
     if backup_path is not None:
         print(f"calibration backed up: {backup_path}")
     print("ready_for_full_path_following=false")
@@ -4256,10 +4270,21 @@ def _calibration_status_detail(cal: dict[str, object]) -> dict[str, object]:
     def turn90(name: str) -> dict[str, object]:
         entry = cal.get(name)
         available = bool(isinstance(entry, dict) and entry.get("available"))
-        return {
+        detail: dict[str, object] = {
             "approved": available,
             "source": str(entry.get("source", "")) if isinstance(entry, dict) else "missing",
         }
+        if isinstance(entry, dict) and available:
+            target = telemetry._optional_float(entry.get("target_angle_deg"))
+            detail.update(
+                {
+                    "a_cmd": entry.get("a", "NA"),
+                    "b_cmd": entry.get("b", "NA"),
+                    "pulse_ms": entry.get("ms", "NA"),
+                    "target_angle_deg": target if target is not None else 90.0,
+                }
+            )
+        return detail
 
     return {
         "forward": motion("forward"),
@@ -4317,6 +4342,8 @@ def cmd_calibration_check(args: argparse.Namespace) -> int:
     segments, plan_source = _calibration_check_segments(args, cal)
     completeness = calibration.calibration_completeness(cal, segments=segments)
     detail = _calibration_status_detail(cal)
+    angle_summary = calibration.turn_angle_summary(cal)
+    turn_warnings = list(angle_summary.get("turn_angle_warnings", []))
     missing = list(completeness["missing_required"])
     can_run = bool(completeness["can_run_stop_correct_go"])
     summary = {
@@ -4334,6 +4361,8 @@ def cmd_calibration_check(args: argparse.Namespace) -> int:
         "plan_evaluated": plan_source in {"plan_dir", "goal_flags"},
         "motion_calibration_loaded": motion_calibration_loaded(cal),
         "fallback_to_repeated_pulses": bool(cal.get("fallback_to_repeated_pulses", True)),
+        "connector_mode_effective": cal.get("connector_mode_effective", "repeated_pulses"),
+        **angle_summary,
         "next_recommended_action": (
             "stop_correct_go is ready; run preview then run --path-control-mode stop_correct_go."
             if can_run
@@ -4352,6 +4381,17 @@ def cmd_calibration_check(args: argparse.Namespace) -> int:
         f"required={completeness['required_for_current_plan']} "
         f"missing={missing} plan_source={plan_source} -> {out_dir}"
     )
+    print(
+        "turn calibration: "
+        f"left_target_angle_deg={angle_summary.get('turn_left_90_target_angle_deg')} "
+        f"right_target_angle_deg={angle_summary.get('turn_right_90_target_angle_deg')} "
+        f"connector_mode={summary['connector_mode_effective']}"
+    )
+    for warning in turn_warnings:
+        print(
+            f"WARNING {warning} -- the executor will budget repeated pulses / IMU "
+            "feedback to reach each 90 degree corner."
+        )
     print("ready_for_full_path_following=false")
     return 0 if can_run else 1
 
@@ -4694,6 +4734,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 k_cross_track=args.k_cross_track,
                 max_correction_b=args.max_correction_b,
                 gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
+                max_connector_pulses_per_turn=getattr(
+                    args,
+                    "max_connector_pulses_per_turn",
+                    controller.DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+                ),
+                turn_angle_policy=getattr(
+                    args, "turn_calibration_angle_policy", controller.DEFAULT_TURN_ANGLE_POLICY
+                ),
+                turn_angle_override=getattr(args, "turn_angle_deg_override", None),
             )
     finally:
         handle.close()
@@ -4714,6 +4763,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 args.allow_calibration_fallback, default=True
             ),
             abort_reason=abort_reason,
+            heading_reference=getattr(
+                args, "heading_reference", controller.DEFAULT_HEADING_REFERENCE
+            ),
+            turn_angle_policy=getattr(
+                args, "turn_calibration_angle_policy", controller.DEFAULT_TURN_ANGLE_POLICY
+            ),
+            turn_calibration_angles=calibration.turn_angle_summary(cal),
         )
     else:
         summary = controller.build_controller_summary(
@@ -4881,6 +4937,17 @@ def _run_stop_correct_go_from_args(
         max_correction_b=args.max_correction_b,
         gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
         require_auto_switch=require_auto_switch,
+        max_connector_pulses_per_turn=getattr(
+            args, "max_connector_pulses_per_turn", controller.DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN
+        ),
+        connector_turn_tolerance_deg=getattr(
+            args, "connector_turn_tolerance_deg", controller.DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG
+        ),
+        turn_angle_policy=getattr(
+            args, "turn_calibration_angle_policy", controller.DEFAULT_TURN_ANGLE_POLICY
+        ),
+        turn_angle_override=getattr(args, "turn_angle_deg_override", None),
+        heading_reference=getattr(args, "heading_reference", controller.DEFAULT_HEADING_REFERENCE),
     )
 
 
@@ -4912,6 +4979,17 @@ def _write_stop_correct_go_artifacts(
             "sensor_source": row.get("sensor_source"),
             "fallback_used": row.get("fallback_used"),
             "final_zero": row.get("final_zero"),
+            "heading_reference": row.get("heading_reference"),
+            "turn_angle_policy": row.get("turn_angle_policy"),
+            "requested_turn_angle_deg": row.get("requested_turn_angle_deg"),
+            "calibration_target_angle_deg": row.get("calibration_target_angle_deg"),
+            "turn_pulse_index": row.get("turn_pulse_index"),
+            "turn_pulse_budget": row.get("turn_pulse_budget"),
+            "yaw_turn_ref_deg": row.get("yaw_turn_ref_deg"),
+            "applied_turn_delta_deg": row.get("applied_turn_delta_deg"),
+            "remaining_turn_error_deg": row.get("remaining_turn_error_deg"),
+            "turn_measured_by_imu": row.get("turn_measured_by_imu"),
+            "connector_turn_completed": row.get("connector_turn_completed"),
         }
         for row in cycle_rows
     ]
@@ -5428,6 +5506,15 @@ def _auto_relative_run_on_handle(
             max_correction_b=args.max_correction_b,
             gps_reanchor=telemetry._parse_bool(args.gps_reanchor, default=True),
             require_auto_switch=True,
+            max_connector_pulses_per_turn=getattr(
+                args,
+                "max_connector_pulses_per_turn",
+                controller.DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+            ),
+            turn_angle_policy=getattr(
+                args, "turn_calibration_angle_policy", controller.DEFAULT_TURN_ANGLE_POLICY
+            ),
+            turn_angle_override=getattr(args, "turn_angle_deg_override", None),
         )
     raw_lines.extend(raw_exec)
     if args.path_control_mode == "stop_correct_go":
@@ -5444,6 +5531,13 @@ def _auto_relative_run_on_handle(
                 args.allow_calibration_fallback, default=True
             ),
             abort_reason=abort_reason,
+            heading_reference=getattr(
+                args, "heading_reference", controller.DEFAULT_HEADING_REFERENCE
+            ),
+            turn_angle_policy=getattr(
+                args, "turn_calibration_angle_policy", controller.DEFAULT_TURN_ANGLE_POLICY
+            ),
+            turn_calibration_angles=calibration.turn_angle_summary(cal),
         )
     else:
         controller_summary = controller.build_controller_summary(
@@ -6095,6 +6189,38 @@ def build_parser() -> argparse.ArgumentParser:
             default=controller.DEFAULT_SENSOR_TRUST_MODE,
             help="stop_correct_go: imu_gps_first uses live sensors first; "
             "calibration_fallback tolerates sensor loss via dead reckoning",
+        )
+        run_p.add_argument(
+            "--max-connector-pulses-per-turn", type=int,
+            default=controller.DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
+            help="cap on calibrated turn pulses per planned corner (anti rotation-loop guard)",
+        )
+        run_p.add_argument(
+            "--connector-turn-tolerance-deg", type=float,
+            default=controller.DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG,
+            help="stop the connector turn once the measured IMU yaw delta is within "
+            "this tolerance of the requested corner angle",
+        )
+        run_p.add_argument(
+            "--turn-calibration-angle-policy",
+            choices=sorted(controller.TURN_ANGLE_POLICIES),
+            default=controller.DEFAULT_TURN_ANGLE_POLICY,
+            help="from_json trusts target_angle_deg in motion_calibration.json (a turn_*_90 "
+            "entry may be a small 15-45 deg pulse); assume_90 reproduces the legacy "
+            "one-pulse-per-corner behavior",
+        )
+        run_p.add_argument(
+            "--turn-angle-deg-override", type=float, default=None,
+            help="override the calibrated per-pulse turn angle (deg) for both directions "
+            "without editing the calibration JSON",
+        )
+        run_p.add_argument(
+            "--heading-reference",
+            choices=sorted(controller.HEADING_REFERENCES),
+            default=controller.DEFAULT_HEADING_REFERENCE,
+            help="stop_correct_go: mission chains one yaw reference across the whole run "
+            "(connector under-turns stay visible); per_lane is the legacy "
+            "re-capture-per-lane behavior",
         )
         run_p.add_argument(
             "--allow-calibration-fallback", choices=["true", "false"], default="true",

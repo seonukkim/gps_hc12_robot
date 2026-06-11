@@ -282,6 +282,330 @@ def test_run_stop_correct_go_dead_reckons_when_gps_degraded() -> None:
     assert float(row["along_track_progress_m"]) > 0.0
 
 
+# --- connector turns: target_angle_deg-aware multi-pulse + IMU stop ------------
+
+
+def _small_left_turn_calibration(target_angle_deg: float = 30.0) -> dict[str, object]:
+    cal = dict(geometry.FALLBACK_RESOLVED_CALIBRATION)
+    cal["connector_mode_effective"] = "angle_calibrated"
+    cal["turn_left_90"] = {
+        "available": True,
+        "a": 0.0,
+        "b": 0.24,
+        "ms": 600,
+        "target_angle_deg": target_angle_deg,
+        "source": "manual_small_pulse",
+    }
+    return cal
+
+
+def _left_connector(target_heading_deg: float = 90.0) -> dict[str, object]:
+    # Quarter-turn corner at the end of an east lane: rotate from east to north.
+    return {
+        "segment_index": 2,
+        "segment_type": "path_connector",
+        "start_x_m": 1.0,
+        "start_y_m": 0.0,
+        "end_x_m": 1.0,
+        "end_y_m": 1.2,
+        "length_m": 1.2,
+        "target_heading_deg": target_heading_deg,
+        "expected_motion_direction": "turn_left",
+        "pulse_budget": 1,
+    }
+
+
+def test_connector_turn_planning_helpers() -> None:
+    connector = {"target_angle_deg": 30.0}
+    assert controller.per_pulse_turn_angle_deg(connector) == 30.0
+    assert controller.per_pulse_turn_angle_deg(connector, turn_angle_policy="assume_90") == 90.0
+    assert controller.per_pulse_turn_angle_deg(connector, turn_angle_override=45.0) == 45.0
+    assert controller.per_pulse_turn_angle_deg({"target_angle_deg": None}) is None
+    assert controller.connector_planned_pulses(90.0, 30.0) == 3
+    assert controller.connector_planned_pulses(90.0, 90.0) == 1
+    assert controller.connector_planned_pulses(-90.0, 30.0) == 3
+    assert controller.connector_planned_pulses(90.0, None) == 1
+    # IMU feedback earns a verified margin; open loop must stop at the plan.
+    assert controller.connector_pulse_budget(90.0, 30.0, imu_available=True) == 5
+    assert controller.connector_pulse_budget(90.0, 30.0, imu_available=False) == 3
+    assert controller.connector_pulse_budget(90.0, 30.0, max_pulses=4, imu_available=True) == 4
+    assert controller.connector_turn_angle_deg({"expected_motion_direction": "turn_left"}) == 90.0
+    assert controller.connector_turn_angle_deg({"expected_motion_direction": "turn_right"}) == -90.0
+    assert controller.connector_turn_angle_deg({"turn_angle_deg": "-90.0"}) == -90.0
+
+
+def test_connector_small_pulse_repeats_until_imu_reports_90() -> None:
+    # turn_left_90 physically turns ~30 deg per pulse: the corner must pulse
+    # repeatedly and stop on measured yaw, not assume one pulse completed it.
+    handle = FakeSerial(
+        [
+            _hb(35.0, 129.0, imu_yaw_deg=0.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=30.0),
+            _hb(35.0, 129.0, imu_yaw_deg=30.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=60.0),
+            _hb(35.0, 129.0, imu_yaw_deg=60.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=88.0),
+        ]
+    )
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[_left_connector()],
+        resolved_calibration=_small_left_turn_calibration(30.0),
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+    )
+
+    assert abort_reason == "NONE"
+    connector_rows = [r for r in rows if r.get("phase") == "connector"]
+    assert len(connector_rows) == 3
+    assert all(r["turn_pulse_budget"] == 5 for r in connector_rows)  # ceil(90/30)+2
+    assert connector_rows[-1]["connector_turn_completed"] is True
+    assert connector_rows[-1]["turn_measured_by_imu"] is True
+    assert float(connector_rows[-1]["applied_turn_delta_deg"]) == 88.0
+    cmd_writes = [w for w in handle.writes if w.startswith("USB_PULSE_TEST_CMD")]
+    assert len(cmd_writes) == 3
+    # Pivot pulses: calibrated B only, A stays zero.
+    assert all("a=0.000" in w and "b=0.240" in w for w in cmd_writes)
+
+
+def test_connector_without_imu_uses_open_loop_pulse_count_from_target_angle() -> None:
+    responses: list[bytes] = []
+    for _ in range(3):
+        responses.append(_hb(35.0, 129.0, with_imu=False))
+        responses.extend(_PULSE_OK)
+        responses.append(_hb(35.0, 129.0, with_imu=False))
+    handle = FakeSerial(responses)
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[_left_connector()],
+        resolved_calibration=_small_left_turn_calibration(30.0),
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+    )
+
+    assert abort_reason == "NONE"
+    connector_rows = [r for r in rows if r.get("phase") == "connector"]
+    assert len(connector_rows) == 3  # round-up of 90/30, no blind extras
+    assert connector_rows[-1]["connector_turn_completed"] is True
+    assert connector_rows[-1]["turn_measured_by_imu"] is False
+
+
+def test_connector_rotation_loop_guard_stops_at_pulse_budget() -> None:
+    # IMU reports no rotation at all (stalled motors): the turn must stop at the
+    # budget instead of pulsing forever, and be reported as incomplete.
+    responses: list[bytes] = []
+    for _ in range(5):  # budget = min(6, ceil(90/30)+2) = 5
+        responses.append(_hb(35.0, 129.0, imu_yaw_deg=0.0))
+        responses.extend(_PULSE_OK)
+        responses.append(_hb(35.0, 129.0, imu_yaw_deg=0.0))
+    handle = FakeSerial(responses)
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[_left_connector()],
+        resolved_calibration=_small_left_turn_calibration(30.0),
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+    )
+
+    assert abort_reason == "NONE"
+    connector_rows = [r for r in rows if r.get("phase") == "connector"]
+    assert len(connector_rows) == 5
+    assert connector_rows[-1]["connector_turn_completed"] is False
+    summary = controller.build_stop_correct_go_summary(
+        connector_rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        goal_distance_m=1.11,
+        fallback_to_repeated_pulses=False,
+        sensor_trust_mode="imu_gps_first",
+        allow_calibration_fallback=True,
+        abort_reason=abort_reason,
+    )
+    assert summary["connector_turn_count"] == 1
+    assert summary["connector_pulse_count"] == 5
+    assert summary["connector_incomplete_count"] == 1
+
+
+# --- heading reference: mission chain vs legacy per-lane re-capture ------------
+
+
+_EAST_LANE_1M = {
+    "segment_index": 1,
+    "segment_type": "forward_lane",
+    "start_x_m": 0.0,
+    "start_y_m": 0.0,
+    "end_x_m": 1.0,
+    "end_y_m": 0.0,
+    "length_m": 1.0,
+    "target_heading_deg": 0.0,
+    "expected_motion_direction": "forward",
+    "pulse_budget": 1,
+}
+
+_NORTH_LANE_AFTER_CORNER = {
+    "segment_index": 3,
+    "segment_type": "forward_lane",
+    "start_x_m": 1.0,
+    "start_y_m": 0.0,
+    "end_x_m": 1.0,
+    "end_y_m": 1.0,
+    "length_m": 1.0,
+    "target_heading_deg": 90.0,
+    "expected_motion_direction": "forward",
+    "pulse_budget": 1,
+}
+
+_LON_1M_EAST = 129.0000110  # ~1.0 m east of 129.0 at lat 35
+_LAT_HALF_M_NORTH = 35.0000045
+_LAT_1M_NORTH = 35.0000090
+
+
+def _under_turned_corner_responses(*, with_correction_rows: bool) -> list[bytes]:
+    """Lane east -> connector that only turns 40 of 90 deg -> lane north."""
+    responses = [
+        # lane 1, chunk 1: completes at the east end, yaw matches lane heading.
+        _hb(35.0, 129.0, imu_yaw_deg=0.0),
+        *_PULSE_OK,
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),
+        # connector (budget forced to 1): under-turns to 40 deg.
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),
+        *_PULSE_OK,
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),
+        # lane 2, chunk 1: still pointing 40 deg while the lane needs 90.
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),
+        *_PULSE_OK,
+        _hb(_LAT_HALF_M_NORTH, _LON_1M_EAST, imu_yaw_deg=40.0),
+    ]
+    if with_correction_rows:
+        responses.extend(
+            [
+                _hb(_LAT_HALF_M_NORTH, _LON_1M_EAST, imu_yaw_deg=88.0),  # turn feedback
+                b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            ]
+        )
+    # Without a correction the body keeps pointing 40 deg; with one it ends ~88.
+    final_yaw = 88.0 if with_correction_rows else 40.0
+    responses.extend(
+        [
+            # lane 2, chunk 2: lane completes.
+            _hb(_LAT_1M_NORTH, _LON_1M_EAST, imu_yaw_deg=final_yaw),
+            *_PULSE_OK,
+            _hb(_LAT_1M_NORTH, _LON_1M_EAST, imu_yaw_deg=final_yaw),
+        ]
+    )
+    return responses
+
+
+def _run_under_turned_corner(handle: FakeSerial, heading_reference: str):
+    return controller.run_stop_correct_go(
+        handle,
+        segments=[dict(_EAST_LANE_1M), _left_connector(), dict(_NORTH_LANE_AFTER_CORNER)],
+        resolved_calibration=_small_left_turn_calibration(30.0),
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0000090,
+        goal_lon=129.0000110,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+        max_connector_pulses_per_turn=1,
+        heading_reference=heading_reference,
+    )
+
+
+def test_mission_heading_reference_exposes_connector_under_turn() -> None:
+    handle = FakeSerial(_under_turned_corner_responses(with_correction_rows=True))
+    rows, _raw, abort_reason = _run_under_turned_corner(handle, "mission")
+
+    assert abort_reason == "NONE"
+    lane2_rows = [r for r in rows if r["segment_index"] == 3]
+    assert lane2_rows, "expected lane 2 cycles"
+    # The 50 deg residual from the under-turned corner is visible and corrected.
+    assert lane2_rows[0]["phase"] == "correction"
+    assert float(lane2_rows[0]["heading_error_deg"]) == 50.0
+    assert lane2_rows[0]["correction_success"] is True
+    assert any(w.startswith("USB_DRIVE_LIVE_SET") for w in handle.writes)
+
+
+def test_per_lane_heading_reference_absorbs_connector_under_turn() -> None:
+    # Legacy behavior kept behind --heading-reference per_lane: the lane
+    # re-captures its reference yaw, so the same under-turn reads as zero error.
+    handle = FakeSerial(_under_turned_corner_responses(with_correction_rows=False))
+    rows, _raw, abort_reason = _run_under_turned_corner(handle, "per_lane")
+
+    assert abort_reason == "NONE"
+    lane2_rows = [r for r in rows if r["segment_index"] == 3]
+    assert lane2_rows
+    assert all(r["phase"] == "move" for r in lane2_rows)
+    assert all(float(r["heading_error_deg"]) == 0.0 for r in lane2_rows)
+    assert not any(w.startswith("USB_DRIVE_LIVE_SET") for w in handle.writes)
+
+
+def test_manual_switch_during_pulse_aborts_immediately() -> None:
+    # AUTO-switch runs must stop as soon as telemetry inside the pulse window
+    # reports the physical switch back in MANUAL.
+    pulse_with_manual = [
+        b"USB_PULSE_TEST event=ARM\n",
+        b"USB_PULSE_TEST event=ACK\n",
+        b"USB_PULSE_TEST event=PULSE_COMPLETE mode_switch=MANUAL\n",
+        b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+    ]
+    handle = FakeSerial(
+        [
+            _hb(35.0, 129.0, imu_yaw_deg=90.0),
+            *pulse_with_manual,
+            _hb(35.0, 129.0, imu_yaw_deg=90.0),
+        ]
+    )
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[_north_lane()],
+        resolved_calibration=geometry.FALLBACK_RESOLVED_CALIBRATION,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=90.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+        require_auto_switch=True,
+    )
+
+    assert abort_reason == controller.MANUAL_SWITCH_ABORT_REASON
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "move"  # no correction is attempted after a manual grab
+
+
 def test_build_stop_correct_go_summary_keeps_ready_false_and_counters() -> None:
     handle = FakeSerial(
         [
