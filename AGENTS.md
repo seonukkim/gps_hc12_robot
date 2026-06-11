@@ -2,6 +2,7 @@
 
 - Use `uv` for dependency and task execution.
 - Before planning non-trivial work, read:
+  - `docs/claude_collaboration_guide.md`
   - `docs/project_context.md`
   - `docs/architecture.md`
   - `docs/roadmap.md`

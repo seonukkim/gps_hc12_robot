@@ -41,12 +41,38 @@ geometry  calibration  telemetry  safety  checks
 ## Coverage Planner
 
 The default preview/run geometry is `coverage_lawnmower`: a local-ENU
-ㄹ/lawnmower sweep made from straight lane segments and explicit
-`path_connector` turns. For `relative_enu`, start A is local `(0,0)` and goal B
+ㄹ/lawnmower sweep made from straight lane segments and drivable corner
+transitions. For `relative_enu`, start A is local `(0,0)` and goal B
 is `(goal_east_m, goal_north_m)`; the planner uses workspace width and step
 spacing to sweep the area instead of following a direct diagonal. The explicit
 `diagonal_rectangle_serpentine` shape remains available for the older A-B
 diagonal frame, but it is not the default coverage mode.
+
+### Connector style: turn_step_turn (default)
+
+Each lane-to-lane transition is decomposed into three sub-segments the rover
+can physically execute:
+
+```text
+connector_turn (pivot ~90)  ->  step_lane (straight, step_spacing_m)  ->  connector_turn (pivot ~90 back)
+```
+
+- After a FORWARD lane the step-over is driven forward; after a BACKWARD
+  (reverse-driven) lane it is driven in reverse, so every full lane starts with
+  the body already aligned with the lane axis. The ground pattern is
+  `forward -> pivot -> short forward -> pivot -> reverse -> pivot -> short
+  reverse -> pivot -> forward ...`.
+- `connector_turn` segments are zero-length and carry a signed `turn_angle_deg`
+  (+left / -right) computed from the actual body-heading geometry, so fields
+  that step to the right of travel get right turns.
+- Every segment carries `body_heading_deg`: the heading the BODY must hold,
+  which is travel heading +180 on reverse-driven lanes.
+- `--connector-style single_turn` restores the legacy single `path_connector`
+  segment (one pivot whose sideways translation was never actually driven);
+  old plan dirs containing `path_connector` segments still execute.
+- `lane_count` keeps meaning full coverage lanes; `step_lane_count` and
+  `connector_turn_count` are reported separately, and `connector_count` keeps
+  meaning corner transitions (`lane_count - 1`).
 
 ## Guarded Pulse Contract
 
@@ -87,6 +113,51 @@ drives calibrated chunks, it requires real forward calibration (and backward for
 multi-lane serpentine plans); `calibration.calibration_completeness` gates it and
 `run`/`auto-relative-run` abort before any motion with `CALIBRATION_INCOMPLETE`
 when a required primitive is still the repeated-pulses fallback.
+
+## Connector Turn Semantics (target_angle_deg)
+
+A `turn_left_90` / `turn_right_90` calibration entry is a PULSE whose real
+per-pulse rotation is its `target_angle_deg` -- on this rover often a small
+15-45 degree twitch despite the `_90` key name. The executor must never assume
+one pulse completes a corner:
+
+- `calibration.connector_primitive` surfaces `target_angle_deg` (falling back
+  to the measured `imu_yaw_delta_deg`, then 90).
+- `stop_correct_go` connectors capture the IMU yaw at the connector's start and
+  pulse the calibrated turn repeatedly until the measured yaw delta reaches the
+  segment's requested `turn_angle_deg` within
+  `--connector-turn-tolerance-deg` (default 10), capped by
+  `--max-connector-pulses-per-turn` (default 6, the anti-rotation-loop guard).
+- Without IMU yaw the open-loop count `ceil(|angle| / target_angle_deg)` is
+  used -- never blind extras.
+- `--turn-calibration-angle-policy assume_90` reproduces the legacy
+  one-pulse-per-corner behavior; `--turn-angle-deg-override` substitutes a
+  measured per-pulse angle without editing the calibration JSON.
+- `calibration-check` and `set-motion-calibration` print
+  `TURN_CALIBRATION_IS_SMALL_PULSE_NOT_90` when a `turn_*_90` entry holds a
+  pulse under 60 degrees.
+
+## Heading Reference (mission vs per_lane)
+
+`stop_correct_go` defaults to `--heading-reference mission`: one yaw frame
+(`heading = imu_yaw + offset`) is captured while the rover is still aligned
+with the first lane and chained across the whole run. A connector under-turn
+therefore shows up as next-lane heading error and is corrected by the existing
+IMU turn-in-place. Reverse-driven lanes hold `body_heading_deg`
+(travel +180). `--heading-reference per_lane` keeps the legacy behavior in
+which each lane re-captures its reference yaw -- simple, but it silently
+absorbs any connector error, which is what used to round every ㄹ corner into
+a wide arc.
+
+## AUTO/MANUAL Mode Switch Behavior
+
+`auto-relative-run` waits for the physical PPM mode switch: flipping to AUTO
+starts one execution of the planned relative-ENU path from the current GPS
+fix; flipping back to MANUAL stops the rover (STOP/zero handshake still runs)
+with `stop_reason=USER_SWITCHED_TO_MANUAL`, returning control to RC manual.
+The MANUAL flip is honored between chunks, inside a pulse window (telemetry
+rows are scanned), and during correction turns, so the worst-case stop latency
+is bounded by one move chunk.
 
 ## Calibration Resolution
 

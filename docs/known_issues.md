@@ -1072,3 +1072,46 @@ Status:
 - Correct path: validate raw signal, calibrate gyro bias, find axis/sign,
   integrate relative yaw, compare IMU-yaw delta with GPS course-over-ground
   outdoors, and only then consider it a guarded heading source.
+
+## Lawnmower Corners Rounded Into Wide Arcs (Resolved 2026-06-11)
+
+Status: fixed in code; re-verify on the field.
+
+Symptom: the executed ㄹ/lawnmower path looked roughly right but every corner
+was a wide gentle arc and lanes drifted diagonally, even though the preview
+showed sharp 90 degree corners.
+
+Three compounding causes, all in `tools/physical_path_planning/`:
+
+1. The angle-calibrated connector assumed ONE turn pulse completes a 90 degree
+   corner, but the stored `turn_left_90`/`turn_right_90` pulses physically turn
+   only ~15-45 degrees on this rover. The calibration JSON's `target_angle_deg`
+   was dropped by `connector_primitive`, and the post-turn verification
+   measured against `--start-yaw-deg`, which is normally absent, so the check
+   always read zero error and "passed" after one small pulse.
+2. Each lane re-captured its IMU reference yaw at the lane start, so the
+   connector's 45-75 degree under-turn was silently adopted as the new
+   "correct" heading instead of being corrected.
+3. The planned `path_connector` claimed a `step_spacing_m` sideways translation
+   that execution never drove (a pivot cannot translate), so the planned and
+   physical paths could never match even with perfect turns.
+
+Fixes (see `docs/physical_path_planning_architecture.md`):
+
+- connectors now pulse repeatedly and stop on the measured IMU yaw delta,
+  budgeted from `target_angle_deg` and capped by
+  `--max-connector-pulses-per-turn`;
+- `--heading-reference mission` (default) chains one yaw frame across the run;
+- the lawnmower planner decomposes corners into
+  `connector_turn -> step_lane -> connector_turn` (`--connector-style
+  turn_step_turn`, the default).
+
+Operator rules learned:
+
+- store the REAL measured per-pulse angle in `target_angle_deg`
+  (`set-motion-calibration --target-angle-deg 30`), never a hoped-for 90;
+- keep `--cross-track-correction-threshold-m` well below the lane spacing
+  (a 1.5 m threshold on 1.2 m lanes disables lane recovery entirely);
+- check `stop_correct_go_trace.csv` `phase=connector` rows
+  (`applied_turn_delta_deg` vs `requested_turn_angle_deg`) before blaming
+  calibration strength.

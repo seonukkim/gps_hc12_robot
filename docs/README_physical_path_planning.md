@@ -93,6 +93,96 @@ Every command writes:
 Use `cat <out-dir>/summary.md` or `cat <out-dir>/summary.json` as the first
 inspection step after every run.
 
+## ㄹ Coverage Field Runbook (turn_step_turn)
+
+This is the recommended end-to-end workflow for a small ㄹ/lawnmower coverage
+field (example: 2.4 m x 2.4 m, 1.2 m lane spacing). Corners are planned as
+`pivot -> step-over straight -> pivot` and executed with angle-aware repeated
+turn pulses (see Execution Control Modes below).
+
+```bash
+RUN_ID=$(date +%Y%m%d_%H%M%S)
+
+# 0. Store the REAL per-pulse turn angle once (example: pulses turn ~30 deg).
+#    Skip if motion_calibration.json already holds honest target_angle_deg.
+bash scripts/run_physical_path_planner.sh set-motion-calibration \
+  --primitive turn-left-90 --a 0.00 --b 0.24 --ms 700 \
+  --target-angle-deg 30 --source field_measured_small_pulse \
+  --out-dir outputs/physical_path_planning/recalib_left_$RUN_ID
+bash scripts/run_physical_path_planner.sh set-motion-calibration \
+  --primitive turn-right-90 --a 0.00 --b -0.08 --ms 600 \
+  --target-angle-deg 30 --source field_measured_small_pulse \
+  --out-dir outputs/physical_path_planning/recalib_right_$RUN_ID
+
+# 1. Confirm calibration (prints per-direction target angles + warnings).
+bash scripts/run_physical_path_planner.sh calibration-check \
+  --out-dir outputs/physical_path_planning/calibration_check_$RUN_ID
+
+# 2. GPS ready.
+bash scripts/run_physical_path_planner.sh gps-wait \
+  --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+  --out-dir outputs/physical_path_planning/gps_wait_$RUN_ID
+
+# 3. Preview the ㄹ plan (default --connector-style turn_step_turn).
+bash scripts/run_physical_path_planner.sh preview \
+  --goal-mode relative_enu --goal-east-m 2.4 --goal-north-m 2.4 \
+  --workspace-width-m 2.4 --step-spacing-m 1.2 \
+  --path-shape coverage_lawnmower --print-field-config true \
+  --out-dir outputs/physical_path_planning/preview_$RUN_ID
+
+# 4. Execute when the preview PNG shows the expected ㄹ.
+bash scripts/run_physical_path_planner.sh execute-plan \
+  --plan-dir outputs/physical_path_planning/preview_$RUN_ID \
+  --path-control-mode stop_correct_go \
+  --initial-heading-align none \
+  --move-chunk-ms 800 --max-segment-chunks 160 \
+  --settle-after-move-ms 300 --telemetry-stabilize-ms 500 \
+  --heading-correction-threshold-deg 15 \
+  --heading-correction-tolerance-deg 8 \
+  --cross-track-correction-threshold-m 0.35 \
+  --sensor-trust-mode imu_gps_first --allow-calibration-fallback true \
+  --gps-degradation-policy continue --gps-reanchor true \
+  --max-correction-b 0.08 \
+  --out-dir outputs/physical_path_planning/execute_$RUN_ID
+
+cat outputs/physical_path_planning/execute_$RUN_ID/summary.md
+```
+
+Notes:
+
+- Align the rover with the first lane heading before `execute-plan` when using
+  `--initial-heading-align none`; the mission heading frame is captured there.
+- Keep `--cross-track-correction-threshold-m` well under the lane spacing
+  (0.35 m for 1.2 m lanes); a threshold larger than the spacing disables the
+  recovery that pulls the rover back onto its lane.
+- Inspect corners in `stop_correct_go_trace.csv`: `phase=connector` rows show
+  `requested_turn_angle_deg`, `calibration_target_angle_deg`,
+  `turn_pulse_index/turn_pulse_budget`, `applied_turn_delta_deg`,
+  `remaining_turn_error_deg`, and `connector_turn_completed`.
+
+## AUTO/MANUAL Switch Workflow (auto-relative-run)
+
+`auto-relative-run` arms the station against the physical PPM mode switch
+(CH5): flipping MANUAL -> AUTO starts ONE execution of the planned
+relative-ENU path anchored at the current GPS fix; flipping back to MANUAL
+stops the rover immediately (worst case one move chunk), records
+`stop_reason=USER_SWITCHED_TO_MANUAL`, and leaves RC manual in control.
+
+```bash
+# Optional: pre-plan the field, then arm against the switch.
+bash scripts/run_physical_path_planner.sh auto-relative-run \
+  --goal-east-m 2.4 --goal-north-m 2.4 \
+  --workspace-width-m 2.4 --step-spacing-m 1.2 \
+  --path-control-mode stop_correct_go \
+  --gps-timeout-s 300 --auto-switch-timeout-s 300 \
+  --out-dir outputs/physical_path_planning/auto_relative_run_$RUN_ID
+```
+
+To run the same designated path again after a MANUAL stop, re-run the command:
+each AUTO flip executes the path once, re-anchored at the rover's current
+position. `--allow-keyboard-start true` substitutes Enter for the switch when
+no PPM receiver is attached.
+
 ## Rectangle Geometry
 
 The default `--path-shape` is `coverage_lawnmower`: a local-ENU ㄹ/lawnmower
@@ -181,6 +271,21 @@ Control modes:
   `run` and `auto-relative-run` abort **before any motion** with
   `reason=CALIBRATION_INCOMPLETE` when a required primitive is still the
   repeated-pulses fallback. Run `calibration-check` first to confirm readiness.
+
+Connector turns in `stop_correct_go` are angle-aware: the calibration's
+`target_angle_deg` is the rotation ONE pulse really produces (often 15-45
+degrees on this rover despite the `turn_*_90` key name), so each planned
+corner pulses repeatedly and stops on the measured IMU yaw delta:
+
+- `--max-connector-pulses-per-turn` (default 6) — rotation-loop guard.
+- `--connector-turn-tolerance-deg` (default 10) — IMU stop window.
+- `--turn-calibration-angle-policy from_json|assume_90` (default `from_json`).
+- `--turn-angle-deg-override` — substitute a measured per-pulse angle without
+  editing the calibration JSON.
+- `--heading-reference mission|per_lane` (default `mission`) — mission chains
+  one yaw frame across the whole run so connector under-turns stay visible on
+  the next lane and get corrected; `per_lane` is the legacy re-capture behavior
+  that silently absorbed them (the historical cause of rounded ㄹ corners).
 
 Execution writes:
 
