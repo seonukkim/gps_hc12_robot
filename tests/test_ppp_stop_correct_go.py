@@ -645,3 +645,58 @@ def test_build_stop_correct_go_summary_keeps_ready_false_and_counters() -> None:
     assert summary["heading_correction_count"] == 0
     assert summary["sensor_fallback_used_count"] == 0
     assert summary["ready_for_full_path_following"] is False
+
+
+def test_mission_heading_holds_body_heading_on_backward_lane() -> None:
+    # A reverse-driven lane travels west while the BODY faces east. Mission
+    # heading must hold the body at 0 deg (east), so a +20 deg body drift is
+    # corrected with a RIGHT turn even though the travel heading is 180.
+    backward_lane = {
+        "segment_index": 1,
+        "segment_type": "backward_lane",
+        "start_x_m": 1.0,
+        "start_y_m": 0.0,
+        "end_x_m": 0.0,
+        "end_y_m": 0.0,
+        "length_m": 1.0,
+        "target_heading_deg": 180.0,
+        "body_heading_deg": 0.0,
+        "expected_motion_direction": "backward",
+        "pulse_budget": 1,
+    }
+    handle = FakeSerial(
+        [
+            _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),  # preflight at lane start
+            *_PULSE_OK,
+            _hb(35.0, 129.0000055, imu_yaw_deg=20.0),  # mid-lane, body drifted +20
+            _hb(None, None, imu_yaw_deg=2.0, with_gps=False),  # correction feedback
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            _hb(35.0, 129.0000055, imu_yaw_deg=2.0),  # preflight chunk 2
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=2.0),  # lane end reached
+        ]
+    )
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[backward_lane],
+        resolved_calibration=geometry.FALLBACK_RESOLVED_CALIBRATION,
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+        heading_reference="mission",
+    )
+
+    assert abort_reason == "NONE"
+    assert rows[0]["phase"] == "correction"
+    assert float(rows[0]["target_heading_deg"]) == 0.0  # body target, not travel 180
+    assert float(rows[0]["heading_error_deg"]) == -20.0
+    assert rows[0]["correction_b_cmd"] == "-0.120"  # right turn fixes +20 body drift
+    assert rows[0]["correction_success"] is True
+    move_cmds = [w for w in handle.writes if w.startswith("USB_PULSE_TEST_CMD")]
+    assert all("a=-0.080" in w for w in move_cmds)  # reverse-driven chunks

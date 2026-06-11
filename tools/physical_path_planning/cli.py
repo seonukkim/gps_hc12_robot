@@ -1516,6 +1516,7 @@ def resolve_plan(args: argparse.Namespace, calibration_dict: dict[str, object]) 
         max_segment_pulses=args.max_segment_pulses,
         nominal_forward_pulse_m=args.nominal_forward_pulse_m,
         calibration=calibration_dict,
+        connector_style=getattr(args, "connector_style", geometry.DEFAULT_CONNECTOR_STYLE),
     )
     validate_resolved_field_config(args, plan)
     plan["field_config"] = build_resolved_field_config(args, plan)
@@ -1564,6 +1565,9 @@ def build_resolved_field_config(args: argparse.Namespace, plan: dict[str, object
         "diagonal_orientation": getattr(args, "diagonal_orientation", "A_top_left_to_B_bottom_right"),
         "expected_goal_distance_m": float(plan["goal_distance_m"]),
         "connector_count": int(plan.get("connector_count", 0)),
+        "connector_style": str(plan.get("connector_style", geometry.DEFAULT_CONNECTOR_STYLE)),
+        "connector_turn_count": int(plan.get("connector_turn_count", plan.get("connector_count", 0))),
+        "step_lane_count": int(plan.get("step_lane_count", 0)),
         "coverage_area_estimate_m2": plan.get("coverage_area_estimate_m2"),
         "expected_sweep_style": plan.get("expected_sweep_style", "lawnmower_ㄹ"),
         "lane_count": int(plan.get("lane_count", 0)),
@@ -1625,6 +1629,9 @@ def format_field_config(config: dict[str, object]) -> str:
         "expected_lane_count",
         "expected_segment_count",
         "connector_count",
+        "connector_style",
+        "connector_turn_count",
+        "step_lane_count",
         "coverage_area_estimate_m2",
         "expected_sweep_style",
     ]
@@ -1668,15 +1675,23 @@ def load_plan_dir_plan(plan_dir: Path) -> dict[str, object]:
         if isinstance(segments, list):
             plan["segments"] = segments
             plan["segment_count"] = len(segments)
-            plan["lane_count"] = len(
-                [seg for seg in segments if str(seg.get("segment_type", "")).endswith("_lane")]
-            )
-            plan["connector_count"] = len(
+            lane_count = len(
                 [
                     seg for seg in segments
-                    if str(seg.get("segment_type", "")) in {"connector_turn", "path_connector"}
+                    if str(seg.get("segment_type", "")) in geometry.FULL_LANE_SEGMENT_TYPES
                 ]
             )
+            plan["lane_count"] = lane_count
+            plan["step_lane_count"] = len(
+                [seg for seg in segments if str(seg.get("segment_type", "")) == "step_lane"]
+            )
+            plan["connector_turn_count"] = len(
+                [
+                    seg for seg in segments
+                    if str(seg.get("segment_type", "")) in geometry.CONNECTOR_SEGMENT_TYPES
+                ]
+            )
+            plan["connector_count"] = max(0, lane_count - 1)
     primitives_json = plan_dir / "planned_primitives.json"
     if primitives_json.exists():
         primitives = json.loads(primitives_json.read_text())
@@ -4465,9 +4480,11 @@ def cmd_inspect_plan(args: argparse.Namespace) -> int:
     }
     missing_images = [status["path"] for status in image_status.values() if not status["exists"]]
     connector_count = len(
-        [seg for seg in segments if str(seg.get("segment_type", "")) in {"connector_turn", "path_connector"}]
+        [seg for seg in segments if str(seg.get("segment_type", "")) in geometry.CONNECTOR_SEGMENT_TYPES]
     )
-    lane_count = len([seg for seg in segments if str(seg.get("segment_type", "")).endswith("_lane")])
+    lane_count = len(
+        [seg for seg in segments if str(seg.get("segment_type", "")) in geometry.FULL_LANE_SEGMENT_TYPES]
+    )
     summary = {
         "mode": "inspect-plan",
         "success": not missing_images,
@@ -5685,6 +5702,13 @@ def _add_goal_arguments(parser: argparse.ArgumentParser, *, require_start: bool 
         "--path-shape",
         choices=sorted(geometry.PATH_SHAPE_ALIASES.keys()),
         default=geometry.COVERAGE_LAWNMOWER,
+    )
+    parser.add_argument(
+        "--connector-style",
+        choices=sorted(geometry.CONNECTOR_STYLES),
+        default=geometry.DEFAULT_CONNECTOR_STYLE,
+        help="turn_step_turn plans each ㄹ corner as pivot + step-over straight + pivot "
+        "(drivable); single_turn is the legacy one-pivot connector",
     )
     parser.add_argument("--workspace-width-m", type=float, default=None)
     parser.add_argument("--step-spacing-m", type=float, default=0.5)

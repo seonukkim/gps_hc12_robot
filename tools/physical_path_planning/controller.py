@@ -303,6 +303,23 @@ def connector_turn_angle_deg(segment: dict[str, object]) -> float:
     return 90.0 if str(segment.get("expected_motion_direction")) == "turn_left" else -90.0
 
 
+def body_heading_target_deg(segment: dict[str, object]) -> float:
+    """Heading the robot BODY should hold on this segment.
+
+    Backward (reverse-driven) lanes travel opposite to where the body points,
+    so their body target is the travel heading plus 180. New plans carry an
+    explicit ``body_heading_deg``; older plans derive it from the expected
+    motion direction.
+    """
+    explicit = telemetry._optional_float(segment.get("body_heading_deg"))
+    if explicit is not None:
+        return float(explicit)
+    travel = float(segment.get("target_heading_deg", 0.0) or 0.0)
+    if str(segment.get("expected_motion_direction")) == "backward":
+        return geometry.wrap_deg(travel + 180.0)
+    return travel
+
+
 def per_pulse_turn_angle_deg(
     connector: dict[str, object],
     *,
@@ -1770,11 +1787,11 @@ def run_stop_correct_go(
     # legacy per-lane behavior rather than capturing a frame mid-rotation.
     first_lane_heading = next(
         (
-            float(s["target_heading_deg"])
+            body_heading_target_deg(s)
             for s in segments
             if str(s.get("segment_type")) not in {"connector_turn", "path_connector"}
         ),
-        float(segments[0]["target_heading_deg"]) if segments else 0.0,
+        body_heading_target_deg(segments[0]) if segments else 0.0,
     )
     mission_frame_offset: float | None = None
     mission_capture_allowed = True
@@ -1903,11 +1920,13 @@ def run_stop_correct_go(
                 mission_h = mission_heading(yaw)
                 if mission_h is not None:
                     current_heading = mission_h
+                    heading_target_for_control = body_heading_target_deg(segment)
                 else:
                     current_heading = current_heading_deg(target_heading, yaw, provided_start_yaw)
+                    heading_target_for_control = target_heading
                 correction = {
                     "current_heading_deg": current_heading,
-                    "heading_error_deg": geometry.wrap_deg(target_heading - current_heading),
+                    "heading_error_deg": geometry.wrap_deg(heading_target_for_control - current_heading),
                     "cross_track_error_m": signed_cte,
                     "along_track_progress_m": along,
                     "remaining_distance_m": max(0.0, length_m - along),
@@ -1926,7 +1945,7 @@ def run_stop_correct_go(
                     goal_lat=goal_lat,
                     goal_lon=goal_lon,
                     start_yaw_deg=start_yaw_deg,
-                    target_heading_deg=target_heading,
+                    target_heading_deg=heading_target_for_control,
                     a_cmd=a_cmd,
                     correction=correction,
                     pulse_ms=pulse_ms,
@@ -2081,12 +2100,15 @@ def run_stop_correct_go(
             along, signed_cte, _ = geometry.projection_metrics(segment, x, y)
             mission_h = mission_heading(yaw if imu_valid else None)
             if mission_h is not None:
+                # Mission frame tracks the BODY: backward lanes hold travel+180.
                 current_heading = mission_h
+                heading_target_for_control = body_heading_target_deg(segment)
             else:
                 current_heading = current_heading_deg(
                     target_heading, yaw if imu_valid else None, segment_ref_yaw
                 )
-            heading_error = geometry.wrap_deg(target_heading - current_heading)
+                heading_target_for_control = target_heading
+            heading_error = geometry.wrap_deg(heading_target_for_control - current_heading)
             remaining_m = max(0.0, length_m - along)
 
             # HEADING CORRECTION: discrete IMU turn-in-place when over threshold.
@@ -2159,7 +2181,7 @@ def run_stop_correct_go(
                 goal_lat=goal_lat,
                 goal_lon=goal_lon,
                 start_yaw_deg=start_yaw_deg,
-                target_heading_deg=target_heading,
+                target_heading_deg=heading_target_for_control,
                 a_cmd=a_cmd,
                 correction=correction,
                 pulse_ms=int(move_chunk_ms),

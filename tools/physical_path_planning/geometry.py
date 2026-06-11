@@ -37,6 +37,19 @@ PATH_SHAPE_ALIASES = {
     "direct_line": DIRECT_LINE,
 }
 
+# How lane-to-lane transitions are planned. ``turn_step_turn`` (default) is the
+# physically drivable ㄹ corner: pivot ~90 deg, drive the step-over distance as
+# a short straight (forward after forward lanes, reverse after backward lanes),
+# pivot ~90 deg back. ``single_turn`` is the legacy one-pivot connector whose
+# 1.2 m sideways translation was never actually driven.
+CONNECTOR_STYLE_TURN_STEP_TURN = "turn_step_turn"
+CONNECTOR_STYLE_SINGLE_TURN = "single_turn"
+CONNECTOR_STYLES = {CONNECTOR_STYLE_TURN_STEP_TURN, CONNECTOR_STYLE_SINGLE_TURN}
+DEFAULT_CONNECTOR_STYLE = CONNECTOR_STYLE_TURN_STEP_TURN
+
+FULL_LANE_SEGMENT_TYPES = {"forward_lane", "backward_lane"}
+CONNECTOR_SEGMENT_TYPES = {"connector_turn", "path_connector"}
+
 
 def canonical_path_shape(path_shape: str) -> str:
     normalized = path_shape.strip().lower()
@@ -331,13 +344,92 @@ def _point_on_rectangle(workspace: dict[str, object], along_m: float, across_m: 
     return along_m * ux + across_m * vx, along_m * uy + across_m * vy
 
 
+def _turn_repeat_count(
+    calibration: dict[str, object] | None, direction: str, turn_angle_deg: float
+) -> int:
+    """Planned pulse count for one connector turn (for primitives/preview).
+
+    Repeated-pulse twitch calibration keeps its fixed count; angle-calibrated
+    turns budget ``ceil(|angle| / per-pulse target_angle_deg)`` so a small turn
+    pulse stored under a turn_*_90 key plans 2-4 pulses per corner, not 1.
+    """
+    resolved = _resolved_or_fallback(calibration)
+    if str(resolved.get("connector_mode_effective", "repeated_pulses")) == "repeated_pulses":
+        key = "left_fixed_pulses" if direction == "left" else "right_fixed_pulses"
+        return int(resolved.get(key, 12))
+    turn = _turn_calibrated(calibration, direction)
+    per_pulse = turn.get("target_angle_deg")
+    if per_pulse is None or float(per_pulse) <= 0.0:
+        return 1
+    return max(1, math.ceil(abs(turn_angle_deg) / float(per_pulse) - 1e-9))
+
+
+def _connector_turn_segment(
+    *,
+    segment_index: int,
+    x: float,
+    y: float,
+    body_before_deg: float,
+    body_after_deg: float,
+) -> dict[str, object]:
+    """Zero-length pivot segment rotating the body from before to after."""
+    turn_angle = wrap_deg(body_after_deg - body_before_deg)
+    return {
+        "segment_index": segment_index,
+        "segment_type": "connector_turn",
+        "connector_kind": "turn_in_place",
+        "start_x_m": x,
+        "start_y_m": y,
+        "end_x_m": x,
+        "end_y_m": y,
+        "target_heading_deg": body_after_deg,
+        "body_heading_deg": body_after_deg,
+        "turn_angle_deg": turn_angle,
+        "expected_motion_direction": "turn_left" if turn_angle >= 0.0 else "turn_right",
+        "tool_active": False,
+        "length_m": 0.0,
+        "pulse_budget": 1,
+    }
+
+
+def _turn_primitive_for_segment(
+    calibration: dict[str, object] | None,
+    segment: dict[str, object],
+    primitive_index: int,
+) -> dict[str, object]:
+    direction = "left" if str(segment["expected_motion_direction"]) == "turn_left" else "right"
+    turn = _turn_calibrated(calibration, direction)
+    return {
+        "primitive_index": primitive_index,
+        "segment_index": segment["segment_index"],
+        "primitive_type": str(segment["expected_motion_direction"]),
+        "a_cmd": turn["a_cmd"],
+        "b_cmd": turn["b_cmd"],
+        "pulse_ms": turn["pulse_ms"],
+        "target_heading_deg": segment["target_heading_deg"],
+        "turn_angle_deg": segment.get("turn_angle_deg", "NA"),
+        "calibration_source": turn["calibration_source"],
+        "connector_mode": turn.get(
+            "connector_mode",
+            _resolved_or_fallback(calibration).get("connector_mode_effective", "repeated_pulses"),
+        ),
+        "repeat_count": _turn_repeat_count(
+            calibration, direction, float(segment.get("turn_angle_deg", 90.0) or 90.0)
+        ),
+        "ready_for_full_path_following": False,
+    }
+
+
 def build_serpentine_segments(
     workspace: dict[str, object],
     *,
     max_segment_pulses: int,
     nominal_forward_pulse_m: float,
     calibration: dict[str, object] | None = None,
+    connector_style: str = DEFAULT_CONNECTOR_STYLE,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    if connector_style not in CONNECTOR_STYLES:
+        raise ValueError(f"unsupported connector_style: {connector_style}")
     length_m = float(workspace["workspace_length_m"])
     width_m = float(workspace["workspace_width_m"])
     step_spacing_m = float(workspace["step_spacing_m"])
@@ -353,6 +445,9 @@ def build_serpentine_segments(
         sx, sy = _point_on_rectangle(workspace, start_along, offset)
         ex, ey = _point_on_rectangle(workspace, end_along, offset)
         heading = math.degrees(math.atan2(ey - sy, ex - sx))
+        # The body faces the travel direction on forward lanes and the opposite
+        # way on backward (reverse-driven) lanes; turns align the BODY.
+        body_heading = heading if forward else wrap_deg(heading + 180.0)
         segment_index += 1
         primitive_index += 1
         direction = "forward" if forward else "backward"
@@ -365,6 +460,7 @@ def build_serpentine_segments(
             "end_x_m": ex,
             "end_y_m": ey,
             "target_heading_deg": heading,
+            "body_heading_deg": body_heading,
             "expected_motion_direction": direction,
             "tool_active": True,
             "length_m": length_m,
@@ -389,42 +485,126 @@ def build_serpentine_segments(
             next_offset = offsets[lane_index + 1]
             csx, csy = ex, ey
             cex, cey = _point_on_rectangle(workspace, end_along, next_offset)
-            segment_index += 1
-            primitive_index += 1
             connector_heading = math.degrees(math.atan2(cey - csy, cex - csx))
-            turn_direction = "turn_left" if forward else "turn_right"
-            segments.append({
-                "segment_index": segment_index,
-                "segment_type": "path_connector",
-                "connector_kind": "path_connector",
-                "start_x_m": csx,
-                "start_y_m": csy,
-                "end_x_m": cex,
-                "end_y_m": cey,
-                "target_heading_deg": connector_heading,
-                "expected_motion_direction": turn_direction,
-                "tool_active": False,
-                "length_m": abs(next_offset - offset),
-                "pulse_budget": 1,
-            })
-            connector_direction = "left" if turn_direction == "turn_left" else "right"
-            turn = _turn_calibrated(calibration, connector_direction)
-            repeat_count = 1
-            if str(_resolved_or_fallback(calibration).get("connector_mode_effective", "repeated_pulses")) == "repeated_pulses":
-                repeat_count = int(_resolved_or_fallback(calibration).get("left_fixed_pulses" if connector_direction == "left" else "right_fixed_pulses", 12))
-            primitives.append({
-                "primitive_index": primitive_index,
-                "segment_index": segment_index,
-                "primitive_type": turn_direction,
-                "a_cmd": turn["a_cmd"],
-                "b_cmd": turn["b_cmd"],
-                "pulse_ms": turn["pulse_ms"],
-                "target_heading_deg": connector_heading,
-                "calibration_source": turn["calibration_source"],
-                "connector_mode": turn.get("connector_mode", _resolved_or_fallback(calibration).get("connector_mode_effective", "repeated_pulses")),
-                "repeat_count": repeat_count,
-                "ready_for_full_path_following": False,
-            })
+            if connector_style == CONNECTOR_STYLE_TURN_STEP_TURN:
+                # Drivable ㄹ corner: pivot, drive the step-over as a short
+                # straight (forward after forward lanes, reverse after backward
+                # lanes so the next full lane starts with the body already
+                # aligned), pivot back to the next lane's body heading.
+                step_direction = "forward" if forward else "backward"
+                step_body_heading = (
+                    connector_heading
+                    if step_direction == "forward"
+                    else wrap_deg(connector_heading + 180.0)
+                )
+                next_forward = (lane_index + 1) % 2 == 0
+                # Next lane runs the opposite along-direction at next_offset.
+                n_start_along = 0.0 if next_forward else length_m
+                n_end_along = length_m if next_forward else 0.0
+                nsx, nsy = _point_on_rectangle(workspace, n_start_along, next_offset)
+                nex, ney = _point_on_rectangle(workspace, n_end_along, next_offset)
+                next_travel_heading = math.degrees(math.atan2(ney - nsy, nex - nsx))
+                next_body_heading = (
+                    next_travel_heading if next_forward else wrap_deg(next_travel_heading + 180.0)
+                )
+                segment_index += 1
+                primitive_index += 1
+                turn_in = _connector_turn_segment(
+                    segment_index=segment_index,
+                    x=csx,
+                    y=csy,
+                    body_before_deg=body_heading,
+                    body_after_deg=step_body_heading,
+                )
+                segments.append(turn_in)
+                primitives.append(
+                    _turn_primitive_for_segment(calibration, turn_in, primitive_index)
+                )
+                segment_index += 1
+                primitive_index += 1
+                step_length = abs(next_offset - offset)
+                step_budget = max(
+                    1,
+                    min(max_segment_pulses, math.ceil(step_length / max(nominal_forward_pulse_m, 0.05))),
+                )
+                segments.append({
+                    "segment_index": segment_index,
+                    "segment_type": "step_lane",
+                    "connector_kind": "step_over",
+                    "start_x_m": csx,
+                    "start_y_m": csy,
+                    "end_x_m": cex,
+                    "end_y_m": cey,
+                    "target_heading_deg": connector_heading,
+                    "body_heading_deg": step_body_heading,
+                    "expected_motion_direction": step_direction,
+                    "tool_active": False,
+                    "length_m": step_length,
+                    "pulse_budget": step_budget,
+                })
+                step_calibrated = _motion_calibrated(calibration, step_direction)
+                primitives.append({
+                    "primitive_index": primitive_index,
+                    "segment_index": segment_index,
+                    "primitive_type": "move_forward" if step_direction == "forward" else "move_backward",
+                    "a_cmd": step_calibrated["a_cmd"],
+                    "b_cmd": step_calibrated["b_cmd"],
+                    "pulse_ms": step_calibrated["pulse_ms"],
+                    "target_heading_deg": connector_heading,
+                    "calibration_source": step_calibrated["calibration_source"],
+                    "connector_mode": "step_lane",
+                    "repeat_count": step_budget,
+                    "ready_for_full_path_following": False,
+                })
+                segment_index += 1
+                primitive_index += 1
+                turn_out = _connector_turn_segment(
+                    segment_index=segment_index,
+                    x=cex,
+                    y=cey,
+                    body_before_deg=step_body_heading,
+                    body_after_deg=next_body_heading,
+                )
+                segments.append(turn_out)
+                primitives.append(
+                    _turn_primitive_for_segment(calibration, turn_out, primitive_index)
+                )
+            else:
+                segment_index += 1
+                primitive_index += 1
+                turn_direction = "turn_left" if forward else "turn_right"
+                segments.append({
+                    "segment_index": segment_index,
+                    "segment_type": "path_connector",
+                    "connector_kind": "path_connector",
+                    "start_x_m": csx,
+                    "start_y_m": csy,
+                    "end_x_m": cex,
+                    "end_y_m": cey,
+                    "target_heading_deg": connector_heading,
+                    "expected_motion_direction": turn_direction,
+                    "tool_active": False,
+                    "length_m": abs(next_offset - offset),
+                    "pulse_budget": 1,
+                })
+                connector_direction = "left" if turn_direction == "turn_left" else "right"
+                turn = _turn_calibrated(calibration, connector_direction)
+                repeat_count = 1
+                if str(_resolved_or_fallback(calibration).get("connector_mode_effective", "repeated_pulses")) == "repeated_pulses":
+                    repeat_count = int(_resolved_or_fallback(calibration).get("left_fixed_pulses" if connector_direction == "left" else "right_fixed_pulses", 12))
+                primitives.append({
+                    "primitive_index": primitive_index,
+                    "segment_index": segment_index,
+                    "primitive_type": turn_direction,
+                    "a_cmd": turn["a_cmd"],
+                    "b_cmd": turn["b_cmd"],
+                    "pulse_ms": turn["pulse_ms"],
+                    "target_heading_deg": connector_heading,
+                    "calibration_source": turn["calibration_source"],
+                    "connector_mode": turn.get("connector_mode", _resolved_or_fallback(calibration).get("connector_mode_effective", "repeated_pulses")),
+                    "repeat_count": repeat_count,
+                    "ready_for_full_path_following": False,
+                })
     tool_path = []
     point_index = 0
     origin = GeoPoint(float(workspace["local_frame_origin_lat"]), float(workspace["local_frame_origin_lon"]))
@@ -500,12 +680,16 @@ def primitives_from_segments(
     for primitive_index, segment in enumerate(segments, start=1):
         segment_type = str(segment.get("segment_type", ""))
         expected = str(segment.get("expected_motion_direction", "forward"))
-        if segment_type in {"connector_turn", "path_connector"}:
+        if segment_type in CONNECTOR_SEGMENT_TYPES:
             direction = "left" if expected == "turn_left" else "right"
             calibrated = _turn_calibrated(calibration, direction)
-            repeat_count = 1
-            if str(calibration.get("connector_mode_effective", "repeated_pulses")) == "repeated_pulses":
-                repeat_count = int(calibration.get("left_fixed_pulses" if direction == "left" else "right_fixed_pulses", 12))
+            turn_angle = segment.get("turn_angle_deg")
+            requested_angle = (
+                float(turn_angle)
+                if turn_angle not in (None, "", "NA")
+                else (90.0 if direction == "left" else -90.0)
+            )
+            repeat_count = _turn_repeat_count(calibration, direction, requested_angle)
             primitive_type = "turn_left" if direction == "left" else "turn_right"
             connector_mode = calibrated.get("connector_mode", calibration.get("connector_mode_effective", "repeated_pulses"))
         else:
@@ -513,7 +697,7 @@ def primitives_from_segments(
             calibrated = _motion_calibrated(calibration, direction)
             repeat_count = int(segment.get("pulse_budget", 1))
             primitive_type = "move_backward" if direction == "backward" else "move_forward"
-            connector_mode = "lane"
+            connector_mode = "step_lane" if segment_type == "step_lane" else "lane"
         primitives.append({
             "primitive_index": primitive_index,
             "segment_index": segment.get("segment_index", primitive_index),

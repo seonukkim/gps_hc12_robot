@@ -68,6 +68,7 @@ def build_preview(
     max_segment_pulses: int = 8,
     nominal_forward_pulse_m: float = 0.30,
     calibration: dict[str, object] | None = None,
+    connector_style: str = geometry.DEFAULT_CONNECTOR_STYLE,
 ) -> dict[str, object]:
     """Build a no-motion preview summary (segments + plan metadata).
 
@@ -126,6 +127,7 @@ def build_preview(
             max_segment_pulses=max_segment_pulses,
             nominal_forward_pulse_m=nominal_forward_pulse_m,
             calibration=resolved,
+            connector_style=connector_style,
         )
         distance = float(workspace["diagonal_length_m"])
     elif path_shape == geometry.DIAGONAL_RECTANGLE_SERPENTINE:
@@ -147,17 +149,25 @@ def build_preview(
             max_segment_pulses=max_segment_pulses,
             nominal_forward_pulse_m=nominal_forward_pulse_m,
             calibration=resolved,
+            connector_style=connector_style,
         )
         distance = float(workspace["diagonal_length_m"])
     else:
         raise ValueError(f"unsupported path_shape: {path_shape}")
 
+    # lane_count counts FULL coverage lanes; step-over lanes and pivot turns are
+    # reported separately. connector_count keeps its historical meaning of
+    # lane-to-lane transitions (one ㄹ corner), whatever style implements them.
     lane_count = len(
-        [seg for seg in segments if str(seg["segment_type"]).endswith("_lane")]
+        [seg for seg in segments if str(seg["segment_type"]) in geometry.FULL_LANE_SEGMENT_TYPES]
     )
-    connector_count = len(
-        [seg for seg in segments if str(seg["segment_type"]) in {"connector_turn", "path_connector"}]
+    step_lane_count = len(
+        [seg for seg in segments if str(seg["segment_type"]) == "step_lane"]
     )
+    connector_turn_count = len(
+        [seg for seg in segments if str(seg["segment_type"]) in geometry.CONNECTOR_SEGMENT_TYPES]
+    )
+    connector_count = max(0, lane_count - 1) if path_shape != geometry.DIRECT_LINE else 0
     summary: dict[str, object] = {
         "planner_mode": "preview",
         "preview_only": True,
@@ -177,6 +187,11 @@ def build_preview(
         "primitive_count": len(primitives),
         "lane_count": lane_count,
         "connector_count": connector_count,
+        "connector_turn_count": connector_turn_count,
+        "step_lane_count": step_lane_count,
+        "connector_style": (
+            connector_style if path_shape != geometry.DIRECT_LINE else "none"
+        ),
         "coverage_area_estimate_m2": workspace.get("coverage_area_estimate_m2") if workspace else None,
         "expected_sweep_style": workspace.get("expected_sweep_style") if workspace else "direct_line",
         "segments": segments,

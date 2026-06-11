@@ -42,10 +42,14 @@ def test_coverage_lawnmower_relative_enu_creates_alternating_lanes() -> None:
     )
 
     assert plan["path_shape"] == "coverage_lawnmower"
-    lanes = [segment for segment in plan["segments"] if str(segment["segment_type"]).endswith("_lane")]
-    connectors = [segment for segment in plan["segments"] if segment["segment_type"] == "path_connector"]
+    lanes = [
+        segment
+        for segment in plan["segments"]
+        if str(segment["segment_type"]) in {"forward_lane", "backward_lane"}
+    ]
     assert len(lanes) == 4
-    assert len(connectors) == 3
+    assert plan["lane_count"] == 4
+    assert plan["connector_count"] == 3  # lane-to-lane transitions
     assert lanes[0]["start_x_m"] == pytest.approx(0.0)
     assert lanes[0]["start_y_m"] == pytest.approx(0.0)
     assert lanes[0]["end_x_m"] == pytest.approx(1.2)
@@ -59,6 +63,92 @@ def test_coverage_lawnmower_relative_enu_creates_alternating_lanes() -> None:
     for lane in lanes:
         assert lane["start_x_m"] == pytest.approx(lane["end_x_m"]) or lane["start_y_m"] == pytest.approx(lane["end_y_m"])
     assert plan["expected_sweep_style"] == "lawnmower_ㄹ"
+
+
+def test_coverage_lawnmower_default_corner_is_turn_step_turn() -> None:
+    # Default ㄹ corner is drivable: pivot ~90, drive the step-over straight
+    # (forward after forward lanes, reverse after backward lanes), pivot back.
+    plan = preview.build_preview(
+        start_lat=35.5709,
+        start_lon=129.1871,
+        goal_mode="relative_enu",
+        goal_east_m=1.2,
+        goal_north_m=1.2,
+        workspace_width_m=1.2,
+        step_spacing_m=0.4,
+    )
+    assert plan["connector_style"] == "turn_step_turn"
+    assert plan["step_lane_count"] == 3
+    assert plan["connector_turn_count"] == 6
+    segments = plan["segments"]
+    types = [str(seg["segment_type"]) for seg in segments]
+    assert types == [
+        "forward_lane",
+        "connector_turn", "step_lane", "connector_turn",
+        "backward_lane",
+        "connector_turn", "step_lane", "connector_turn",
+        "forward_lane",
+        "connector_turn", "step_lane", "connector_turn",
+        "backward_lane",
+    ]
+
+    # Transition after the FORWARD lane: left pivot, forward step north, right pivot.
+    turn_in, step, turn_out = segments[1], segments[2], segments[3]
+    assert turn_in["expected_motion_direction"] == "turn_left"
+    assert turn_in["turn_angle_deg"] == pytest.approx(90.0)
+    assert turn_in["length_m"] == pytest.approx(0.0)
+    assert step["expected_motion_direction"] == "forward"
+    assert step["length_m"] == pytest.approx(0.4)
+    assert step["start_x_m"] == pytest.approx(1.2)
+    assert step["start_y_m"] == pytest.approx(0.0)
+    assert step["end_y_m"] == pytest.approx(0.4)
+    assert step["target_heading_deg"] == pytest.approx(90.0)  # travel north
+    assert step["body_heading_deg"] == pytest.approx(90.0)  # body faces travel
+    assert turn_out["expected_motion_direction"] == "turn_right"
+    assert turn_out["turn_angle_deg"] == pytest.approx(-90.0)
+
+    # Transition after the BACKWARD lane: right pivot, REVERSE step north, left pivot.
+    turn_in2, step2, turn_out2 = segments[5], segments[6], segments[7]
+    assert turn_in2["expected_motion_direction"] == "turn_right"
+    assert turn_in2["turn_angle_deg"] == pytest.approx(-90.0)
+    assert step2["expected_motion_direction"] == "backward"
+    assert step2["target_heading_deg"] == pytest.approx(90.0)  # still travels north
+    assert step2["body_heading_deg"] == pytest.approx(-90.0)  # body faces south while reversing
+    assert turn_out2["expected_motion_direction"] == "turn_left"
+    assert turn_out2["turn_angle_deg"] == pytest.approx(90.0)
+
+    # Body heading: full lanes alternate forward/backward but the body always
+    # faces east (the lane axis), which is what makes reverse lanes drivable.
+    lanes = [seg for seg in segments if str(seg["segment_type"]).endswith("_lane") and seg["segment_type"] != "step_lane"]
+    assert all(float(seg["body_heading_deg"]) == pytest.approx(0.0) for seg in lanes)
+
+    # Primitives stay in sync with segments (one per segment, turns are B-only).
+    primitives = plan["primitives"]
+    assert len(primitives) == len(segments)
+    turn_primitives = [p for p in primitives if str(p["primitive_type"]).startswith("turn_")]
+    assert len(turn_primitives) == 6
+    assert all(float(p["a_cmd"]) == pytest.approx(0.0) for p in turn_primitives)
+
+
+def test_coverage_lawnmower_single_turn_style_keeps_legacy_structure() -> None:
+    plan = preview.build_preview(
+        start_lat=35.5709,
+        start_lon=129.1871,
+        goal_mode="relative_enu",
+        goal_east_m=1.2,
+        goal_north_m=1.2,
+        workspace_width_m=1.2,
+        step_spacing_m=0.4,
+        connector_style="single_turn",
+    )
+    connectors = [seg for seg in plan["segments"] if seg["segment_type"] == "path_connector"]
+    assert len(connectors) == 3
+    assert plan["segment_count"] == 7
+    assert plan["connector_style"] == "single_turn"
+    assert plan["step_lane_count"] == 0
+    assert [c["expected_motion_direction"] for c in connectors] == [
+        "turn_left", "turn_right", "turn_left",
+    ]
 
 
 def test_coverage_lawnmower_preview_writes_required_artifacts(tmp_path: Path) -> None:
