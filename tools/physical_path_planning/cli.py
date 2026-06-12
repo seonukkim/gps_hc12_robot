@@ -2384,17 +2384,24 @@ def rc_auto_pattern_firmware_flags(
     turn_timeout_ms: int,
     pause_ms: int,
     mode_channel_index: int | None = 4,
+    profile: str = MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
 ) -> str:
     """Build flags for the untethered RC AUTO pattern firmware.
 
-    Starts from the proven rc-mix-ppm manual profile (RC manual driving, the
-    locked direction signs, CH5 mode channel) and adds IMU yaw plus the onboard
+    Starts from a manual-control PPM profile (RC manual driving, the locked
+    direction signs, CH5 mode channel) and adds IMU yaw plus the onboard
     lawnmower pattern: CH5=MANUAL drives manually, CH5=AUTO runs the pattern
     once per fresh MANUAL->AUTO transition. No station/USB link is required
     after upload.
+
+    Default profile is full-telemetry-ppm: it keeps the firmware-default PPM
+    decode settings, which are the SAME settings the supervised firmware uses
+    and the only configuration field-proven to decode this receiver's
+    channels. rc-mix-ppm's falling-edge decode produced
+    PPM_SYNC_ONLY_NO_CHANNELS (no frames, FAILSAFE) on 2026-06-12.
     """
     base = manual_control_firmware_flags(
-        profile=MANUAL_CONTROL_RC_MIX_PPM_PROFILE, mode_channel_index=mode_channel_index
+        profile=profile, mode_channel_index=mode_channel_index
     )
     base = base.replace("-DIMU_ENABLE=0", "-DIMU_ENABLE=1 -DIMU_YAW_DIAG=1")
     return (
@@ -2428,6 +2435,7 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
     if not args.print_cmd and not ensure_port(args):
         return 2
     flags = rc_auto_pattern_firmware_flags(
+        profile=args.profile,
         lanes=args.lanes,
         lane_ms=args.lane_ms,
         step_ms=args.step_ms,
@@ -2456,6 +2464,7 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
     config = {
         "mode": "rc-auto-pattern",
         "firmware_profile": "rc_auto_pattern",
+        "ppm_profile": args.profile,
         "untethered": True,
         "rc_input_mode": "ppm",
         "ppm_input_pin": "D6",
@@ -6120,6 +6129,17 @@ def build_parser() -> argparse.ArgumentParser:
     rc_auto_p.add_argument("--turn-timeout-ms", type=int, default=15000)
     rc_auto_p.add_argument("--pause-ms", type=int, default=500)
     rc_auto_p.add_argument("--mode-channel-index", type=int, default=4)
+    rc_auto_p.add_argument(
+        "--profile",
+        choices=[
+            MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
+            MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
+            MANUAL_CONTROL_RC_MIX_PPM_PROFILE,
+        ],
+        default=MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
+        help="PPM decode base profile; if the monitor shows "
+        "ppm_decode_reason=PPM_SYNC_ONLY_NO_CHANNELS, try another profile",
+    )
     rc_auto_p.add_argument("--print-cmd", action="store_true",
                            help="print firmware commands and exit")
     rc_auto_p.add_argument("--out-dir", default="outputs/physical_path_planning/rc_auto_pattern")

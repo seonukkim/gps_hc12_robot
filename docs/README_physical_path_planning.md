@@ -244,6 +244,18 @@ bash scripts/run_physical_path_planner.sh rc-auto-pattern \
   --out-dir outputs/physical_path_planning/rc_auto_pattern
 ```
 
+VERIFY BEFORE UNPLUGGING (in the `--duration-s` monitor output):
+
+- `ppm_frame_count` must be increasing and `mode=MANUAL` shown with the
+  switch in MANUAL. If instead you see
+  `ppm_decode_reason=PPM_SYNC_ONLY_NO_CHANNELS` / `mode=FAILSAFE`, the PPM
+  decode settings do not match the receiver: re-run with a different
+  `--profile` (`full-telemetry-ppm` is the default and matches the
+  supervised firmware's field-proven decode; `old-working-ppm` and
+  `rc-mix-ppm` are alternatives).
+- Flip to AUTO while still monitoring: `RC_AUTO_PATTERN state=...` lines
+  show WAIT_MANUAL_ARM / DRIVE / TURN / PAUSE / DONE progress.
+
 The pattern is dead-reckoned (timed lanes + IMU pivots, no GPS), so expect
 drift to grow over lanes; re-run `manual-control` or any supervised mode to
 return to the previous firmware behavior. Pattern geometry is baked at upload

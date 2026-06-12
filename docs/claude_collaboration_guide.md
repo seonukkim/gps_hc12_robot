@@ -121,7 +121,13 @@ connector_turn(제자리 ~90°) -> step_lane(간격만큼 직진/후진) -> conn
 6. **첫 청크 만에 레인이 "완료"됨 / cte가 수 m** → 플랜 원점과 로봇 위치
    불일치(오래된 plan-dir) 또는 GPS 표류. 실행은 `run`(현재 위치 재앵커)으로,
    `--max-gps-jump-m 1.2`로 순간이동 보정 거부(`gps_jump_rejected` 카운트 확인).
-7. **코너에서 REJECT: COMMAND_EXCEEDS_MAX_MS** → 가드 펄스 길이가 펌웨어
+7. **rc-auto-pattern에서 AUTO/수동 모두 무반응** → 모니터에서
+   `ppm_decode_reason=PPM_SYNC_ONLY_NO_CHANNELS`, `mode=FAILSAFE`인지 확인.
+   PPM 디코드 설정이 수신기와 불일치한 것 — `--profile`을 바꿔 재업로드
+   (기본 full-telemetry-ppm = 감독 펌웨어와 동일한 검증된 디코드;
+   rc-mix-ppm의 FALLING 에지는 2026-06-12에 채널 디코드 실패 확인).
+   정상 게이트: `ppm_frame_count` 증가 + MANUAL에서 `mode=MANUAL`.
+8. **코너에서 REJECT: COMMAND_EXCEEDS_MAX_MS** → 가드 펄스 길이가 펌웨어
    상한(업로드 시 결정) 초과. 현행 코드는 코너를 live-drive로 돌므로 발생하면
    안 됨 — 발생 시 개루프 폴백(IMU 부재) 여부와 turn_mode 확인.
 

@@ -22,9 +22,12 @@ def test_rc_auto_pattern_flags_combine_manual_profile_imu_and_pattern() -> None:
         turn_timeout_ms=15000,
         pause_ms=500,
     )
-    # Proven manual profile basis (RC manual keeps working in MANUAL).
+    # Proven manual profile basis (RC manual keeps working in MANUAL). The
+    # default base is full-telemetry-ppm: firmware-default PPM decode, the
+    # only configuration field-proven to decode this receiver's channels.
     assert "-DMANUAL_CONTROL_PPM=1" in flags
     assert "-DMANUAL_FORWARD_SIGN=-1" in flags
+    assert "-DPPM_INTERRUPT_EDGE_FALLING=1" not in flags
     # IMU yaw must be compiled in for the pivot feedback.
     assert "-DIMU_ENABLE=1" in flags
     assert "-DIMU_ENABLE=0" not in flags
