@@ -1139,3 +1139,50 @@ Measured turn rates for reference (B command, continuous):
 
 - left B=+0.24: ~13 deg/s (2200 ms -> ~28 deg median, stiction outliers ~2 deg)
 - right B=-0.12: ~80 deg/s (2050-2200 ms -> ~160-173 deg, one ~81 deg outlier)
+
+## Untethered Pattern: Veer, Early Permanent Stop, And "Resume" Illusion (Resolved 2026-06-12)
+
+First untethered rc-auto-pattern run: straights bowed hard left (yaw 37->98
+during one lane), the run stopped for good after forward -> turn -> short
+forward, and re-flipping AUTO appeared to "continue the remaining path".
+
+Causes and fixes (all in the RC_AUTO_PATTERN firmware module):
+
+1. Lanes were driven open-loop (`B=0`), so a drivetrain veer of ~14 deg/s
+   went uncorrected. Straights now run heading-hold against an ABSOLUTE
+   body-heading chain anchored at AUTO start (`RUN_START`):
+   `B = clamp(err * HEADING_KP, +/-HEADING_MAX_B) + DRIVE_B_TRIM`, both
+   drive directions.
+2. Any RC blip entered the `!rcValid` branch, which killed and DISARMED the
+   run permanently (rover sat idle until a fresh MANUAL->AUTO). Signal loss
+   still stops motors instantly, but a dropout <= RC_LOSS_GRACE_MS (1500)
+   now only pauses the run and resumes the interrupted step; longer outages
+   reset+disarm as before.
+3. Turn targets were RELATIVE (+/-90 from wherever the body pointed), so a
+   re-armed run in a rotated pose looked like it was "resuming". Targets are
+   now absolute headings in the run frame, and every MANUAL->AUTO flip
+   rebuilds the steps and restarts from step 0 at the current pose - resume
+   of a partial run is impossible by construction.
+
+## Manual Control Lag While Plugged In / After Long Hot Sessions (2026-06-12)
+
+Two distinct mechanisms, do not conflate them:
+
+1. FIRMWARE (fixed): a USB host that holds the CDC port open but stops
+   draining it (monitor window suspended, reader killed without closing the
+   port) makes every Serial write block; one ~3 KB status line can stall the
+   loop for seconds. All debug printing now passes a stall guard: cached
+   host gate (checked <= 1/s, because the core's `(bool)Serial` can cost
+   ~10 ms per call), a 50 ms per-print budget, a 5 s mute on breach, and a
+   one-packet probe to resume. `usb_print_stall_count` in USBDBG counts
+   breaches. Additionally `LOOP_IDLE_WFI` (default on) sleeps the CPU until
+   the next interrupt each loop instead of busy-spinning - less board
+   self-heating; loop still runs >= ~1 kHz.
+2. HARDWARE (operator checklist): lag that survives a power cycle AND an
+   unplugged cable is not firmware - the board reported "very hot", and
+   powering everything off and resting recovered it. Suspect battery sag
+   (voltage recovers after rest) and ESC/motor/regulator heat. Use
+   `loop_dt_max_ms` in USBDBG to discriminate: small (a few ms) while
+   controls feel mushy = electrical/thermal, not the control loop. Field
+   rules: shade the electronics, power off between sessions, verify battery
+   voltage/charge before blaming firmware, let it cool before re-testing.

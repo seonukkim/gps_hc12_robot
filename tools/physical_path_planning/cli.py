@@ -2383,6 +2383,10 @@ def rc_auto_pattern_firmware_flags(
     turn_tol_deg: float,
     turn_timeout_ms: int,
     pause_ms: int,
+    heading_kp: float = 0.015,
+    heading_hold_max_b: float = 0.25,
+    drive_b_trim: float = 0.0,
+    rc_loss_grace_ms: int = 1500,
     mode_channel_index: int | None = 4,
     profile: str = MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
 ) -> str:
@@ -2417,7 +2421,11 @@ def rc_auto_pattern_firmware_flags(
         f"-DRC_AUTO_PATTERN_TURN_TARGET_DEG={float(turn_target_deg)} "
         f"-DRC_AUTO_PATTERN_TURN_TOL_DEG={float(turn_tol_deg)} "
         f"-DRC_AUTO_PATTERN_TURN_TIMEOUT_MS={int(turn_timeout_ms)} "
-        f"-DRC_AUTO_PATTERN_PAUSE_MS={int(pause_ms)}"
+        f"-DRC_AUTO_PATTERN_PAUSE_MS={int(pause_ms)} "
+        f"-DRC_AUTO_PATTERN_HEADING_KP={float(heading_kp)}f "
+        f"-DRC_AUTO_PATTERN_HEADING_MAX_B={float(heading_hold_max_b)}f "
+        f"-DRC_AUTO_PATTERN_DRIVE_B_TRIM={float(drive_b_trim)}f "
+        f"-DRC_AUTO_PATTERN_RC_LOSS_GRACE_MS={int(rc_loss_grace_ms)}"
     )
 
 
@@ -2447,6 +2455,10 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
         turn_tol_deg=args.turn_tol_deg,
         turn_timeout_ms=args.turn_timeout_ms,
         pause_ms=args.pause_ms,
+        heading_kp=args.heading_kp,
+        heading_hold_max_b=args.heading_hold_max_b,
+        drive_b_trim=args.drive_b_trim,
+        rc_loss_grace_ms=args.rc_loss_grace_ms,
         mode_channel_index=args.mode_channel_index,
     )
     compile_cmd = [
@@ -2483,7 +2495,16 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
         "turn_tol_deg": args.turn_tol_deg,
         "turn_timeout_ms": args.turn_timeout_ms,
         "pause_ms": args.pause_ms,
+        "heading_kp": args.heading_kp,
+        "heading_hold_max_b": args.heading_hold_max_b,
+        "drive_b_trim": args.drive_b_trim,
+        "rc_loss_grace_ms": args.rc_loss_grace_ms,
+        "heading_frame": "absolute body-heading chain anchored at each AUTO start",
         "arming_rule": "fresh MANUAL >=1s then AUTO; one run per transition; MANUAL stops instantly",
+        "rc_loss_rule": (
+            "RC dropout <= grace pauses the run (resumes mid-step); longer dropout "
+            "resets+disarms so the next MANUAL(1s)->AUTO restarts from step 0"
+        ),
         "ready_for_full_path_following": False,
     }
     # Render the expected pattern geometry so the operator can SEE the path
@@ -6166,6 +6187,17 @@ def build_parser() -> argparse.ArgumentParser:
     rc_auto_p.add_argument("--turn-tol-deg", type=float, default=8.0)
     rc_auto_p.add_argument("--turn-timeout-ms", type=int, default=15000)
     rc_auto_p.add_argument("--pause-ms", type=int, default=500)
+    rc_auto_p.add_argument("--heading-kp", type=float, default=0.015,
+                           help="straight-lane heading-hold gain: B per degree of "
+                           "heading error vs the planned absolute heading")
+    rc_auto_p.add_argument("--heading-hold-max-b", type=float, default=0.25,
+                           help="cap on the heading-hold steering component")
+    rc_auto_p.add_argument("--drive-b-trim", type=float, default=0.0,
+                           help="constant B added on straights to cancel a known "
+                           "mechanical veer (negative counters a leftward pull)")
+    rc_auto_p.add_argument("--rc-loss-grace-ms", type=int, default=1500,
+                           help="RC dropout shorter than this pauses (then resumes) "
+                           "a running pattern instead of resetting it")
     rc_auto_p.add_argument("--mode-channel-index", type=int, default=4)
     rc_auto_p.add_argument(
         "--profile",

@@ -114,6 +114,21 @@
 #ifndef RC_AUTO_PATTERN_ARM_MANUAL_MS
 #define RC_AUTO_PATTERN_ARM_MANUAL_MS 1000
 #endif
+// Heading-hold on straight steps: B = kP * heading error (deg), clamped.
+#ifndef RC_AUTO_PATTERN_HEADING_KP
+#define RC_AUTO_PATTERN_HEADING_KP 0.015f
+#endif
+#ifndef RC_AUTO_PATTERN_HEADING_MAX_B
+#define RC_AUTO_PATTERN_HEADING_MAX_B 0.25f
+#endif
+#ifndef RC_AUTO_PATTERN_DRIVE_B_TRIM
+#define RC_AUTO_PATTERN_DRIVE_B_TRIM 0.0f
+#endif
+// Brief RC dropouts pause the run (motors stopped) instead of killing it;
+// only a loss longer than this grace disarms the pattern.
+#ifndef RC_AUTO_PATTERN_RC_LOSS_GRACE_MS
+#define RC_AUTO_PATTERN_RC_LOSS_GRACE_MS 1500
+#endif
 
 #ifndef PPM_INTERRUPT_EDGE_FALLING
 #define PPM_INTERRUPT_EDGE_FALLING 0
@@ -133,6 +148,15 @@
 
 #ifndef MOTOR_TRACE_ENABLE
 #define MOTOR_TRACE_ENABLE 1
+#endif
+
+// Idle the core between loop iterations (wake on any interrupt: SysTick 1 ms,
+// PPM edge, SERCOM RX, USB). A free-running busy spin burns full CPU power
+// continuously, which adds avoidable self-heating to a board that already
+// runs hot outdoors; with WFI the loop still runs at >=~1 kHz, far above the
+// 50 Hz PPM frame rate every control path is clocked from.
+#ifndef LOOP_IDLE_WFI
+#define LOOP_IDLE_WFI 1
 #endif
 
 #ifndef AUTO_MOTION_ARMED
@@ -2803,6 +2827,90 @@ void printStationRawFrameDump(const String &line, const char *reason) {
   Serial.println();
 }
 
+// ---------------------------------------------------------------------------
+// USB debug print stall guard
+//
+// Native-USB CDC writes can block the control loop whenever a host holds the
+// port open but stops draining it: a monitor window left open and suspended,
+// scroll-locked, or a reader killed without releasing the port. One ~3 KB
+// status line then stalls for up to seconds, which the driver feels as laggy
+// manual control WHILE the cable is plugged in. The mirror failure (printing
+// with no host at all) stalled the loop when the cable was pulled. The guard
+// covers both:
+//   - it caches the (bool)Serial host gate, because the SAMD core's operator
+//     bool can cost ~10 ms per evaluation and must not run every loop tick,
+//   - it times every gated print block and mutes ALL debug printing for a
+//     cooldown when one print runs over budget,
+//   - while muted it retries with a one-packet probe line instead of a full
+//     status line, so a still-stalled host costs bounded tens of ms per
+//     cooldown instead of seconds per status period.
+// Motor control never waits on printing: when in doubt the guard drops output.
+constexpr uint32_t USB_PRINT_GATE_REFRESH_MS = 1000;
+constexpr uint32_t USB_PRINT_STALL_BUDGET_MS = 50;
+constexpr uint32_t USB_PRINT_PROBE_BUDGET_MS = 10;
+constexpr uint32_t USB_PRINT_MUTE_MS = 5000;
+
+// Control-loop latency telemetry: the worst loop iteration since the last
+// status print, in microseconds. If manual driving feels laggy while
+// loop_dt_max_ms stays small, the cause is OUTSIDE this firmware (battery
+// sag, hot motors, transmitter); if it spikes, something is blocking loop().
+uint32_t loopDtPrevUs = 0;
+uint32_t loopDtMaxUs = 0;
+
+void loopDtSample() {
+  uint32_t nowUs = micros();
+  if (loopDtPrevUs != 0) {
+    uint32_t dt = nowUs - loopDtPrevUs;
+    if (dt > loopDtMaxUs) {
+      loopDtMaxUs = dt;
+    }
+  }
+  loopDtPrevUs = nowUs;
+}
+bool usbPrintGateOpen = false;
+bool usbPrintGateChecked = false;
+bool usbPrintMuted = false;
+uint32_t usbPrintGateCheckedMs = 0;
+uint32_t usbPrintMutedAtMs = 0;
+uint32_t usbPrintStallCount = 0;
+
+void usbDebugPrintFinished(uint32_t startedMs) {
+  uint32_t finishedMs = millis();
+  if (finishedMs - startedMs > USB_PRINT_STALL_BUDGET_MS) {
+    usbPrintMuted = true;
+    usbPrintMutedAtMs = finishedMs;
+    usbPrintStallCount++;
+  }
+}
+
+bool usbDebugPrintAllowed(uint32_t now) {
+  if (!usbPrintGateChecked || now - usbPrintGateCheckedMs >= USB_PRINT_GATE_REFRESH_MS) {
+    usbPrintGateChecked = true;
+    usbPrintGateCheckedMs = now;
+    usbPrintGateOpen = (bool)Serial;
+  }
+  if (!usbPrintGateOpen) {
+    return false;
+  }
+  if (usbPrintMuted) {
+    if (now - usbPrintMutedAtMs < USB_PRINT_MUTE_MS) {
+      return false;
+    }
+    // Probe with a single short line: a draining host completes it in well
+    // under a millisecond; a still-stalled host costs one bounded packet
+    // timeout and the mute window re-arms.
+    uint32_t probeStartMs = millis();
+    Serial.println(F("USBDBG_RESUME_PROBE"));
+    if (millis() - probeStartMs > USB_PRINT_PROBE_BUDGET_MS) {
+      usbPrintMutedAtMs = millis();
+      usbPrintStallCount++;
+      return false;
+    }
+    usbPrintMuted = false;
+  }
+  return true;
+}
+
 void debugPrintStatus() {
   if (!ENABLE_USB_DEBUG) {
     return;
@@ -2813,6 +2921,9 @@ void debugPrintStatus() {
     return;
   }
   lastUsbDebugMs = now;
+  if (!usbDebugPrintAllowed(now)) {
+    return;
+  }
 
   uint16_t steeringUs = 0;
   uint16_t throttleUs = 0;
@@ -3490,7 +3601,13 @@ void debugPrintStatus() {
   Serial.print(groundCrawlUnclampedRightCmd, 3);
 #endif
   printImuDiagFields();
+  Serial.print(F(" loop_dt_max_ms="));
+  Serial.print(loopDtMaxUs / 1000.0, 1);
+  Serial.print(F(" usb_print_stall_count="));
+  Serial.print(usbPrintStallCount);
+  loopDtMaxUs = 0;
   Serial.println();
+  usbDebugPrintFinished(now);
 }
 
 void sendStatus(uint32_t refSeq) {
@@ -4804,6 +4921,9 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
     return;
   }
   lastUsbDebugMs = now;
+  if (!usbDebugPrintAllowed(now)) {
+    return;
+  }
 
   Serial.print(F("USBDBG "));
   Serial.print(FIRMWARE_ID);
@@ -5157,6 +5277,7 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
   Serial.print(F(" imu_enabled=false"));
 #endif
   Serial.println();
+  usbDebugPrintFinished(now);
 }
 #endif  // PATH_FOLLOWING_DRYRUN
 
@@ -5175,7 +5296,8 @@ struct RcAutoPatternStep {
   float a;
   float b;
   uint32_t ms;
-  float targetDeg;
+  float targetDeg;      // signed turn delta (display/B direction hint)
+  float bodyTargetDeg;  // absolute body heading vs the run-start yaw
 };
 
 #define RC_AUTO_PATTERN_MAX_STEPS 64
@@ -5195,21 +5317,27 @@ uint32_t rcAutoPatternStepStartMs = 0;
 uint32_t rcAutoPatternManualSinceMs = 0;
 uint32_t rcAutoPatternLastPrintMs = 0;
 bool rcAutoPatternArmed = false;
-double rcAutoPatternTurnStartYaw = 0.0;
+// Every AUTO start rebuilds the pattern and re-anchors this reference, so a
+// re-armed run ALWAYS restarts from step 0 in the body frame of that moment.
+// All drive and turn targets are absolute headings in this frame
+// (runStartYaw + step.bodyTargetDeg), so per-step errors never accumulate.
+double rcAutoPatternRunStartYaw = 0.0;
+uint32_t rcAutoPatternRcLostSinceMs = 0;
 // Stall escalation: when a pivot makes no measurable progress (stiction,
 // battery sag, grass), the applied B grows in steps until the body rotates.
 float rcAutoPatternTurnScale = 1.0f;
 uint32_t rcAutoPatternTurnCheckMs = 0;
 double rcAutoPatternTurnCheckYaw = 0.0;
+int8_t rcAutoPatternTurnDir = 0;  // -1 right, +1 left, 0 not yet chosen
 
 void rcAutoPatternResetStepState(uint32_t now) {
-  rcAutoPatternTurnStartYaw = imuRelativeYawDeg;
   rcAutoPatternTurnScale = 1.0f;
   rcAutoPatternTurnCheckMs = now;
   rcAutoPatternTurnCheckYaw = imuRelativeYawDeg;
+  rcAutoPatternTurnDir = 0;
 }
 
-int rcAutoPatternPushDrive(int index, float a, uint32_t ms) {
+int rcAutoPatternPushDrive(int index, float a, uint32_t ms, float bodyTargetDeg) {
   if (index >= RC_AUTO_PATTERN_MAX_STEPS) {
     return index;
   }
@@ -5218,10 +5346,11 @@ int rcAutoPatternPushDrive(int index, float a, uint32_t ms) {
   rcAutoPatternSteps[index].b = 0.0f;
   rcAutoPatternSteps[index].ms = ms;
   rcAutoPatternSteps[index].targetDeg = 0.0f;
+  rcAutoPatternSteps[index].bodyTargetDeg = bodyTargetDeg;
   return index + 1;
 }
 
-int rcAutoPatternPushTurn(int index, float targetDeg) {
+int rcAutoPatternPushTurn(int index, float targetDeg, float bodyTargetDeg) {
   if (index >= RC_AUTO_PATTERN_MAX_STEPS) {
     return index;
   }
@@ -5231,6 +5360,7 @@ int rcAutoPatternPushTurn(int index, float targetDeg) {
       targetDeg >= 0.0f ? (float)(RC_AUTO_PATTERN_TURN_B_LEFT) : (float)(RC_AUTO_PATTERN_TURN_B_RIGHT);
   rcAutoPatternSteps[index].ms = (uint32_t)(RC_AUTO_PATTERN_TURN_TIMEOUT_MS);
   rcAutoPatternSteps[index].targetDeg = targetDeg;
+  rcAutoPatternSteps[index].bodyTargetDeg = bodyTargetDeg;
   return index + 1;
 }
 
@@ -5246,39 +5376,48 @@ void rcAutoPatternBuildSteps() {
     lanes = 12;
   }
   float target = (float)(RC_AUTO_PATTERN_TURN_TARGET_DEG);
+  // Absolute body-heading chain: each step's target heading is fixed relative
+  // to the run-start yaw, so corner residue and lane veer never accumulate
+  // (every turn and every heading-hold aims at the PLANNED frame).
+  float body = 0.0f;
   int n = 0;
   for (int lane = 0; lane < lanes; lane++) {
     bool forwardLane = (lane % 2) == 0;
     n = rcAutoPatternPushDrive(
         n,
         forwardLane ? (float)(RC_AUTO_PATTERN_FORWARD_A) : (float)(RC_AUTO_PATTERN_REVERSE_A),
-        (uint32_t)(RC_AUTO_PATTERN_LANE_MS));
+        (uint32_t)(RC_AUTO_PATTERN_LANE_MS), body);
     if (lane == lanes - 1) {
       break;
     }
     if (forwardLane) {
-      n = rcAutoPatternPushTurn(n, target);
+      body += target;
+      n = rcAutoPatternPushTurn(n, target, body);
       n = rcAutoPatternPushDrive(n, (float)(RC_AUTO_PATTERN_FORWARD_A),
-                                 (uint32_t)(RC_AUTO_PATTERN_STEP_MS));
-      n = rcAutoPatternPushTurn(n, -target);
+                                 (uint32_t)(RC_AUTO_PATTERN_STEP_MS), body);
+      body -= target;
+      n = rcAutoPatternPushTurn(n, -target, body);
     } else {
-      n = rcAutoPatternPushTurn(n, -target);
+      body -= target;
+      n = rcAutoPatternPushTurn(n, -target, body);
       n = rcAutoPatternPushDrive(n, (float)(RC_AUTO_PATTERN_REVERSE_A),
-                                 (uint32_t)(RC_AUTO_PATTERN_STEP_MS));
-      n = rcAutoPatternPushTurn(n, target);
+                                 (uint32_t)(RC_AUTO_PATTERN_STEP_MS), body);
+      body += target;
+      n = rcAutoPatternPushTurn(n, target, body);
     }
   }
   rcAutoPatternStepCount = n;
 }
 
 void rcAutoPatternStatusPrint(uint32_t now, const char *stateName) {
-  if (!Serial) {
-    return;  // no USB host draining CDC: printing would stall the loop
-  }
   if (now - rcAutoPatternLastPrintMs < 500) {
     return;
   }
   rcAutoPatternLastPrintMs = now;
+  if (!usbDebugPrintAllowed(now)) {
+    return;
+  }
+  uint32_t printStartMs = millis();
   Serial.print(F("RC_AUTO_PATTERN state="));
   Serial.print(stateName);
   Serial.print(F(" step="));
@@ -5288,21 +5427,30 @@ void rcAutoPatternStatusPrint(uint32_t now, const char *stateName) {
   Serial.print(F(" armed="));
   Serial.print(rcAutoPatternArmed ? F("true") : F("false"));
   Serial.print(F(" imu_yaw_deg="));
-  Serial.println(imuRelativeYawDeg, 1);
+  Serial.print(imuRelativeYawDeg, 1);
+  if (rcAutoPatternState == RC_AUTO_PATTERN_RUNNING &&
+      rcAutoPatternStepIndex < rcAutoPatternStepCount) {
+    RcAutoPatternStep &cur = rcAutoPatternSteps[rcAutoPatternStepIndex];
+    Serial.print(F(" body_target_deg="));
+    Serial.print(rcAutoPatternRunStartYaw + (double)cur.bodyTargetDeg, 1);
+    Serial.print(F(" heading_err_deg="));
+    Serial.print(
+        imuWrap180(rcAutoPatternRunStartYaw + (double)cur.bodyTargetDeg - imuRelativeYawDeg), 1);
+  }
+  Serial.println();
+  usbDebugPrintFinished(printStartMs);
 }
 
-// Called every loop tick while CH5 is NOT in AUTO (manual drive or failsafe):
-// stops a running pattern once and tracks the stable-MANUAL arming window.
-void rcAutoPatternNoteNotAuto(uint32_t now, bool rcValidNow) {
+// Called every loop tick while CH5 is in MANUAL with a valid RC link: stops a
+// running pattern once and tracks the stable-MANUAL arming window. A
+// deliberate MANUAL flip always resets the run, so the next AUTO flip
+// rebuilds the pattern and restarts it from step 0 at the current pose.
+void rcAutoPatternNoteManual(uint32_t now) {
+  rcAutoPatternRcLostSinceMs = 0;
   if (rcAutoPatternState == RC_AUTO_PATTERN_RUNNING) {
     motorStopWithSource("RC_AUTO_PATTERN");
   }
   rcAutoPatternState = RC_AUTO_PATTERN_IDLE;
-  if (!rcValidNow) {
-    rcAutoPatternManualSinceMs = 0;
-    rcAutoPatternArmed = false;
-    return;
-  }
   if (rcAutoPatternManualSinceMs == 0) {
     rcAutoPatternManualSinceMs = now;
   }
@@ -5311,8 +5459,39 @@ void rcAutoPatternNoteNotAuto(uint32_t now, bool rcValidNow) {
   }
 }
 
+// Called every loop tick while the RC link is invalid (failsafe already
+// stopped the motors). A SHORT dropout -- radio glitch, not a user action --
+// must not kill the run: within the grace window a RUNNING pattern stays
+// paused and resumes mid-step when the link returns with CH5 still AUTO.
+// Beyond the grace window the run resets and disarms, so recovery requires a
+// fresh MANUAL(hold) -> AUTO sequence which restarts from step 0.
+void rcAutoPatternNoteRcLost(uint32_t now) {
+  rcAutoPatternManualSinceMs = 0;  // link loss never counts toward arming
+  if (rcAutoPatternRcLostSinceMs == 0) {
+    rcAutoPatternRcLostSinceMs = now;
+  }
+  if (rcAutoPatternState == RC_AUTO_PATTERN_RUNNING) {
+    motorStopWithSource("RC_AUTO_PATTERN");
+  }
+  if (now - rcAutoPatternRcLostSinceMs > (uint32_t)(RC_AUTO_PATTERN_RC_LOSS_GRACE_MS)) {
+    rcAutoPatternState = RC_AUTO_PATTERN_IDLE;
+    rcAutoPatternArmed = false;
+  }
+}
+
 // Called every loop tick while CH5 is AUTO with valid RC.
 void rcAutoPatternTick(uint32_t now) {
+  if (rcAutoPatternRcLostSinceMs != 0) {
+    // The RC link came back inside the grace window with CH5 still AUTO:
+    // resume the interrupted step where it paused (timers shift by the
+    // outage length; the absolute heading chain is unaffected).
+    if (rcAutoPatternState == RC_AUTO_PATTERN_RUNNING) {
+      uint32_t pausedMs = now - rcAutoPatternRcLostSinceMs;
+      rcAutoPatternStepStartMs += pausedMs;
+      rcAutoPatternTurnCheckMs += pausedMs;
+    }
+    rcAutoPatternRcLostSinceMs = 0;
+  }
   if (rcAutoPatternState == RC_AUTO_PATTERN_DONE) {
     currentMode = AUTO_READY;
     currentControlSource = CONTROL_SOURCE_STOP;
@@ -5333,9 +5512,22 @@ void rcAutoPatternTick(uint32_t now) {
     rcAutoPatternPhase = 0;
     rcAutoPatternStepStartMs = now;
     rcAutoPatternResetStepState(now);
+    // The pattern frame is re-anchored HERE: every MANUAL -> AUTO flip
+    // recomputes the steps and restarts from step 0 at the current body
+    // pose. A previous partial run leaves nothing behind.
+    rcAutoPatternRunStartYaw = imuRelativeYawDeg;
+    rcAutoPatternRcLostSinceMs = 0;
     rcAutoPatternArmed = false;  // one run per MANUAL -> AUTO transition
     rcAutoPatternManualSinceMs = 0;
     rcAutoPatternState = RC_AUTO_PATTERN_RUNNING;
+    if (usbDebugPrintAllowed(now)) {
+      uint32_t printStartMs = millis();
+      Serial.print(F("RC_AUTO_PATTERN RUN_START steps="));
+      Serial.print(rcAutoPatternStepCount);
+      Serial.print(F(" run_start_yaw_deg="));
+      Serial.println(rcAutoPatternRunStartYaw, 1);
+      usbDebugPrintFinished(printStartMs);
+    }
   }
   currentMode = AUTO_RUNNING;
   currentControlSource = CONTROL_SOURCE_AUTO;
@@ -5357,7 +5549,21 @@ void rcAutoPatternTick(uint32_t now) {
     return;
   }
   if (step.type == 0) {
-    applyPhysicalABManualEquivalentCommandWithSource(step.a, 0.0f, "RC_AUTO_PATTERN");
+    // Heading-hold straight: the planned body heading for this step is
+    // absolute (run-start yaw + bodyTargetDeg), and B counters any veer so
+    // the lane stays straight instead of drifting left/right open-loop.
+    double headingErrDeg = imuWrap180(rcAutoPatternRunStartYaw +
+                                      (double)step.bodyTargetDeg - imuRelativeYawDeg);
+    float holdB = (float)(headingErrDeg * (double)(RC_AUTO_PATTERN_HEADING_KP));
+    float maxHoldB = (float)(RC_AUTO_PATTERN_HEADING_MAX_B);
+    if (holdB > maxHoldB) {
+      holdB = maxHoldB;
+    }
+    if (holdB < -maxHoldB) {
+      holdB = -maxHoldB;
+    }
+    holdB += (float)(RC_AUTO_PATTERN_DRIVE_B_TRIM);
+    applyPhysicalABManualEquivalentCommandWithSource(step.a, holdB, "RC_AUTO_PATTERN");
     if (now - rcAutoPatternStepStartMs >= step.ms) {
       motorStopWithSource("RC_AUTO_PATTERN");
       rcAutoPatternPhase = 1;
@@ -5366,17 +5572,30 @@ void rcAutoPatternTick(uint32_t now) {
     rcAutoPatternStatusPrint(now, "DRIVE");
     return;
   }
-  double turned = imuWrap180(imuRelativeYawDeg - rcAutoPatternTurnStartYaw);
-  double remaining = imuWrap180((double)step.targetDeg - turned);
+  // Absolute-target pivot: aim the BODY at run-start yaw + planned offset.
+  // The command direction follows the live remaining sign, so an overshoot
+  // (or an external shove) turns back toward the target instead of latching
+  // an early stop with a permanent heading error.
+  double remaining = imuWrap180(rcAutoPatternRunStartYaw +
+                                (double)step.bodyTargetDeg - imuRelativeYawDeg);
   double remainingAbs = remaining < 0.0 ? -remaining : remaining;
   bool reached = remainingAbs <= (double)(RC_AUTO_PATTERN_TURN_TOL_DEG);
-  bool overshot = remaining * (double)step.targetDeg < 0.0;
   bool timedOut = now - rcAutoPatternStepStartMs >= step.ms;
-  if (reached || overshot || timedOut) {
+  if (reached || timedOut) {
     motorStopWithSource("RC_AUTO_PATTERN");
     rcAutoPatternPhase = 1;
     rcAutoPatternStepStartMs = now;
   } else {
+    int8_t dir = remaining >= 0.0 ? 1 : -1;
+    if (dir != rcAutoPatternTurnDir) {
+      // Direction change (or first tick): restart stall tracking at base
+      // authority so an escalated command does not oscillate around the
+      // target.
+      rcAutoPatternTurnDir = dir;
+      rcAutoPatternTurnScale = 1.0f;
+      rcAutoPatternTurnCheckMs = now;
+      rcAutoPatternTurnCheckYaw = imuRelativeYawDeg;
+    }
     // Escalate B when the body is not rotating (stiction / battery sag):
     // every 1.5 s without ~5 deg of progress the command grows 30%, up to
     // a hard cap, then resets per step.
@@ -5391,7 +5610,9 @@ void rcAutoPatternTick(uint32_t now) {
       rcAutoPatternTurnCheckMs = now;
       rcAutoPatternTurnCheckYaw = imuRelativeYawDeg;
     }
-    float scaledB = step.b * rcAutoPatternTurnScale;
+    float baseB = dir > 0 ? (float)(RC_AUTO_PATTERN_TURN_B_LEFT)
+                          : (float)(RC_AUTO_PATTERN_TURN_B_RIGHT);
+    float scaledB = baseB * rcAutoPatternTurnScale;
     if (scaledB > 0.6f) {
       scaledB = 0.6f;
     }
@@ -5571,6 +5792,13 @@ void setup() {
 }
 
 void loop() {
+#if LOOP_IDLE_WFI
+  // Sleep until the next interrupt instead of busy-spinning. Maximum added
+  // command latency is one SysTick (1 ms); the win is much lower continuous
+  // CPU power draw, i.e. less self-heating during long field sessions.
+  __WFI();
+#endif
+  loopDtSample();
 #if ENABLE_GPS_TELEMETRY && !MOTOR_PULSE_TEST_MODE && !STAGE15_GUARDED_CRAWL_TEST
   while (GPS_SERIAL.available() > 0) {
     processGpsChar(static_cast<char>(GPS_SERIAL.read()));
@@ -5646,14 +5874,16 @@ void loop() {
   clearStationManualCommand();
   if (!rcValid) {
 #if RC_AUTO_PATTERN
-    rcAutoPatternNoteNotAuto(now, false);
+    // Failsafe stop happens below either way; a SHORT link glitch keeps a
+    // running pattern paused (grace window) instead of killing the run.
+    rcAutoPatternNoteRcLost(now);
 #endif
     currentControlSource = CONTROL_SOURCE_STOP;
     currentMode = FAILSAFE;
     motorStop();
   } else if (rcManualActive) {
 #if RC_AUTO_PATTERN
-    rcAutoPatternNoteNotAuto(now, true);
+    rcAutoPatternNoteManual(now);
 #endif
     currentMode = MANUAL;
     currentControlSource = CONTROL_SOURCE_RC_MANUAL;
@@ -5669,16 +5899,10 @@ void loop() {
     motorStop();
 #endif
   }
-#if RC_AUTO_PATTERN
-  // Untethered builds print telemetry only while a USB host drains the CDC
-  // port; otherwise the ~3 KB status line stalls the control loop and manual
-  // driving feels laggy the moment the cable or monitor goes away.
-  if (Serial) {
-    debugPrintStatus();
-  }
-#else
+  // Printing is fully self-guarded inside debugPrintStatus (cached host gate
+  // + write-stall watchdog), so plugged, unplugged, and stalled-monitor hosts
+  // all keep manual control responsive.
   debugPrintStatus();
-#endif
   return;
 #endif
 

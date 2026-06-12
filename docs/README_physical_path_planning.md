@@ -221,17 +221,39 @@ requires a different firmware. For the combined untethered behavior use
 `auto-relative-run` keeps the brain on the station: every motor command goes
 over the USB link, so unplugging the cable stops everything by design.
 `rc-auto-pattern` instead uploads a standalone firmware (built on the proven
-rc-mix-ppm manual profile + IMU yaw) so the rover works with ONLY the RC
-transmitter after the cable is removed:
+full-telemetry-ppm manual profile + IMU yaw) so the rover works with ONLY the
+RC transmitter after the cable is removed:
 
 - CH5 MANUAL: RC stick driving (same arcade mapping as `manual-control`).
 - Hold MANUAL for >=1 s, then flip CH5 to AUTO: the rover runs ONE onboard
   ㄹ pattern -- timed lanes (forward / reverse), IMU-feedback ~90 deg pivots,
   and step-overs, mirroring the station planner's turn_step_turn corners.
 - Flip back to MANUAL at any moment: motors stop on the next loop tick and
-  stick control resumes. RC failsafe also stops and disarms.
+  stick control resumes.
 - Booting with the switch already in AUTO never moves (arming requires a
-  fresh MANUAL period). Each MANUAL->AUTO transition runs the pattern once.
+  fresh MANUAL period). Each MANUAL->AUTO transition rebuilds the pattern
+  and RESTARTS it from step 0, anchored at the rover's pose at that moment.
+  A partially-finished previous run is never resumed.
+- RC signal loss while running: motors stop instantly (failsafe), but a
+  dropout shorter than `--rc-loss-grace-ms` (default 1500) only PAUSES the
+  run -- when the link returns with CH5 still in AUTO the interrupted step
+  resumes. A longer outage resets and disarms; recovery then requires the
+  fresh MANUAL(>=1 s) -> AUTO sequence again, which restarts from step 0.
+
+Heading control (why lanes stay straight):
+
+- Every step carries an ABSOLUTE body heading target chained from the yaw
+  captured at AUTO start (`RUN_START` in the log). Lane veer and corner
+  residue therefore cannot accumulate across the pattern.
+- Straights run heading-hold: `B = clamp(heading_error_deg * --heading-kp,
+  +/- --heading-hold-max-b) + --drive-b-trim`, re-evaluated every loop tick,
+  for forward AND reverse lanes. A rover that used to bow a lane 60 deg to
+  the left now steers continuously back to the planned heading.
+- Pivots aim at the absolute target heading and pick their direction from
+  the live remaining angle each tick, so an overshoot (or a shove) turns
+  back instead of stopping early with a permanent error. Stall escalation
+  still grows B by 30% per 1.5 s without ~5 deg of progress (cap 0.6) and
+  resets to base authority whenever the turn direction flips.
 
 ```bash
 # 1.8 m lanes / 0.6 m step at the calibrated ~0.43 m/s forward speed.
@@ -240,6 +262,7 @@ bash scripts/run_physical_path_planner.sh rc-auto-pattern \
   --forward-a 0.30 --reverse-a -0.30 \
   --turn-b-left 0.24 --turn-b-right -0.12 \
   --turn-target-deg 90 --turn-tol-deg 8 \
+  --heading-kp 0.015 --heading-hold-max-b 0.25 \
   --duration-s 20 \
   --out-dir outputs/physical_path_planning/rc_auto_pattern
 ```
@@ -247,13 +270,20 @@ bash scripts/run_physical_path_planner.sh rc-auto-pattern \
 The upload also writes `rc_auto_pattern_preview.png` (the expected ㄹ
 geometry, estimated from the configured durations at the calibrated forward
 speed) into the out-dir, so the path is visible before going untethered.
-Telemetry prints only while a USB host is attached and reading; untethered
-the control loop runs print-free (this is what keeps manual driving
-responsive without the cable). Pivot turns escalate B by 30% every 1.5 s of
-no measurable rotation (stiction / battery sag), capped at 0.6. Position is
-dead-reckoned (timed lanes + IMU pivots); onboard GPS correction is
-deliberately not used because the receiver's 1-2 m wander rivals the lane
+Position is dead-reckoned (timed lanes + IMU pivots); onboard GPS correction
+is deliberately not used because the receiver's 1-2 m wander rivals the lane
 length.
+
+USB printing can never stall driving: all telemetry goes through a print
+guard that (a) checks for an attached host at most once a second, and
+(b) measures every print -- if one blocks longer than ~50 ms (a monitor
+window left open but suspended, a reader killed without closing the port),
+ALL debug printing mutes for 5 s and retries with a one-packet probe. So
+plugged, unplugged, and stalled-monitor states all keep manual control
+responsive. `loop_dt_max_ms` in the USBDBG line reports the worst control
+loop iteration since the previous line: if driving feels laggy while
+`loop_dt_max_ms` stays small (a few ms), the cause is OUTSIDE the firmware
+-- battery sag, hot ESC/motors, or the transmitter -- not the control loop.
 
 VERIFY BEFORE UNPLUGGING (in the `--duration-s` monitor output):
 
@@ -264,13 +294,24 @@ VERIFY BEFORE UNPLUGGING (in the `--duration-s` monitor output):
   `--profile` (`full-telemetry-ppm` is the default and matches the
   supervised firmware's field-proven decode; `old-working-ppm` and
   `rc-mix-ppm` are alternatives).
-- Flip to AUTO while still monitoring: `RC_AUTO_PATTERN state=...` lines
-  show WAIT_MANUAL_ARM / DRIVE / TURN / PAUSE / DONE progress.
+- Flip to AUTO while still monitoring: a `RC_AUTO_PATTERN RUN_START ...`
+  line appears, then `RC_AUTO_PATTERN state=...` lines show
+  WAIT_MANUAL_ARM / DRIVE / TURN / PAUSE / DONE progress plus
+  `body_target_deg` / `heading_err_deg` (the live heading-hold error).
 
 The pattern is dead-reckoned (timed lanes + IMU pivots, no GPS), so expect
-drift to grow over lanes; re-run `manual-control` or any supervised mode to
+some drift to remain; re-run `manual-control` or any supervised mode to
 return to the previous firmware behavior. Pattern geometry is baked at upload
 -- re-run the command with new values to change it.
+
+Overheating note: the firmware idles the CPU between loop iterations
+(`LOOP_IDLE_WFI`, on by default) instead of busy-spinning, which removes the
+avoidable share of board self-heating. The OpenRB-150 still carries the
+3.3 V/5 V rails for the GPS, HC-12, receiver, and IMU, so it WILL run warm in
+the sun; if controls get mushy after a long hot session and recover after
+powering off and resting, suspect battery sag or thermal protection in the
+ESC/motors first -- confirm with `loop_dt_max_ms` (small = firmware healthy),
+then swap in a charged battery and shade the electronics.
 
 ## Rectangle Geometry
 

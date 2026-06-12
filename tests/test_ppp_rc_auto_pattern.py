@@ -37,9 +37,39 @@ def test_rc_auto_pattern_flags_combine_manual_profile_imu_and_pattern() -> None:
     assert "-DRC_AUTO_PATTERN_LANE_MS=4200" in flags
     assert "-DRC_AUTO_PATTERN_STEP_MS=1400" in flags
     assert "-DRC_AUTO_PATTERN_TURN_B_RIGHT=-0.12f" in flags
+    # Heading-hold straights + RC-loss grace defaults are always baked in so
+    # lanes stay straight untethered and a radio glitch cannot kill a run.
+    assert "-DRC_AUTO_PATTERN_HEADING_KP=0.015f" in flags
+    assert "-DRC_AUTO_PATTERN_HEADING_MAX_B=0.25f" in flags
+    assert "-DRC_AUTO_PATTERN_DRIVE_B_TRIM=0.0f" in flags
+    assert "-DRC_AUTO_PATTERN_RC_LOSS_GRACE_MS=1500" in flags
     # Autonomy gates stay off: this is the RC-switch pattern, not path following.
     assert "-DPHYSICAL_PATH_FOLLOWING_ENABLE=0" in flags
     assert "-DAUTO_MOTION_ARMED=0" in flags
+
+
+def test_rc_auto_pattern_flags_accept_heading_hold_overrides() -> None:
+    flags = cli.rc_auto_pattern_firmware_flags(
+        lanes=4,
+        lane_ms=4200,
+        step_ms=1400,
+        forward_a=0.30,
+        reverse_a=-0.30,
+        turn_b_left=0.24,
+        turn_b_right=-0.12,
+        turn_target_deg=90.0,
+        turn_tol_deg=8.0,
+        turn_timeout_ms=15000,
+        pause_ms=500,
+        heading_kp=0.02,
+        heading_hold_max_b=0.3,
+        drive_b_trim=-0.05,
+        rc_loss_grace_ms=2000,
+    )
+    assert "-DRC_AUTO_PATTERN_HEADING_KP=0.02f" in flags
+    assert "-DRC_AUTO_PATTERN_HEADING_MAX_B=0.3f" in flags
+    assert "-DRC_AUTO_PATTERN_DRIVE_B_TRIM=-0.05f" in flags
+    assert "-DRC_AUTO_PATTERN_RC_LOSS_GRACE_MS=2000" in flags
 
 
 def test_rc_auto_pattern_print_cmd_writes_config_without_serial(tmp_path: Path) -> None:
@@ -57,6 +87,8 @@ def test_rc_auto_pattern_print_cmd_writes_config_without_serial(tmp_path: Path) 
     assert config["mode"] == "rc-auto-pattern"
     assert config["untethered"] is True
     assert config["lane_ms"] == 4200
+    assert config["heading_kp"] == 0.015
+    assert config["rc_loss_grace_ms"] == 1500
     assert config["ready_for_full_path_following"] is False
     # The operator can SEE the expected path before going untethered.
     assert config["estimated_lane_m"] > 0
