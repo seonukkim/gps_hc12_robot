@@ -5196,6 +5196,18 @@ uint32_t rcAutoPatternManualSinceMs = 0;
 uint32_t rcAutoPatternLastPrintMs = 0;
 bool rcAutoPatternArmed = false;
 double rcAutoPatternTurnStartYaw = 0.0;
+// Stall escalation: when a pivot makes no measurable progress (stiction,
+// battery sag, grass), the applied B grows in steps until the body rotates.
+float rcAutoPatternTurnScale = 1.0f;
+uint32_t rcAutoPatternTurnCheckMs = 0;
+double rcAutoPatternTurnCheckYaw = 0.0;
+
+void rcAutoPatternResetStepState(uint32_t now) {
+  rcAutoPatternTurnStartYaw = imuRelativeYawDeg;
+  rcAutoPatternTurnScale = 1.0f;
+  rcAutoPatternTurnCheckMs = now;
+  rcAutoPatternTurnCheckYaw = imuRelativeYawDeg;
+}
 
 int rcAutoPatternPushDrive(int index, float a, uint32_t ms) {
   if (index >= RC_AUTO_PATTERN_MAX_STEPS) {
@@ -5260,6 +5272,9 @@ void rcAutoPatternBuildSteps() {
 }
 
 void rcAutoPatternStatusPrint(uint32_t now, const char *stateName) {
+  if (!Serial) {
+    return;  // no USB host draining CDC: printing would stall the loop
+  }
   if (now - rcAutoPatternLastPrintMs < 500) {
     return;
   }
@@ -5317,7 +5332,7 @@ void rcAutoPatternTick(uint32_t now) {
     rcAutoPatternStepIndex = 0;
     rcAutoPatternPhase = 0;
     rcAutoPatternStepStartMs = now;
-    rcAutoPatternTurnStartYaw = imuRelativeYawDeg;
+    rcAutoPatternResetStepState(now);
     rcAutoPatternArmed = false;  // one run per MANUAL -> AUTO transition
     rcAutoPatternManualSinceMs = 0;
     rcAutoPatternState = RC_AUTO_PATTERN_RUNNING;
@@ -5336,7 +5351,7 @@ void rcAutoPatternTick(uint32_t now) {
       rcAutoPatternStepIndex++;
       rcAutoPatternPhase = 0;
       rcAutoPatternStepStartMs = now;
-      rcAutoPatternTurnStartYaw = imuRelativeYawDeg;
+      rcAutoPatternResetStepState(now);
     }
     rcAutoPatternStatusPrint(now, "PAUSE");
     return;
@@ -5362,7 +5377,28 @@ void rcAutoPatternTick(uint32_t now) {
     rcAutoPatternPhase = 1;
     rcAutoPatternStepStartMs = now;
   } else {
-    applyPhysicalABManualEquivalentCommandWithSource(0.0f, step.b, "RC_AUTO_PATTERN");
+    // Escalate B when the body is not rotating (stiction / battery sag):
+    // every 1.5 s without ~5 deg of progress the command grows 30%, up to
+    // a hard cap, then resets per step.
+    if (now - rcAutoPatternTurnCheckMs >= 1500) {
+      double progress = imuWrap180(imuRelativeYawDeg - rcAutoPatternTurnCheckYaw);
+      if (progress < 0.0) {
+        progress = -progress;
+      }
+      if (progress < 5.0 && rcAutoPatternTurnScale < 2.5f) {
+        rcAutoPatternTurnScale *= 1.3f;
+      }
+      rcAutoPatternTurnCheckMs = now;
+      rcAutoPatternTurnCheckYaw = imuRelativeYawDeg;
+    }
+    float scaledB = step.b * rcAutoPatternTurnScale;
+    if (scaledB > 0.6f) {
+      scaledB = 0.6f;
+    }
+    if (scaledB < -0.6f) {
+      scaledB = -0.6f;
+    }
+    applyPhysicalABManualEquivalentCommandWithSource(0.0f, scaledB, "RC_AUTO_PATTERN");
   }
   rcAutoPatternStatusPrint(now, "TURN");
 }
@@ -5633,7 +5669,16 @@ void loop() {
     motorStop();
 #endif
   }
+#if RC_AUTO_PATTERN
+  // Untethered builds print telemetry only while a USB host drains the CDC
+  // port; otherwise the ~3 KB status line stalls the control loop and manual
+  // driving feels laggy the moment the cable or monitor goes away.
+  if (Serial) {
+    debugPrintStatus();
+  }
+#else
   debugPrintStatus();
+#endif
   return;
 #endif
 

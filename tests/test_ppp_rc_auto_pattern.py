@@ -58,5 +58,8 @@ def test_rc_auto_pattern_print_cmd_writes_config_without_serial(tmp_path: Path) 
     assert config["untethered"] is True
     assert config["lane_ms"] == 4200
     assert config["ready_for_full_path_following"] is False
+    # The operator can SEE the expected path before going untethered.
+    assert config["estimated_lane_m"] > 0
+    assert (tmp_path / "rc_auto_pattern_preview.png").exists()
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["reason"] == "COMMAND_PRINTED"

@@ -244,6 +244,17 @@ bash scripts/run_physical_path_planner.sh rc-auto-pattern \
   --out-dir outputs/physical_path_planning/rc_auto_pattern
 ```
 
+The upload also writes `rc_auto_pattern_preview.png` (the expected ㄹ
+geometry, estimated from the configured durations at the calibrated forward
+speed) into the out-dir, so the path is visible before going untethered.
+Telemetry prints only while a USB host is attached and reading; untethered
+the control loop runs print-free (this is what keeps manual driving
+responsive without the cable). Pivot turns escalate B by 30% every 1.5 s of
+no measurable rotation (stiction / battery sag), capped at 0.6. Position is
+dead-reckoned (timed lanes + IMU pivots); onboard GPS correction is
+deliberately not used because the receiver's 1-2 m wander rivals the lane
+length.
+
 VERIFY BEFORE UNPLUGGING (in the `--duration-s` monitor output):
 
 - `ppm_frame_count` must be increasing and `mode=MANUAL` shown with the

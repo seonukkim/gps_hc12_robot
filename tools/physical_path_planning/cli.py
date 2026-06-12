@@ -2486,7 +2486,45 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
         "arming_rule": "fresh MANUAL >=1s then AUTO; one run per transition; MANUAL stops instantly",
         "ready_for_full_path_following": False,
     }
+    # Render the expected pattern geometry so the operator can SEE the path
+    # before going untethered: lane/step distances are estimated from the
+    # configured durations at the calibrated forward speed (~0.43 m/s at
+    # A=0.30, scaled linearly with the commanded A).
+    speed_mps = 0.43 * (abs(float(args.forward_a)) / 0.30) if args.forward_a else 0.43
+    estimated_lane_m = round(args.lane_ms / 1000.0 * speed_mps, 2)
+    estimated_step_m = round(args.step_ms / 1000.0 * speed_mps, 2)
+    config["estimated_speed_mps"] = round(speed_mps, 3)
+    config["estimated_lane_m"] = estimated_lane_m
+    config["estimated_step_m"] = estimated_step_m
+    config["estimated_field_width_m"] = round(max(0, args.lanes - 1) * estimated_step_m, 2)
+    preview_path = None
+    if args.lanes >= 2 and estimated_lane_m > 0 and estimated_step_m > 0:
+        try:
+            pattern_plan = preview.build_preview(
+                start_lat=0.0,
+                start_lon=0.0,
+                goal_mode="relative_enu",
+                goal_east_m=estimated_lane_m,
+                goal_north_m=(args.lanes - 1) * estimated_step_m,
+                workspace_width_m=(args.lanes - 1) * estimated_step_m,
+                step_spacing_m=estimated_step_m,
+            )
+            preview_path = preview.write_preview_png(
+                out_dir / "rc_auto_pattern_preview.png",
+                pattern_plan["segments"],
+                0.0,
+                0.0,
+                float(pattern_plan["goal_lat"]),
+                float(pattern_plan["goal_lon"]),
+                workspace=pattern_plan.get("workspace"),
+                path_shape="coverage_lawnmower",
+            )
+        except (ValueError, RuntimeError):
+            preview_path = None
+    config["preview_image"] = str(preview_path) if preview_path else "NONE"
     _write_json(out_dir / "rc_auto_pattern_config.json", config)
+    if preview_path:
+        print(f"pattern preview: {preview_path}")
     if args.print_cmd:
         print(" ".join(shlex.quote(part) for part in compile_cmd))
         print(" ".join(shlex.quote(part) for part in upload_cmd))
