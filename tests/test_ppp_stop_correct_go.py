@@ -334,20 +334,19 @@ def test_connector_turn_planning_helpers() -> None:
     assert controller.connector_turn_angle_deg({"turn_angle_deg": "-90.0"}) == -90.0
 
 
-def test_connector_small_pulse_repeats_until_imu_reports_90() -> None:
-    # turn_left_90 physically turns ~30 deg per pulse: the corner must pulse
-    # repeatedly and stop on measured yaw, not assume one pulse completed it.
+def test_connector_live_turn_stops_on_measured_imu_target() -> None:
+    # A corner is ONE continuous IMU-feedback pivot: bounded live SET commands
+    # at the calibrated B until the measured yaw delta reaches the requested
+    # angle. No long guarded pulse is sent, so the firmware's guarded-pulse
+    # max (COMMAND_EXCEEDS_MAX_MS) can never reject a 2200 ms calibration.
     handle = FakeSerial(
         [
-            _hb(35.0, 129.0, imu_yaw_deg=0.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=30.0),
-            _hb(35.0, 129.0, imu_yaw_deg=30.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=60.0),
-            _hb(35.0, 129.0, imu_yaw_deg=60.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=88.0),
+            _hb(35.0, 129.0, imu_yaw_deg=0.0),  # connector preflight
+            _hb(None, None, imu_yaw_deg=30.0, with_gps=False),  # turn feedback
+            _hb(None, None, imu_yaw_deg=60.0, with_gps=False),
+            _hb(None, None, imu_yaw_deg=88.0, with_gps=False),  # within tolerance
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            _hb(35.0, 129.0, imu_yaw_deg=88.0),  # stabilized read-back
         ]
     )
     rows, _raw, abort_reason = controller.run_stop_correct_go(
@@ -367,15 +366,17 @@ def test_connector_small_pulse_repeats_until_imu_reports_90() -> None:
 
     assert abort_reason == "NONE"
     connector_rows = [r for r in rows if r.get("phase") == "connector"]
-    assert len(connector_rows) == 3
-    assert all(r["turn_pulse_budget"] == 5 for r in connector_rows)  # ceil(90/30)+2
-    assert connector_rows[-1]["connector_turn_completed"] is True
-    assert connector_rows[-1]["turn_measured_by_imu"] is True
-    assert float(connector_rows[-1]["applied_turn_delta_deg"]) == 88.0
-    cmd_writes = [w for w in handle.writes if w.startswith("USB_PULSE_TEST_CMD")]
-    assert len(cmd_writes) == 3
-    # Pivot pulses: calibrated B only, A stays zero.
-    assert all("a=0.000" in w and "b=0.240" in w for w in cmd_writes)
+    assert len(connector_rows) == 1
+    row = connector_rows[0]
+    assert row["turn_mode"] == "live_imu"
+    assert row["connector_turn_completed"] is True
+    assert row["turn_measured_by_imu"] is True
+    assert float(row["applied_turn_delta_deg"]) == 88.0
+    set_writes = [w for w in handle.writes if w.startswith("USB_DRIVE_LIVE_SET")]
+    assert set_writes and all("a=0.000" in w and "b=0.240" in w for w in set_writes)
+    assert any(w.startswith("USB_DRIVE_LIVE_STOP") for w in handle.writes)
+    # The connector never issues a guarded pulse command.
+    assert not any(w.startswith("USB_PULSE_TEST_CMD") for w in handle.writes)
 
 
 def test_connector_without_imu_uses_open_loop_pulse_count_from_target_angle() -> None:
@@ -407,15 +408,15 @@ def test_connector_without_imu_uses_open_loop_pulse_count_from_target_angle() ->
     assert connector_rows[-1]["turn_measured_by_imu"] is False
 
 
-def test_connector_rotation_loop_guard_stops_at_pulse_budget() -> None:
-    # IMU reports no rotation at all (stalled motors): the turn must stop at the
-    # budget instead of pulsing forever, and be reported as incomplete.
-    responses: list[bytes] = []
-    for _ in range(5):  # budget = min(6, ceil(90/30)+2) = 5
-        responses.append(_hb(35.0, 129.0, imu_yaw_deg=0.0))
-        responses.extend(_PULSE_OK)
-        responses.append(_hb(35.0, 129.0, imu_yaw_deg=0.0))
-    handle = FakeSerial(responses)
+def test_connector_live_turn_times_out_on_stalled_motors() -> None:
+    # IMU reports no rotation (stalled motors): the live turn must stop at its
+    # duration cap instead of spinning forever, and be reported as incomplete.
+    handle = FakeSerial(
+        [
+            _hb(35.0, 129.0, imu_yaw_deg=0.0),  # connector preflight
+            _hb(None, None, imu_yaw_deg=0.0, with_gps=False),  # no rotation
+        ]
+    )
     rows, _raw, abort_reason = controller.run_stop_correct_go(
         handle,
         segments=[_left_connector()],
@@ -427,14 +428,18 @@ def test_connector_rotation_loop_guard_stops_at_pulse_budget() -> None:
         goal_lon=129.0,
         settle_after_move_ms=0,
         telemetry_stabilize_ms=0,
-        event_timeout_s=1.0,
-        heartbeat_timeout_s=1.0,
+        event_timeout_s=0.2,
+        heartbeat_timeout_s=0.2,
+        max_connector_turn_ms=200,
     )
 
     assert abort_reason == "NONE"
     connector_rows = [r for r in rows if r.get("phase") == "connector"]
-    assert len(connector_rows) == 5
-    assert connector_rows[-1]["connector_turn_completed"] is False
+    assert len(connector_rows) == 1
+    row = connector_rows[0]
+    assert row["turn_timed_out"] is True
+    assert row["connector_turn_completed"] is False
+    assert float(row["applied_turn_delta_deg"]) == 0.0
     summary = controller.build_stop_correct_go_summary(
         connector_rows,
         start_lat=35.0,
@@ -448,7 +453,6 @@ def test_connector_rotation_loop_guard_stops_at_pulse_budget() -> None:
         abort_reason=abort_reason,
     )
     assert summary["connector_turn_count"] == 1
-    assert summary["connector_pulse_count"] == 5
     assert summary["connector_incomplete_count"] == 1
 
 
@@ -493,10 +497,13 @@ def _under_turned_corner_responses(*, with_correction_rows: bool) -> list[bytes]
         _hb(35.0, 129.0, imu_yaw_deg=0.0),
         *_PULSE_OK,
         _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),
-        # connector (budget forced to 1): under-turns to 40 deg.
-        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),
-        *_PULSE_OK,
-        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),
+        # connector live turn: reaches only 40 of 90 deg, then a REJECT ends
+        # the turn deterministically (recorded, not mission-aborting).
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),  # connector preflight
+        _hb(None, None, imu_yaw_deg=40.0, with_gps=False),  # partial rotation
+        b"USB_PULSE_TEST event=REJECT\n",
+        b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),  # stabilized read-back
         # lane 2, chunk 1: still pointing 40 deg while the lane needs 90.
         _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),
         *_PULSE_OK,
@@ -536,7 +543,6 @@ def _run_under_turned_corner(handle: FakeSerial, heading_reference: str):
         telemetry_stabilize_ms=0,
         event_timeout_s=1.0,
         heartbeat_timeout_s=1.0,
-        max_connector_pulses_per_turn=1,
         heading_reference=heading_reference,
     )
 
@@ -566,7 +572,9 @@ def test_per_lane_heading_reference_absorbs_connector_under_turn() -> None:
     assert lane2_rows
     assert all(r["phase"] == "move" for r in lane2_rows)
     assert all(float(r["heading_error_deg"]) == 0.0 for r in lane2_rows)
-    assert not any(w.startswith("USB_DRIVE_LIVE_SET") for w in handle.writes)
+    # No lane heading-correction turn ever ran (the connector's live pivot is
+    # the only live-drive user in this script).
+    assert all(int(r.get("correction_duration_ms") or 0) == 0 for r in lane2_rows)
 
 
 def test_manual_switch_during_pulse_aborts_immediately() -> None:
@@ -702,19 +710,17 @@ def test_mission_heading_holds_body_heading_on_backward_lane() -> None:
     assert all("a=-0.080" in w for w in move_cmds)  # reverse-driven chunks
 
 
-def test_connector_overshoot_stops_same_direction_pulsing() -> None:
-    # High-variance motors can blow past the corner in one pulse (field data:
-    # 1.6-43 deg from the same command). Once the measured remaining error
-    # flips sign, pulsing the same direction again must stop; the next lane's
-    # heading correction owns the cleanup.
+def test_connector_live_turn_stops_on_overshoot() -> None:
+    # High-variance motors can blow past the corner between feedback samples
+    # (field data: ~80 deg/s right turns). Once the measured remaining error
+    # flips sign the live turn must stop turning the same direction; the next
+    # lane's heading correction owns the cleanup.
     handle = FakeSerial(
         [
-            _hb(35.0, 129.0, imu_yaw_deg=0.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=60.0),  # strong pulse
-            _hb(35.0, 129.0, imu_yaw_deg=60.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=115.0),  # overshoot: 25 past the 90 target
+            _hb(35.0, 129.0, imu_yaw_deg=0.0),  # connector preflight
+            _hb(None, None, imu_yaw_deg=115.0, with_gps=False),  # 25 past the 90 target
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            _hb(35.0, 129.0, imu_yaw_deg=115.0),  # stabilized read-back
         ]
     )
     rows, _raw, abort_reason = controller.run_stop_correct_go(
@@ -734,7 +740,7 @@ def test_connector_overshoot_stops_same_direction_pulsing() -> None:
 
     assert abort_reason == "NONE"
     connector_rows = [r for r in rows if r.get("phase") == "connector"]
-    assert len(connector_rows) == 2  # budget was 5 but the overshoot stops it
+    assert len(connector_rows) == 1
     last = connector_rows[-1]
     assert last["turn_overshoot"] is True
     assert last["connector_turn_completed"] is False
@@ -752,56 +758,3 @@ def test_connector_overshoot_stops_same_direction_pulsing() -> None:
         abort_reason=abort_reason,
     )
     assert summary["connector_overshoot_count"] == 1
-
-
-def test_connector_hands_off_small_remainder_instead_of_coarse_pulse() -> None:
-    # Right-turn field data: one ~90 deg-class pulse with 2-3x variance. When a
-    # pulse lands close (remaining 12 deg < half of the 30 deg per-pulse
-    # angle), firing another full pulse would end FARTHER from the corner, so
-    # the connector stops and hands the remainder to lane heading correction.
-    handle = FakeSerial(
-        [
-            _hb(35.0, 129.0, imu_yaw_deg=0.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=50.0),  # strong-ish pulse
-            _hb(35.0, 129.0, imu_yaw_deg=50.0),
-            *_PULSE_OK,
-            _hb(35.0, 129.0, imu_yaw_deg=78.0),  # remaining 12 < 30/2
-        ]
-    )
-    rows, _raw, abort_reason = controller.run_stop_correct_go(
-        handle,
-        segments=[_left_connector()],
-        resolved_calibration=_small_left_turn_calibration(30.0),
-        start_lat=35.0,
-        start_lon=129.0,
-        start_yaw_deg=None,
-        goal_lat=35.0000100,
-        goal_lon=129.0,
-        settle_after_move_ms=0,
-        telemetry_stabilize_ms=0,
-        event_timeout_s=1.0,
-        heartbeat_timeout_s=1.0,
-    )
-
-    assert abort_reason == "NONE"
-    connector_rows = [r for r in rows if r.get("phase") == "connector"]
-    assert len(connector_rows) == 2
-    last = connector_rows[-1]
-    assert last["turn_handed_off"] is True
-    assert last["connector_turn_completed"] is False
-    assert last["turn_overshoot"] is False
-    assert float(last["remaining_turn_error_deg"]) == 12.0
-    summary = controller.build_stop_correct_go_summary(
-        connector_rows,
-        start_lat=35.0,
-        start_lon=129.0,
-        goal_lat=35.0000100,
-        goal_lon=129.0,
-        goal_distance_m=1.11,
-        fallback_to_repeated_pulses=False,
-        sensor_trust_mode="imu_gps_first",
-        allow_calibration_fallback=True,
-        abort_reason=abort_reason,
-    )
-    assert summary["connector_handed_off_count"] == 1

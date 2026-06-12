@@ -1115,3 +1115,27 @@ Operator rules learned:
 - check `stop_correct_go_trace.csv` `phase=connector` rows
   (`applied_turn_delta_deg` vs `requested_turn_angle_deg`) before blaming
   calibration strength.
+
+## First Field Run Findings After The Corner Refactor (2026-06-12)
+
+Two failures from the first 2.4 m x 2.4 m run, both fixed in code:
+
+1. `COMMAND_EXCEEDS_MAX_MS` on the first corner: the guarded-pulse firmware's
+   maximum pulse duration is a COMPILE-TIME flag baked in at upload
+   (`STAGE_USB_GUARDED_MAX_MS_VALUE`; tune-motion uploads with 3000 ms,
+   usb-pulse-test with 1000 ms), so a 2200 ms calibrated turn pulse can pass in
+   tune-motion and then be rejected during execution under a different upload.
+   Connectors now run as continuous live-drive IMU pivots (no long guarded
+   pulses); the no-IMU fallback clamps pulses to 1000 ms.
+2. Lane "completed" after one chunk with cross-track ~1.8 m: the plan origin
+   (preview-time fix) and the rover's execute-time position disagreed by
+   meters, and with 5 sats / HDOP ~2 the stationary fix wandered ~1 m per 10 s.
+   Use `run` (re-anchors the relative plan at the current fix) for execution
+   and `--max-gps-jump-m` to reject teleport-scale GPS steps mid-run. A 2.4 m
+   lane is at the GPS noise floor; expect IMU + dead reckoning to carry
+   progress and treat GPS as a loose tether.
+
+Measured turn rates for reference (B command, continuous):
+
+- left B=+0.24: ~13 deg/s (2200 ms -> ~28 deg median, stiction outliers ~2 deg)
+- right B=-0.12: ~80 deg/s (2050-2200 ms -> ~160-173 deg, one ~81 deg outlier)

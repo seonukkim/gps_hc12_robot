@@ -56,15 +56,19 @@ connector_turn(제자리 ~90°) -> step_lane(간격만큼 직진/후진) -> conn
 - 레거시 플랜(`path_connector` 단일 세그먼트)도 그대로 실행 가능.
   새 플랜을 옛 방식으로 만들려면 `--connector-style single_turn`.
 
-### 4.2 connector 회전 = target_angle_deg 기반 다중 펄스 + IMU 폐루프
+### 4.2 connector 회전 = 연속 IMU 폐루프 피벗 (live-drive)
 
-- 캘리브레이션의 `target_angle_deg`(펄스 1회의 실제 회전각)를 신뢰한다
-  (`--turn-calibration-angle-policy from_json` 기본).
-- connector 시작 시점의 yaw를 기준으로, 측정된 yaw 변화가 요청 각도에
-  도달할 때까지 펄스 반복. 한도는 `--max-connector-pulses-per-turn`(기본 6),
-  허용 오차는 `--connector-turn-tolerance-deg`(기본 10).
-- IMU가 없으면 `ceil(|각도|/target_angle_deg)`개의 펄스만 개루프로 실행.
-- JSON 수정 없이 실측 각도를 줄 때는 `--turn-angle-deg-override 30`.
+- IMU yaw가 있으면 코너는 **연속 회전 1회**: 보정 회전과 같은 live-drive
+  SET/STOP 메커니즘으로, 측정 yaw 변화가 요청 각도(±`--connector-turn-tolerance-deg`,
+  기본 10)에 도달할 때까지 돌고, `--max-connector-turn-ms`(기본 10초)로 상한.
+  과회전(목표 통과)을 감지하면 즉시 멈춤(`turn_overshoot`).
+- 이 방식이라 **펌웨어 가드 펄스 최대길이(COMMAND_EXCEEDS_MAX_MS, 업로드 시
+  구워지는 값)에 안 걸리고**, 펄스마다 정지마찰을 다시 이길 필요도 없다.
+- IMU가 없을 때만 개루프 펄스 폴백: `ceil(|각도|/target_angle_deg)`개,
+  펄스당 1000ms로 클램프(횟수는 비례 보정).
+- 캘리브레이션 `target_angle_deg`는 개루프 폴백과 플랜 표기에 쓰임
+  (`--turn-calibration-angle-policy from_json` 기본,
+  `--turn-angle-deg-override`로 JSON 수정 없이 대체 가능).
 
 ### 4.3 heading 기준 = mission (기본)
 
@@ -95,10 +99,17 @@ connector_turn(제자리 ~90°) -> step_lane(간격만큼 직진/후진) -> conn
    너무 큰 것. `heading_reference`가 `per_lane`이면 오차가 0으로 숨겨진다.
 3. **레인을 벗어나도 복귀 안 함** → `cross_track_error_m` 대비
    `--cross-track-correction-threshold-m`이 큰 것(레인 간격보다 작게).
-4. **회전이 끝없이 반복** → summary의 `connector_pulse_count`와
-   `rotation budget` 확인; `--max-connector-pulses-per-turn`이 가드.
-5. **A와 B가 동시에 나가는 코너** → connector 펄스는 항상 `a=0.000`이어야
+4. **회전이 끝없이 돈다/너무 오래 돈다** → `turn_timed_out=True`면 모터가
+   목표각까지 못 돈 것(`--max-connector-turn-ms` 내). B를 키우거나 배터리 확인.
+   `turn_overshoot=True`가 코너마다 나오면 회전이 너무 빠른 것 → B 축소.
+5. **A와 B가 동시에 나가는 코너** → connector는 항상 `a=0.000`이어야
    한다(`move_a_cmd` 확인). 아니면 calibration JSON의 turn 항목 `a`를 0으로.
+6. **첫 청크 만에 레인이 "완료"됨 / cte가 수 m** → 플랜 원점과 로봇 위치
+   불일치(오래된 plan-dir) 또는 GPS 표류. 실행은 `run`(현재 위치 재앵커)으로,
+   `--max-gps-jump-m 1.2`로 순간이동 보정 거부(`gps_jump_rejected` 카운트 확인).
+7. **코너에서 REJECT: COMMAND_EXCEEDS_MAX_MS** → 가드 펄스 길이가 펌웨어
+   상한(업로드 시 결정) 초과. 현행 코드는 코너를 live-drive로 돌므로 발생하면
+   안 됨 — 발생 시 개루프 폴백(IMU 부재) 여부와 turn_mode 확인.
 
 summary.json에서 보는 핵심 카운터:
 `connector_turn_count / connector_completed_count / connector_incomplete_count`,

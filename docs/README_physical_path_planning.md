@@ -130,16 +130,23 @@ bash scripts/run_physical_path_planner.sh preview \
   --path-shape coverage_lawnmower --print-field-config true \
   --out-dir outputs/physical_path_planning/preview_$RUN_ID
 
-# 4. Execute when the preview PNG shows the expected ㄹ.
-bash scripts/run_physical_path_planner.sh execute-plan \
-  --plan-dir outputs/physical_path_planning/preview_$RUN_ID \
+# 4. Execute with `run`, which re-anchors the relative plan at the rover's
+#    CURRENT GPS fix (preview->execute GPS drift cannot shift the field the
+#    way a stale --plan-dir start can).
+bash scripts/run_physical_path_planner.sh run \
+  --goal-mode relative_enu --goal-east-m 2.4 --goal-north-m 2.4 \
+  --workspace-width-m 2.4 --step-spacing-m 1.2 \
+  --path-shape coverage_lawnmower \
   --path-control-mode stop_correct_go \
   --initial-heading-align none \
   --move-chunk-ms 800 --max-segment-chunks 160 \
   --settle-after-move-ms 300 --telemetry-stabilize-ms 500 \
   --heading-correction-threshold-deg 15 \
   --heading-correction-tolerance-deg 8 \
+  --heading-correction-b-left 0.24 --heading-correction-b-right -0.12 \
+  --max-heading-correction-ms 4000 \
   --cross-track-correction-threshold-m 0.35 \
+  --max-gps-jump-m 1.2 \
   --sensor-trust-mode imu_gps_first --allow-calibration-fallback true \
   --gps-degradation-policy continue --gps-reanchor true \
   --max-correction-b 0.08 \
@@ -150,15 +157,25 @@ cat outputs/physical_path_planning/execute_$RUN_ID/summary.md
 
 Notes:
 
-- Align the rover with the first lane heading before `execute-plan` when using
+- Align the rover with the first lane heading before starting when using
   `--initial-heading-align none`; the mission heading frame is captured there.
+- Each ㄹ corner runs as ONE continuous IMU-feedback pivot (the live-drive
+  mechanism, capped by `--max-connector-turn-ms`, default 10 s). Long
+  calibrated pulse durations are therefore safe: the firmware's guarded-pulse
+  maximum (`COMMAND_EXCEEDS_MAX_MS`, baked in at upload) only applies to the
+  no-IMU open-loop fallback, whose pulses are clamped to 1000 ms.
 - Keep `--cross-track-correction-threshold-m` well under the lane spacing
   (0.35 m for 1.2 m lanes); a threshold larger than the spacing disables the
   recovery that pulls the rover back onto its lane.
+- `--max-gps-jump-m 1.2` rejects teleport-scale GPS steps between cycles
+  (dead-reckoning that cycle instead). With ~5 sats / HDOP ~2 the GPS noise
+  floor rivals a 2.4 m lane, so without this guard a single noisy fix can
+  "complete" a lane instantly.
 - Inspect corners in `stop_correct_go_trace.csv`: `phase=connector` rows show
-  `requested_turn_angle_deg`, `calibration_target_angle_deg`,
-  `turn_pulse_index/turn_pulse_budget`, `applied_turn_delta_deg`,
-  `remaining_turn_error_deg`, and `connector_turn_completed`.
+  `requested_turn_angle_deg`, `applied_turn_delta_deg`,
+  `remaining_turn_error_deg`, `turn_mode` (`live_imu` / `open_loop_pulses`),
+  `turn_duration_ms`, `turn_timed_out`, `turn_overshoot`, and
+  `connector_turn_completed`.
 
 ## AUTO/MANUAL Switch Workflow (auto-relative-run)
 

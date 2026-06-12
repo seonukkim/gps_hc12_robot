@@ -4960,11 +4960,15 @@ def _run_stop_correct_go_from_args(
         connector_turn_tolerance_deg=getattr(
             args, "connector_turn_tolerance_deg", controller.DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG
         ),
+        max_connector_turn_ms=getattr(
+            args, "max_connector_turn_ms", controller.DEFAULT_MAX_CONNECTOR_TURN_MS
+        ),
         turn_angle_policy=getattr(
             args, "turn_calibration_angle_policy", controller.DEFAULT_TURN_ANGLE_POLICY
         ),
         turn_angle_override=getattr(args, "turn_angle_deg_override", None),
         heading_reference=getattr(args, "heading_reference", controller.DEFAULT_HEADING_REFERENCE),
+        max_gps_jump_m=getattr(args, "max_gps_jump_m", None),
     )
 
 
@@ -5006,9 +5010,12 @@ def _write_stop_correct_go_artifacts(
             "applied_turn_delta_deg": row.get("applied_turn_delta_deg"),
             "remaining_turn_error_deg": row.get("remaining_turn_error_deg"),
             "turn_measured_by_imu": row.get("turn_measured_by_imu"),
+            "turn_mode": row.get("turn_mode"),
+            "turn_duration_ms": row.get("turn_duration_ms"),
+            "turn_timed_out": row.get("turn_timed_out"),
             "connector_turn_completed": row.get("connector_turn_completed"),
             "turn_overshoot": row.get("turn_overshoot"),
-            "turn_handed_off": row.get("turn_handed_off"),
+            "gps_jump_rejected": row.get("gps_jump_rejected"),
         }
         for row in cycle_rows
     ]
@@ -6226,6 +6233,17 @@ def build_parser() -> argparse.ArgumentParser:
             default=controller.DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG,
             help="stop the connector turn once the measured IMU yaw delta is within "
             "this tolerance of the requested corner angle",
+        )
+        run_p.add_argument(
+            "--max-connector-turn-ms", type=int,
+            default=controller.DEFAULT_MAX_CONNECTOR_TURN_MS,
+            help="cap on one connector's continuous IMU-feedback pivot duration",
+        )
+        run_p.add_argument(
+            "--max-gps-jump-m", type=float, default=None,
+            help="stop_correct_go: reject GPS pose steps larger than this between "
+            "cycles (dead-reckon that cycle instead); recommended ~1.2 on small "
+            "fields where GPS noise rivals the lane length",
         )
         run_p.add_argument(
             "--turn-calibration-angle-policy",

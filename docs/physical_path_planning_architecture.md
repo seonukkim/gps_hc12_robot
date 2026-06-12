@@ -123,19 +123,35 @@ one pulse completes a corner:
 
 - `calibration.connector_primitive` surfaces `target_angle_deg` (falling back
   to the measured `imu_yaw_delta_deg`, then 90).
-- `stop_correct_go` connectors capture the IMU yaw at the connector's start and
-  pulse the calibrated turn repeatedly until the measured yaw delta reaches the
-  segment's requested `turn_angle_deg` within
-  `--connector-turn-tolerance-deg` (default 10), capped by
-  `--max-connector-pulses-per-turn` (default 6, the anti-rotation-loop guard).
-- Without IMU yaw the open-loop count `ceil(|angle| / target_angle_deg)` is
-  used -- never blind extras.
+- With IMU yaw available, a `stop_correct_go` connector runs as ONE continuous
+  IMU-feedback pivot (the same bounded live-drive SET/STOP mechanism as the
+  lane heading correction): it captures the yaw at the connector's start and
+  turns at the calibrated B until the measured yaw delta reaches the segment's
+  requested `turn_angle_deg` within `--connector-turn-tolerance-deg`
+  (default 10), capped by `--max-connector-turn-ms` (default 10 s). This
+  avoids the firmware's guarded-pulse duration maximum
+  (`COMMAND_EXCEEDS_MAX_MS`, a compile-time flag baked in at upload) and does
+  not re-fight motor stiction pulse by pulse. Overshooting past the target
+  between feedback samples stops the turn (`turn_overshoot`); the next lane's
+  heading correction owns the residual in its own direction.
+- Without IMU yaw, the open-loop count `ceil(|angle| / target_angle_deg)` of
+  guarded pulses is used -- never blind extras -- with each pulse clamped to
+  the firmware-safe 1000 ms (and the count scaled accordingly).
 - `--turn-calibration-angle-policy assume_90` reproduces the legacy
-  one-pulse-per-corner behavior; `--turn-angle-deg-override` substitutes a
+  one-pulse-per-corner planning; `--turn-angle-deg-override` substitutes a
   measured per-pulse angle without editing the calibration JSON.
 - `calibration-check` and `set-motion-calibration` print
   `TURN_CALIBRATION_IS_SMALL_PULSE_NOT_90` when a `turn_*_90` entry holds a
   pulse under 60 degrees.
+
+## GPS Jump Guard (small fields)
+
+`--max-gps-jump-m` (off by default) rejects GPS pose steps between
+`stop_correct_go` cycles that exceed the threshold (floored at 3x one chunk's
+dead-reckon advance), dead-reckoning that cycle instead and counting it as
+`gps_jump_rejected`. On fields whose lane length is close to the GPS noise
+floor (~5 sats / HDOP ~2 wanders meters), a single noisy fix can otherwise
+"teleport" the pose and instantly complete a lane.
 
 ## Heading Reference (mission vs per_lane)
 
