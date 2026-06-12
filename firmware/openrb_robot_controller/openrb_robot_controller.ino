@@ -71,6 +71,50 @@
 #define MANUAL_CONTROL_PPM 0
 #endif
 
+// Untethered RC AUTO pattern: with MANUAL_CONTROL_PPM, CH5=MANUAL drives RC
+// manual as usual and CH5=AUTO runs ONE onboard lawnmower (turn-step-turn)
+// pattern using timed lanes and IMU-feedback pivots. Re-arming requires a
+// fresh MANUAL period, so booting with the switch in AUTO never moves.
+#ifndef RC_AUTO_PATTERN
+#define RC_AUTO_PATTERN 0
+#endif
+#ifndef RC_AUTO_PATTERN_LANES
+#define RC_AUTO_PATTERN_LANES 4
+#endif
+#ifndef RC_AUTO_PATTERN_LANE_MS
+#define RC_AUTO_PATTERN_LANE_MS 4200
+#endif
+#ifndef RC_AUTO_PATTERN_STEP_MS
+#define RC_AUTO_PATTERN_STEP_MS 1400
+#endif
+#ifndef RC_AUTO_PATTERN_FORWARD_A
+#define RC_AUTO_PATTERN_FORWARD_A 0.30f
+#endif
+#ifndef RC_AUTO_PATTERN_REVERSE_A
+#define RC_AUTO_PATTERN_REVERSE_A -0.30f
+#endif
+#ifndef RC_AUTO_PATTERN_TURN_B_LEFT
+#define RC_AUTO_PATTERN_TURN_B_LEFT 0.24f
+#endif
+#ifndef RC_AUTO_PATTERN_TURN_B_RIGHT
+#define RC_AUTO_PATTERN_TURN_B_RIGHT -0.12f
+#endif
+#ifndef RC_AUTO_PATTERN_TURN_TARGET_DEG
+#define RC_AUTO_PATTERN_TURN_TARGET_DEG 90.0
+#endif
+#ifndef RC_AUTO_PATTERN_TURN_TOL_DEG
+#define RC_AUTO_PATTERN_TURN_TOL_DEG 8.0
+#endif
+#ifndef RC_AUTO_PATTERN_TURN_TIMEOUT_MS
+#define RC_AUTO_PATTERN_TURN_TIMEOUT_MS 15000
+#endif
+#ifndef RC_AUTO_PATTERN_PAUSE_MS
+#define RC_AUTO_PATTERN_PAUSE_MS 500
+#endif
+#ifndef RC_AUTO_PATTERN_ARM_MANUAL_MS
+#define RC_AUTO_PATTERN_ARM_MANUAL_MS 1000
+#endif
+
 #ifndef PPM_INTERRUPT_EDGE_FALLING
 #define PPM_INTERRUPT_EDGE_FALLING 0
 #endif
@@ -5116,6 +5160,214 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
 }
 #endif  // PATH_FOLLOWING_DRYRUN
 
+#if RC_AUTO_PATTERN
+#if !IMU_ENABLE
+#error "RC_AUTO_PATTERN requires IMU_ENABLE=1 (IMU yaw feedback drives the pivots)."
+#endif
+#if !MANUAL_CONTROL_PPM
+#error "RC_AUTO_PATTERN requires MANUAL_CONTROL_PPM=1 (CH5 arbitrates manual/auto)."
+#endif
+
+// One pattern step: type 0 drives physical A for ms; type 1 pivots with
+// physical B until the IMU yaw delta reaches targetDeg (or times out).
+struct RcAutoPatternStep {
+  uint8_t type;
+  float a;
+  float b;
+  uint32_t ms;
+  float targetDeg;
+};
+
+#define RC_AUTO_PATTERN_MAX_STEPS 64
+
+enum RcAutoPatternState {
+  RC_AUTO_PATTERN_IDLE,
+  RC_AUTO_PATTERN_RUNNING,
+  RC_AUTO_PATTERN_DONE
+};
+
+RcAutoPatternState rcAutoPatternState = RC_AUTO_PATTERN_IDLE;
+RcAutoPatternStep rcAutoPatternSteps[RC_AUTO_PATTERN_MAX_STEPS];
+int rcAutoPatternStepCount = 0;
+int rcAutoPatternStepIndex = 0;
+int rcAutoPatternPhase = 0;  // 0 = executing the step, 1 = stopped pause
+uint32_t rcAutoPatternStepStartMs = 0;
+uint32_t rcAutoPatternManualSinceMs = 0;
+uint32_t rcAutoPatternLastPrintMs = 0;
+bool rcAutoPatternArmed = false;
+double rcAutoPatternTurnStartYaw = 0.0;
+
+int rcAutoPatternPushDrive(int index, float a, uint32_t ms) {
+  if (index >= RC_AUTO_PATTERN_MAX_STEPS) {
+    return index;
+  }
+  rcAutoPatternSteps[index].type = 0;
+  rcAutoPatternSteps[index].a = a;
+  rcAutoPatternSteps[index].b = 0.0f;
+  rcAutoPatternSteps[index].ms = ms;
+  rcAutoPatternSteps[index].targetDeg = 0.0f;
+  return index + 1;
+}
+
+int rcAutoPatternPushTurn(int index, float targetDeg) {
+  if (index >= RC_AUTO_PATTERN_MAX_STEPS) {
+    return index;
+  }
+  rcAutoPatternSteps[index].type = 1;
+  rcAutoPatternSteps[index].a = 0.0f;
+  rcAutoPatternSteps[index].b =
+      targetDeg >= 0.0f ? (float)(RC_AUTO_PATTERN_TURN_B_LEFT) : (float)(RC_AUTO_PATTERN_TURN_B_RIGHT);
+  rcAutoPatternSteps[index].ms = (uint32_t)(RC_AUTO_PATTERN_TURN_TIMEOUT_MS);
+  rcAutoPatternSteps[index].targetDeg = targetDeg;
+  return index + 1;
+}
+
+void rcAutoPatternBuildSteps() {
+  // The station planner's turn_step_turn lawnmower in body frame: forward
+  // lanes drive ahead, return lanes reverse (the body keeps the lane axis);
+  // corners pivot, drive the step-over, and pivot back.
+  int lanes = RC_AUTO_PATTERN_LANES;
+  if (lanes < 1) {
+    lanes = 1;
+  }
+  if (lanes > 12) {
+    lanes = 12;
+  }
+  float target = (float)(RC_AUTO_PATTERN_TURN_TARGET_DEG);
+  int n = 0;
+  for (int lane = 0; lane < lanes; lane++) {
+    bool forwardLane = (lane % 2) == 0;
+    n = rcAutoPatternPushDrive(
+        n,
+        forwardLane ? (float)(RC_AUTO_PATTERN_FORWARD_A) : (float)(RC_AUTO_PATTERN_REVERSE_A),
+        (uint32_t)(RC_AUTO_PATTERN_LANE_MS));
+    if (lane == lanes - 1) {
+      break;
+    }
+    if (forwardLane) {
+      n = rcAutoPatternPushTurn(n, target);
+      n = rcAutoPatternPushDrive(n, (float)(RC_AUTO_PATTERN_FORWARD_A),
+                                 (uint32_t)(RC_AUTO_PATTERN_STEP_MS));
+      n = rcAutoPatternPushTurn(n, -target);
+    } else {
+      n = rcAutoPatternPushTurn(n, -target);
+      n = rcAutoPatternPushDrive(n, (float)(RC_AUTO_PATTERN_REVERSE_A),
+                                 (uint32_t)(RC_AUTO_PATTERN_STEP_MS));
+      n = rcAutoPatternPushTurn(n, target);
+    }
+  }
+  rcAutoPatternStepCount = n;
+}
+
+void rcAutoPatternStatusPrint(uint32_t now, const char *stateName) {
+  if (now - rcAutoPatternLastPrintMs < 500) {
+    return;
+  }
+  rcAutoPatternLastPrintMs = now;
+  Serial.print(F("RC_AUTO_PATTERN state="));
+  Serial.print(stateName);
+  Serial.print(F(" step="));
+  Serial.print(rcAutoPatternStepIndex);
+  Serial.print(F("/"));
+  Serial.print(rcAutoPatternStepCount);
+  Serial.print(F(" armed="));
+  Serial.print(rcAutoPatternArmed ? F("true") : F("false"));
+  Serial.print(F(" imu_yaw_deg="));
+  Serial.println(imuRelativeYawDeg, 1);
+}
+
+// Called every loop tick while CH5 is NOT in AUTO (manual drive or failsafe):
+// stops a running pattern once and tracks the stable-MANUAL arming window.
+void rcAutoPatternNoteNotAuto(uint32_t now, bool rcValidNow) {
+  if (rcAutoPatternState == RC_AUTO_PATTERN_RUNNING) {
+    motorStopWithSource("RC_AUTO_PATTERN");
+  }
+  rcAutoPatternState = RC_AUTO_PATTERN_IDLE;
+  if (!rcValidNow) {
+    rcAutoPatternManualSinceMs = 0;
+    rcAutoPatternArmed = false;
+    return;
+  }
+  if (rcAutoPatternManualSinceMs == 0) {
+    rcAutoPatternManualSinceMs = now;
+  }
+  if (now - rcAutoPatternManualSinceMs >= (uint32_t)(RC_AUTO_PATTERN_ARM_MANUAL_MS)) {
+    rcAutoPatternArmed = true;
+  }
+}
+
+// Called every loop tick while CH5 is AUTO with valid RC.
+void rcAutoPatternTick(uint32_t now) {
+  if (rcAutoPatternState == RC_AUTO_PATTERN_DONE) {
+    currentMode = AUTO_READY;
+    currentControlSource = CONTROL_SOURCE_STOP;
+    motorStop();
+    rcAutoPatternStatusPrint(now, "DONE");
+    return;
+  }
+  if (rcAutoPatternState == RC_AUTO_PATTERN_IDLE) {
+    if (!rcAutoPatternArmed || !imuCalibratedFlag) {
+      currentMode = AUTO_READY;
+      currentControlSource = CONTROL_SOURCE_STOP;
+      motorStop();
+      rcAutoPatternStatusPrint(now, imuCalibratedFlag ? "WAIT_MANUAL_ARM" : "WAIT_IMU_CAL");
+      return;
+    }
+    rcAutoPatternBuildSteps();
+    rcAutoPatternStepIndex = 0;
+    rcAutoPatternPhase = 0;
+    rcAutoPatternStepStartMs = now;
+    rcAutoPatternTurnStartYaw = imuRelativeYawDeg;
+    rcAutoPatternArmed = false;  // one run per MANUAL -> AUTO transition
+    rcAutoPatternManualSinceMs = 0;
+    rcAutoPatternState = RC_AUTO_PATTERN_RUNNING;
+  }
+  currentMode = AUTO_RUNNING;
+  currentControlSource = CONTROL_SOURCE_AUTO;
+  if (rcAutoPatternStepIndex >= rcAutoPatternStepCount) {
+    motorStopWithSource("RC_AUTO_PATTERN");
+    rcAutoPatternState = RC_AUTO_PATTERN_DONE;
+    return;
+  }
+  RcAutoPatternStep &step = rcAutoPatternSteps[rcAutoPatternStepIndex];
+  if (rcAutoPatternPhase == 1) {
+    motorStop();
+    if (now - rcAutoPatternStepStartMs >= (uint32_t)(RC_AUTO_PATTERN_PAUSE_MS)) {
+      rcAutoPatternStepIndex++;
+      rcAutoPatternPhase = 0;
+      rcAutoPatternStepStartMs = now;
+      rcAutoPatternTurnStartYaw = imuRelativeYawDeg;
+    }
+    rcAutoPatternStatusPrint(now, "PAUSE");
+    return;
+  }
+  if (step.type == 0) {
+    applyPhysicalABManualEquivalentCommandWithSource(step.a, 0.0f, "RC_AUTO_PATTERN");
+    if (now - rcAutoPatternStepStartMs >= step.ms) {
+      motorStopWithSource("RC_AUTO_PATTERN");
+      rcAutoPatternPhase = 1;
+      rcAutoPatternStepStartMs = now;
+    }
+    rcAutoPatternStatusPrint(now, "DRIVE");
+    return;
+  }
+  double turned = imuWrap180(imuRelativeYawDeg - rcAutoPatternTurnStartYaw);
+  double remaining = imuWrap180((double)step.targetDeg - turned);
+  double remainingAbs = remaining < 0.0 ? -remaining : remaining;
+  bool reached = remainingAbs <= (double)(RC_AUTO_PATTERN_TURN_TOL_DEG);
+  bool overshot = remaining * (double)step.targetDeg < 0.0;
+  bool timedOut = now - rcAutoPatternStepStartMs >= step.ms;
+  if (reached || overshot || timedOut) {
+    motorStopWithSource("RC_AUTO_PATTERN");
+    rcAutoPatternPhase = 1;
+    rcAutoPatternStepStartMs = now;
+  } else {
+    applyPhysicalABManualEquivalentCommandWithSource(0.0f, step.b, "RC_AUTO_PATTERN");
+  }
+  rcAutoPatternStatusPrint(now, "TURN");
+}
+#endif  // RC_AUTO_PATTERN
+
 void setup() {
   Serial.begin(USB_BAUD);
 #if HC12_LINK_ENABLED
@@ -5357,17 +5609,29 @@ void loop() {
   clearAutoCommand();
   clearStationManualCommand();
   if (!rcValid) {
+#if RC_AUTO_PATTERN
+    rcAutoPatternNoteNotAuto(now, false);
+#endif
     currentControlSource = CONTROL_SOURCE_STOP;
     currentMode = FAILSAFE;
     motorStop();
   } else if (rcManualActive) {
+#if RC_AUTO_PATTERN
+    rcAutoPatternNoteNotAuto(now, true);
+#endif
     currentMode = MANUAL;
     currentControlSource = CONTROL_SOURCE_RC_MANUAL;
     applyManualOverride(steeringUs, throttleUs);
   } else {
+#if RC_AUTO_PATTERN
+    // CH5 in AUTO: run the onboard pattern (arming requires a fresh MANUAL
+    // period; flipping back to MANUAL stops motors on the next tick).
+    rcAutoPatternTick(now);
+#else
     currentControlSource = CONTROL_SOURCE_STOP;
     currentMode = AUTO_READY;
     motorStop();
+#endif
   }
   debugPrintStatus();
   return;

@@ -2367,6 +2367,189 @@ def cmd_manual_rc(args: argparse.Namespace) -> int:
     return 0 if upload_success else 2
 
 
+RC_AUTO_PATTERN_BUILD_PATH = "outputs/firmware_builds/rc_auto_pattern"
+
+
+def rc_auto_pattern_firmware_flags(
+    *,
+    lanes: int,
+    lane_ms: int,
+    step_ms: int,
+    forward_a: float,
+    reverse_a: float,
+    turn_b_left: float,
+    turn_b_right: float,
+    turn_target_deg: float,
+    turn_tol_deg: float,
+    turn_timeout_ms: int,
+    pause_ms: int,
+    mode_channel_index: int | None = 4,
+) -> str:
+    """Build flags for the untethered RC AUTO pattern firmware.
+
+    Starts from the proven rc-mix-ppm manual profile (RC manual driving, the
+    locked direction signs, CH5 mode channel) and adds IMU yaw plus the onboard
+    lawnmower pattern: CH5=MANUAL drives manually, CH5=AUTO runs the pattern
+    once per fresh MANUAL->AUTO transition. No station/USB link is required
+    after upload.
+    """
+    base = manual_control_firmware_flags(
+        profile=MANUAL_CONTROL_RC_MIX_PPM_PROFILE, mode_channel_index=mode_channel_index
+    )
+    base = base.replace("-DIMU_ENABLE=0", "-DIMU_ENABLE=1 -DIMU_YAW_DIAG=1")
+    return (
+        f"{base} "
+        "-DRC_AUTO_PATTERN=1 "
+        f"-DRC_AUTO_PATTERN_LANES={int(lanes)} "
+        f"-DRC_AUTO_PATTERN_LANE_MS={int(lane_ms)} "
+        f"-DRC_AUTO_PATTERN_STEP_MS={int(step_ms)} "
+        f"-DRC_AUTO_PATTERN_FORWARD_A={float(forward_a)}f "
+        f"-DRC_AUTO_PATTERN_REVERSE_A={float(reverse_a)}f "
+        f"-DRC_AUTO_PATTERN_TURN_B_LEFT={float(turn_b_left)}f "
+        f"-DRC_AUTO_PATTERN_TURN_B_RIGHT={float(turn_b_right)}f "
+        f"-DRC_AUTO_PATTERN_TURN_TARGET_DEG={float(turn_target_deg)} "
+        f"-DRC_AUTO_PATTERN_TURN_TOL_DEG={float(turn_tol_deg)} "
+        f"-DRC_AUTO_PATTERN_TURN_TIMEOUT_MS={int(turn_timeout_ms)} "
+        f"-DRC_AUTO_PATTERN_PAUSE_MS={int(pause_ms)}"
+    )
+
+
+def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
+    """Upload the untethered RC AUTO pattern firmware, then optionally monitor.
+
+    After upload the rover is standalone: the USB cable may be removed. CH5
+    MANUAL = RC stick driving; a fresh MANUAL (>=1 s) followed by AUTO runs the
+    onboard ㄹ pattern once; flipping back to MANUAL stops motors immediately.
+    """
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.print_cmd:
+        args.port = printable_port(args.port)
+    if not args.print_cmd and not ensure_port(args):
+        return 2
+    flags = rc_auto_pattern_firmware_flags(
+        lanes=args.lanes,
+        lane_ms=args.lane_ms,
+        step_ms=args.step_ms,
+        forward_a=args.forward_a,
+        reverse_a=args.reverse_a,
+        turn_b_left=args.turn_b_left,
+        turn_b_right=args.turn_b_right,
+        turn_target_deg=args.turn_target_deg,
+        turn_tol_deg=args.turn_tol_deg,
+        turn_timeout_ms=args.turn_timeout_ms,
+        pause_ms=args.pause_ms,
+        mode_channel_index=args.mode_channel_index,
+    )
+    compile_cmd = [
+        "arduino-cli", "compile", "--fqbn", "OpenRB-150:samd:OpenRB-150",
+        "--build-path", RC_AUTO_PATTERN_BUILD_PATH,
+        "--build-property", f"compiler.cpp.extra_flags={flags}",
+        "firmware/openrb_robot_controller",
+    ]
+    upload_cmd = [
+        "arduino-cli", "upload", "-p", str(args.port),
+        "--fqbn", "OpenRB-150:samd:OpenRB-150",
+        "--build-path", RC_AUTO_PATTERN_BUILD_PATH,
+        "firmware/openrb_robot_controller",
+    ]
+    config = {
+        "mode": "rc-auto-pattern",
+        "firmware_profile": "rc_auto_pattern",
+        "untethered": True,
+        "rc_input_mode": "ppm",
+        "ppm_input_pin": "D6",
+        "steer_channel": "CH1",
+        "throttle_channel": "CH2",
+        "mode_channel": "CH5",
+        "mode_channel_index": args.mode_channel_index,
+        "lanes": args.lanes,
+        "lane_ms": args.lane_ms,
+        "step_ms": args.step_ms,
+        "forward_a": args.forward_a,
+        "reverse_a": args.reverse_a,
+        "turn_b_left": args.turn_b_left,
+        "turn_b_right": args.turn_b_right,
+        "turn_target_deg": args.turn_target_deg,
+        "turn_tol_deg": args.turn_tol_deg,
+        "turn_timeout_ms": args.turn_timeout_ms,
+        "pause_ms": args.pause_ms,
+        "arming_rule": "fresh MANUAL >=1s then AUTO; one run per transition; MANUAL stops instantly",
+        "ready_for_full_path_following": False,
+    }
+    _write_json(out_dir / "rc_auto_pattern_config.json", config)
+    if args.print_cmd:
+        print(" ".join(shlex.quote(part) for part in compile_cmd))
+        print(" ".join(shlex.quote(part) for part in upload_cmd))
+        print(f"rc_auto_pattern_firmware_flags={flags}")
+        print("ready_for_full_path_following=false")
+        write_summary_files(
+            out_dir,
+            {
+                **config,
+                "success": True,
+                "reason": "COMMAND_PRINTED",
+                "next_recommended_action": "Run without --print-cmd to upload the untethered pattern firmware.",
+            },
+            title="RC Auto Pattern",
+        )
+        return 0
+    if args.upload in {"true", "auto"}:
+        completed = subprocess.run(compile_cmd, check=False)
+        if completed.returncode != 0:
+            write_summary_files(
+                out_dir,
+                {**config, "success": False, "reason": "RC_AUTO_PATTERN_COMPILE_FAILED",
+                 "returncode": completed.returncode,
+                 "next_recommended_action": "Inspect the Arduino compile output."},
+                title="RC Auto Pattern",
+            )
+            return completed.returncode
+        completed = subprocess.run(upload_cmd, check=False)
+        if completed.returncode != 0:
+            write_summary_files(
+                out_dir,
+                {**config, "success": False, "reason": "RC_AUTO_PATTERN_UPLOAD_FAILED",
+                 "returncode": completed.returncode,
+                 "next_recommended_action": "Check the OpenRB port and upload output."},
+                title="RC Auto Pattern",
+            )
+            return completed.returncode
+    raw_lines: list[str] = []
+    if args.duration_s > 0:
+        import serial  # local import keeps print-cmd serial-free
+
+        monitor_port = args.port
+        try:
+            with serial.Serial(monitor_port, baudrate=args.baud, timeout=0.5) as handle:
+                deadline = time.monotonic() + float(args.duration_s)
+                while time.monotonic() < deadline:
+                    raw = handle.readline()
+                    if raw:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        print(line)
+                        raw_lines.append(line)
+        except (OSError, KeyboardInterrupt):
+            pass
+        if raw_lines:
+            _write_raw_log(out_dir / "rc_auto_pattern_monitor.log", raw_lines)
+    summary = {
+        **config,
+        "success": True,
+        "reason": "UPLOADED",
+        "monitor_lines": len(raw_lines),
+        "next_recommended_action": (
+            "Unplug USB if desired. CH5 MANUAL = stick driving; hold MANUAL >=1 s, "
+            "flip to AUTO to run the pattern once; flip back to MANUAL to stop."
+        ),
+        "ready_for_full_path_following": False,
+    }
+    write_summary_files(out_dir, summary, title="RC Auto Pattern")
+    print("rc-auto-pattern: uploaded. MANUAL=stick drive; MANUAL(1s)->AUTO runs the pattern once.")
+    print("ready_for_full_path_following=false")
+    return 0
+
+
 def cmd_manual_control(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -5913,6 +6096,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="print upload commands and exit",
     )
     manual_control_p.set_defaults(handler=cmd_manual_control)
+
+    rc_auto_p = sub.add_parser(
+        "rc-auto-pattern",
+        help="upload untethered firmware: CH5 MANUAL = RC sticks, CH5 AUTO = onboard ㄹ pattern",
+    )
+    rc_auto_p.add_argument("--port", default=None)
+    rc_auto_p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    rc_auto_p.add_argument("--upload", choices=["true", "false", "auto"], default="true")
+    rc_auto_p.add_argument("--duration-s", type=float, default=0.0,
+                           help="optional post-upload serial monitor duration (0 = exit after upload)")
+    rc_auto_p.add_argument("--lanes", type=int, default=4)
+    rc_auto_p.add_argument("--lane-ms", type=int, default=4200,
+                           help="full-lane drive duration (1.8 m at ~0.43 m/s is ~4200 ms)")
+    rc_auto_p.add_argument("--step-ms", type=int, default=1400,
+                           help="step-over drive duration (0.6 m is ~1400 ms)")
+    rc_auto_p.add_argument("--forward-a", type=float, default=0.30)
+    rc_auto_p.add_argument("--reverse-a", type=float, default=-0.30)
+    rc_auto_p.add_argument("--turn-b-left", type=float, default=0.24)
+    rc_auto_p.add_argument("--turn-b-right", type=float, default=-0.12)
+    rc_auto_p.add_argument("--turn-target-deg", type=float, default=90.0)
+    rc_auto_p.add_argument("--turn-tol-deg", type=float, default=8.0)
+    rc_auto_p.add_argument("--turn-timeout-ms", type=int, default=15000)
+    rc_auto_p.add_argument("--pause-ms", type=int, default=500)
+    rc_auto_p.add_argument("--mode-channel-index", type=int, default=4)
+    rc_auto_p.add_argument("--print-cmd", action="store_true",
+                           help="print firmware commands and exit")
+    rc_auto_p.add_argument("--out-dir", default="outputs/physical_path_planning/rc_auto_pattern")
+    rc_auto_p.set_defaults(handler=cmd_rc_auto_pattern)
 
     def add_station_hw_parser(name: str, *, diagnose_only: bool) -> None:
         station_p = sub.add_parser(

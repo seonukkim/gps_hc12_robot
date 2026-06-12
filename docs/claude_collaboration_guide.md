@@ -82,7 +82,17 @@ connector_turn(제자리 ~90°) -> step_lane(간격만큼 직진/후진) -> conn
 - 후진 레인은 `body_heading_deg`(주행방향+180)를 유지한다.
 - 옛 동작(레인마다 기준 재캡처, 오차 흡수)은 `--heading-reference per_lane`.
 
-### 4.4 AUTO/MANUAL 스위치 (auto-relative-run)
+### 4.4 AUTO/MANUAL 스위치 — 유선(auto-relative-run) vs 무선(rc-auto-pattern)
+
+- **유선**: auto-relative-run은 두뇌가 스테이션(Python)에 있다. USB를 뽑으면
+  데드맨이 정지시키는 게 설계다(자율 비활성 안전장치).
+- **무선**: `rc-auto-pattern` 모드가 별도 펌웨어(rc-mix-ppm 수동 프로파일 +
+  IMU + 온보드 ㄹ 패턴)를 업로드한다. CH5 MANUAL=스틱 주행, MANUAL 1초 후
+  AUTO 플립=패턴 1회(타이머 레인 + IMU 피벗), MANUAL 복귀=즉시 정지.
+  부팅 시 AUTO면 절대 안 움직임(재무장 필요). 패턴 파라미터는 업로드 시
+  컴파일로 구워짐(--lane-ms 등).
+
+### 4.4.1 유선 AUTO/MANUAL (auto-relative-run)
 
 - MANUAL→AUTO: 현재 GPS 위치를 원점으로 상대 ENU 플랜을 1회 실행.
 - AUTO→MANUAL: 펄스 윈도/보정 회전 중에도 감지하여 즉시 정지

@@ -213,8 +213,41 @@ no PPM receiver is attached.
 Firmware caveat: the supervised firmware that executes paths ignores RC stick
 input for motor output (`usb_pulse_test_ignore_rc_input=true`); the CH5 switch
 is honored for start/stop, but driving the rover manually with the sticks
-requires flashing the PPM manual firmware (`manual-control`) afterwards.
-Merging both behaviors into one firmware profile is a future task.
+requires a different firmware. For the combined untethered behavior use
+`rc-auto-pattern` below.
+
+## Untethered MANUAL/AUTO (rc-auto-pattern)
+
+`auto-relative-run` keeps the brain on the station: every motor command goes
+over the USB link, so unplugging the cable stops everything by design.
+`rc-auto-pattern` instead uploads a standalone firmware (built on the proven
+rc-mix-ppm manual profile + IMU yaw) so the rover works with ONLY the RC
+transmitter after the cable is removed:
+
+- CH5 MANUAL: RC stick driving (same arcade mapping as `manual-control`).
+- Hold MANUAL for >=1 s, then flip CH5 to AUTO: the rover runs ONE onboard
+  ㄹ pattern -- timed lanes (forward / reverse), IMU-feedback ~90 deg pivots,
+  and step-overs, mirroring the station planner's turn_step_turn corners.
+- Flip back to MANUAL at any moment: motors stop on the next loop tick and
+  stick control resumes. RC failsafe also stops and disarms.
+- Booting with the switch already in AUTO never moves (arming requires a
+  fresh MANUAL period). Each MANUAL->AUTO transition runs the pattern once.
+
+```bash
+# 1.8 m lanes / 0.6 m step at the calibrated ~0.43 m/s forward speed.
+bash scripts/run_physical_path_planner.sh rc-auto-pattern \
+  --lanes 4 --lane-ms 4200 --step-ms 1400 \
+  --forward-a 0.30 --reverse-a -0.30 \
+  --turn-b-left 0.24 --turn-b-right -0.12 \
+  --turn-target-deg 90 --turn-tol-deg 8 \
+  --duration-s 20 \
+  --out-dir outputs/physical_path_planning/rc_auto_pattern
+```
+
+The pattern is dead-reckoned (timed lanes + IMU pivots, no GPS), so expect
+drift to grow over lanes; re-run `manual-control` or any supervised mode to
+return to the previous firmware behavior. Pattern geometry is baked at upload
+-- re-run the command with new values to change it.
 
 ## Rectangle Geometry
 

@@ -17,6 +17,7 @@ Modes:
   rc-input-diagnose     Read-only receiver input/channel diagnostic. No motors.
   manual-rc             Upload and validate manual RC recovery.
   manual-control        Upload and monitor PPM physical manual control.
+  rc-auto-pattern       Upload untethered firmware: CH5 MANUAL=RC sticks, AUTO=onboard pattern.
   station-hw-diagnose   Read-only physical station hardware link diagnostic.
   station-hw-manual     Deprecated serial-frame monitor; use manual-control for PPM.
   usb-pulse-test        Laptop USB bounded A/B pulse motor validation.
@@ -437,7 +438,7 @@ exec_cli_with_port() {
 }
 
 case "$MODE" in
-  preview|inspect-plan|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|set-motion-calibration|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
+  preview|inspect-plan|auto-relative-preview|calibrate-turn|diagnose|gps-wait|rc-input-diagnose|manual-rc|manual-control|rc-auto-pattern|station-hw-diagnose|station-hw-manual|usb-pulse-test|usb-drive-live|tune-motion|set-motion-calibration|reset-motion-calibration|calibration-check|station-drive|station-manual|guarded-pulse-ready)
     exec_cli
     ;;
   run|execute-plan|auto-relative-run|align-heading)
