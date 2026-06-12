@@ -1186,3 +1186,54 @@ Two distinct mechanisms, do not conflate them:
    controls feel mushy = electrical/thermal, not the control loop. Field
    rules: shade the electronics, power off between sessions, verify battery
    voltage/charge before blaming firmware, let it cool before re-testing.
+
+## Drive-Time B Response Is INVERTED vs Stationary Pivots (Field-Proven 2026-06-12)
+
+Tethered monitor capture of the first heading-hold run is unambiguous and
+MUST be respected by any future motion code:
+
+- Both pivots converged with the pivot-domain sign (absolute heading errors
+  -39.6 -> +2.5 and -50.6 -> -0.6 deg): stationary, +B raises yaw.
+- All three driven segments diverged under the SAME sign: lane heading error
+  accelerated -0.3 -> -3.8 -> -24.9 -> -55.7 -> -99.2 -> -148.9 deg while the
+  correction grew to saturation (B=-0.25), i.e. while TRANSLATING the yaw
+  response to B is OPPOSITE (forward A=+0.3 and reverse A=-0.3 both showed
+  yaw_rate ~ -c*B). The runaway also explains motor saturation (left=0.55),
+  battery strain, and "lanes bowing" reports.
+
+Consequences in code: RC_AUTO_PATTERN drives lanes with
+`RC_AUTO_PATTERN_DRIVE_STEER_SIGN` (default -1) applied to the heading-hold
+feedback only; pivots keep the pivot-domain sign. A lane aborts early past
+`RC_AUTO_PATTERN_DRIVE_ABORT_ERR_DEG` (60) as an anti-donut safety net. The
+station's stop_correct_go is unaffected: it corrects heading while STOPPED
+(pivot domain). If a future surface/drivetrain change restores the normal
+relation, re-upload with `--drive-steer-sign 1` -- decide from the monitor's
+`heading_err_deg` trend (must shrink during DRIVE), never from theory.
+
+## Gyro Bias Drifts With Temperature; Stationary Re-Zero Added (2026-06-12)
+
+After a long hot session the boot-time gyro bias was off enough to show
+-1.3 deg/s of yaw drift while imu_stationary=true (log tail: 161.4 -> 158.6
+over ~2 s stationary). Over a 60 s pattern that is tens of degrees of fake
+heading error, which corrupts "90 deg" corners progressively -- matching the
+"turns are not really 90" and "fine at first, degrades over time" reports.
+Fix: whenever the body is measurably stationary for >=700 ms, all three gyro
+bias estimates relax toward the current raw readings (alpha 0.01 per 20 ms
+sample, tau ~2 s). The pattern's inter-step pause default rose to 800 ms so
+every step boundary provides a re-zero window. Square corners additionally
+use coast-compensated stops (`RC_AUTO_PATTERN_TURN_COAST_S`) plus
+settle-verify retries (`RC_AUTO_PATTERN_TURN_SETTLE_RETRIES`): after the
+pause, the settled heading is re-checked and the same pivot re-runs (bounded)
+if outside tolerance.
+
+## Printed PPM Ages Can Show 4294967xxx / False rc_input_detected=false (Fixed 2026-06-12)
+
+`(bool)Serial` inside the print gate can sleep ~10 ms on SAMD cores; ages
+computed against a pre-gate `millis()` then see ISR-stamped frame times from
+the "future" and underflow (ppm_age_ms=4294967288 = -8 ms), printing
+rc_input_detected=false / PPM_EDGES_NO_VALID_FRAME on alternate lines while
+control (which reads its own clock) was healthy the whole time. The debug
+printers now re-read millis() after the gate. Also seen and benign-but-noted:
+ppm_min_width_us=2 (a real electrical glitch on D6 rejected by the decoder)
+and loop_dt_max_ms alternating ~15/~25 ms tethered (status line cost plus the
+once-per-second gate refresh).

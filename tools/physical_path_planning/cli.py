@@ -2386,6 +2386,10 @@ def rc_auto_pattern_firmware_flags(
     heading_kp: float = 0.015,
     heading_hold_max_b: float = 0.25,
     drive_b_trim: float = 0.0,
+    drive_steer_sign: float = -1.0,
+    drive_abort_err_deg: float = 60.0,
+    turn_coast_s: float = 0.15,
+    turn_settle_retries: int = 2,
     rc_loss_grace_ms: int = 1500,
     mode_channel_index: int | None = 4,
     profile: str = MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
@@ -2425,6 +2429,10 @@ def rc_auto_pattern_firmware_flags(
         f"-DRC_AUTO_PATTERN_HEADING_KP={float(heading_kp)}f "
         f"-DRC_AUTO_PATTERN_HEADING_MAX_B={float(heading_hold_max_b)}f "
         f"-DRC_AUTO_PATTERN_DRIVE_B_TRIM={float(drive_b_trim)}f "
+        f"-DRC_AUTO_PATTERN_DRIVE_STEER_SIGN={float(drive_steer_sign)}f "
+        f"-DRC_AUTO_PATTERN_DRIVE_ABORT_ERR_DEG={float(drive_abort_err_deg)} "
+        f"-DRC_AUTO_PATTERN_TURN_COAST_S={float(turn_coast_s)}f "
+        f"-DRC_AUTO_PATTERN_TURN_SETTLE_RETRIES={int(turn_settle_retries)} "
         f"-DRC_AUTO_PATTERN_RC_LOSS_GRACE_MS={int(rc_loss_grace_ms)}"
     )
 
@@ -2458,6 +2466,10 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
         heading_kp=args.heading_kp,
         heading_hold_max_b=args.heading_hold_max_b,
         drive_b_trim=args.drive_b_trim,
+        drive_steer_sign=args.drive_steer_sign,
+        drive_abort_err_deg=args.drive_abort_err_deg,
+        turn_coast_s=args.turn_coast_s,
+        turn_settle_retries=args.turn_settle_retries,
         rc_loss_grace_ms=args.rc_loss_grace_ms,
         mode_channel_index=args.mode_channel_index,
     )
@@ -2498,8 +2510,17 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
         "heading_kp": args.heading_kp,
         "heading_hold_max_b": args.heading_hold_max_b,
         "drive_b_trim": args.drive_b_trim,
+        "drive_steer_sign": args.drive_steer_sign,
+        "drive_abort_err_deg": args.drive_abort_err_deg,
+        "turn_coast_s": args.turn_coast_s,
+        "turn_settle_retries": args.turn_settle_retries,
         "rc_loss_grace_ms": args.rc_loss_grace_ms,
         "heading_frame": "absolute body-heading chain anchored at each AUTO start",
+        "drive_steer_sign_note": (
+            "yaw response to B while translating is inverted vs stationary "
+            "pivots on this drivetrain (field log 2026-06-12); -1 flips lane "
+            "feedback only"
+        ),
         "arming_rule": "fresh MANUAL >=1s then AUTO; one run per transition; MANUAL stops instantly",
         "rc_loss_rule": (
             "RC dropout <= grace pauses the run (resumes mid-step); longer dropout "
@@ -6186,7 +6207,15 @@ def build_parser() -> argparse.ArgumentParser:
     rc_auto_p.add_argument("--turn-target-deg", type=float, default=90.0)
     rc_auto_p.add_argument("--turn-tol-deg", type=float, default=8.0)
     rc_auto_p.add_argument("--turn-timeout-ms", type=int, default=15000)
-    rc_auto_p.add_argument("--pause-ms", type=int, default=500)
+    rc_auto_p.add_argument("--pause-ms", type=int, default=800,
+                           help="stop-settle pause between steps; >=800 ms also "
+                           "gives the stationary gyro re-zero a window")
+    rc_auto_p.add_argument("--turn-coast-s", type=float, default=0.15,
+                           help="pivot stops early by (yaw rate x this) so coast "
+                           "does not carry it past the target")
+    rc_auto_p.add_argument("--turn-settle-retries", type=int, default=2,
+                           help="after the pause, re-run the same pivot up to N "
+                           "times if the settled heading is outside tolerance")
     rc_auto_p.add_argument("--heading-kp", type=float, default=0.015,
                            help="straight-lane heading-hold gain: B per degree of "
                            "heading error vs the planned absolute heading")
@@ -6195,6 +6224,15 @@ def build_parser() -> argparse.ArgumentParser:
     rc_auto_p.add_argument("--drive-b-trim", type=float, default=0.0,
                            help="constant B added on straights to cancel a known "
                            "mechanical veer (negative counters a leftward pull)")
+    rc_auto_p.add_argument("--drive-steer-sign", type=float, default=-1.0,
+                           choices=[-1.0, 1.0],
+                           help="sign of the lane heading-hold feedback; -1 "
+                           "(default) matches this drivetrain, whose yaw "
+                           "response to B while DRIVING is inverted vs a "
+                           "stationary pivot (2026-06-12 field log)")
+    rc_auto_p.add_argument("--drive-abort-err-deg", type=float, default=60.0,
+                           help="end a lane early if its heading error diverges "
+                           "past this many degrees (anti-donut safety net)")
     rc_auto_p.add_argument("--rc-loss-grace-ms", type=int, default=1500,
                            help="RC dropout shorter than this pauses (then resumes) "
                            "a running pattern instead of resetting it")

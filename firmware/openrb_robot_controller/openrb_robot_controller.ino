@@ -108,8 +108,24 @@
 #ifndef RC_AUTO_PATTERN_TURN_TIMEOUT_MS
 #define RC_AUTO_PATTERN_TURN_TIMEOUT_MS 15000
 #endif
+// 800 ms lets the body settle AND gives the stationary gyro re-zero a window
+// at every step boundary, so yaw drift cannot accumulate across the pattern.
 #ifndef RC_AUTO_PATTERN_PAUSE_MS
-#define RC_AUTO_PATTERN_PAUSE_MS 500
+#define RC_AUTO_PATTERN_PAUSE_MS 800
+#endif
+// Pivot coast compensation: command the stop early by (yaw rate x this many
+// seconds) so a fast pivot (~80 deg/s measured on the right turn) does not
+// coast past the target after motors stop.
+#ifndef RC_AUTO_PATTERN_TURN_COAST_S
+#define RC_AUTO_PATTERN_TURN_COAST_S 0.15f
+#endif
+// Settle-verify: after a pivot stops and the pause elapses, the yaw is read
+// again while fully stationary; if the body settled outside tolerance the
+// SAME turn re-runs (up to this many times) before the pattern advances.
+// This is what makes corners physically ~90 deg instead of "tolerance plus
+// coast plus drift".
+#ifndef RC_AUTO_PATTERN_TURN_SETTLE_RETRIES
+#define RC_AUTO_PATTERN_TURN_SETTLE_RETRIES 2
 #endif
 #ifndef RC_AUTO_PATTERN_ARM_MANUAL_MS
 #define RC_AUTO_PATTERN_ARM_MANUAL_MS 1000
@@ -123,6 +139,22 @@
 #endif
 #ifndef RC_AUTO_PATTERN_DRIVE_B_TRIM
 #define RC_AUTO_PATTERN_DRIVE_B_TRIM 0.0f
+#endif
+// Sign of the heading-hold feedback while TRANSLATING. Field log 2026-06-12:
+// on this drivetrain the yaw response to B while driving is INVERTED relative
+// to a stationary pivot (pivots converged with the pivot-domain sign, while
+// the same sign during lanes produced a positive-feedback runaway: error
+// -0.3 -> -3.8 -> -24.9 -> -55.7 -> -99.2 deg as B saturated). Default -1
+// flips the lane feedback only; pivots are untouched.
+#ifndef RC_AUTO_PATTERN_DRIVE_STEER_SIGN
+#define RC_AUTO_PATTERN_DRIVE_STEER_SIGN -1.0f
+#endif
+// Safety net: if a lane's heading error still diverges past this many degrees
+// (wrong steer sign for the surface, dragged wheel, shove), end the drive step
+// early instead of carving a donut; the next pivot re-aims at the absolute
+// target heading.
+#ifndef RC_AUTO_PATTERN_DRIVE_ABORT_ERR_DEG
+#define RC_AUTO_PATTERN_DRIVE_ABORT_ERR_DEG 60.0
 #endif
 // Brief RC dropouts pause the run (motors stopped) instead of killing it;
 // only a loss longer than this grace disarms the pattern.
@@ -2924,6 +2956,13 @@ void debugPrintStatus() {
   if (!usbDebugPrintAllowed(now)) {
     return;
   }
+  // Re-read the clock AFTER the host gate: its (bool)Serial check can cost
+  // ~10 ms on SAMD cores, during which the PPM ISR keeps stamping frames.
+  // Computing ages against the stale 'now' printed frame timestamps from the
+  // "future" (e.g. ppm_age_ms=4294967288 = -8) and spurious
+  // rc_input_detected=false lines. Display only -- control reads its own
+  // clock -- but it must not mislead field debugging.
+  now = millis();
 
   uint16_t steeringUs = 0;
   uint16_t throttleUs = 0;
@@ -3890,6 +3929,10 @@ double imuAccelMagG = 0.0, imuGyroMagDps = 0.0;
 double imuAccelLsbPerGActive = IMU_ACCEL_LSB_PER_G_VALUE;
 double imuGyroLsbPerDpsActive = IMU_GYRO_LSB_PER_DPS_VALUE;
 bool imuStationaryFlag = false;
+// Continuous stationary gyro re-zero (temperature drift compensation).
+constexpr uint32_t IMU_BIAS_REZERO_STATIONARY_MS = 700;
+constexpr double IMU_BIAS_REZERO_ALPHA = 0.01;  // per 20 ms sample, tau ~2 s
+uint32_t imuStationarySinceMs = 0;
 bool imuCalibratingFlag = false;
 bool imuCalibratedFlag = false;
 uint32_t imuCalStartMs = 0;
@@ -4207,6 +4250,11 @@ void imuControllerUpdate(uint32_t now) {
   }
 
   imuStationaryFlag = (imuGyroMagDps < 2.0) && (fabs(imuAccelMagG - 1.0) < 0.12);
+  if (!imuStationaryFlag) {
+    imuStationarySinceMs = 0;
+  } else if (imuStationarySinceMs == 0) {
+    imuStationarySinceMs = now;
+  }
 
   if (imuCalibratingFlag) {
     imuGyroSumX += imuGyroRawX;
@@ -4224,6 +4272,19 @@ void imuControllerUpdate(uint32_t now) {
   }
 
   if (imuCalibratedFlag) {
+    // Temperature drift compensation: the boot-time gyro bias shifts as the
+    // board heats up (field log 2026-06-12: -1.3 deg/s of stationary yaw
+    // drift after a long hot session). Whenever the body has been measurably
+    // stationary for a sustained window, all three bias estimates relax
+    // toward the current raw readings, keeping integrated yaw drift near
+    // zero across temperature changes. Real motion always exceeds the
+    // 2 deg/s stationary gate, so driving never trains the bias.
+    if (imuStationarySinceMs != 0 &&
+        now - imuStationarySinceMs >= IMU_BIAS_REZERO_STATIONARY_MS) {
+      imuGyroBiasX += IMU_BIAS_REZERO_ALPHA * ((double)imuGyroRawX - imuGyroBiasX);
+      imuGyroBiasY += IMU_BIAS_REZERO_ALPHA * ((double)imuGyroRawY - imuGyroBiasY);
+      imuGyroBiasZ += IMU_BIAS_REZERO_ALPHA * ((double)imuGyroRawZ - imuGyroBiasZ);
+    }
     if (imuHaveLastSample) {
       double dtS = (nowMicros - imuLastSampleMicros) / 1000000.0;
       double rate = (imuGyroAxisRaw(IMU_YAW_AXIS_VALUE) - imuGyroAxisBias(IMU_YAW_AXIS_VALUE)) /
@@ -4924,6 +4985,7 @@ void pathFollowingDebugPrint(bool rcValid, bool autoSwitchOn, uint16_t steeringU
   if (!usbDebugPrintAllowed(now)) {
     return;
   }
+  now = millis();  // see debugPrintStatus: gate may sleep ~10 ms
 
   Serial.print(F("USBDBG "));
   Serial.print(FIRMWARE_ID);
@@ -5329,12 +5391,21 @@ float rcAutoPatternTurnScale = 1.0f;
 uint32_t rcAutoPatternTurnCheckMs = 0;
 double rcAutoPatternTurnCheckYaw = 0.0;
 int8_t rcAutoPatternTurnDir = 0;  // -1 right, +1 left, 0 not yet chosen
+// Live pivot-rate estimate for coast-compensated stops, and the bounded
+// settle-verify retry counter (see the PAUSE branch).
+double rcAutoPatternTurnRateDps = 0.0;
+double rcAutoPatternTurnRateYaw = 0.0;
+uint32_t rcAutoPatternTurnRateMs = 0;
+int rcAutoPatternTurnRetries = 0;
 
 void rcAutoPatternResetStepState(uint32_t now) {
   rcAutoPatternTurnScale = 1.0f;
   rcAutoPatternTurnCheckMs = now;
   rcAutoPatternTurnCheckYaw = imuRelativeYawDeg;
   rcAutoPatternTurnDir = 0;
+  rcAutoPatternTurnRateDps = 0.0;
+  rcAutoPatternTurnRateYaw = imuRelativeYawDeg;
+  rcAutoPatternTurnRateMs = now;
 }
 
 int rcAutoPatternPushDrive(int index, float a, uint32_t ms, float bodyTargetDeg) {
@@ -5512,6 +5583,7 @@ void rcAutoPatternTick(uint32_t now) {
     rcAutoPatternPhase = 0;
     rcAutoPatternStepStartMs = now;
     rcAutoPatternResetStepState(now);
+    rcAutoPatternTurnRetries = 0;
     // The pattern frame is re-anchored HERE: every MANUAL -> AUTO flip
     // recomputes the steps and restarts from step 0 at the current body
     // pose. A previous partial run leaves nothing behind.
@@ -5540,10 +5612,31 @@ void rcAutoPatternTick(uint32_t now) {
   if (rcAutoPatternPhase == 1) {
     motorStop();
     if (now - rcAutoPatternStepStartMs >= (uint32_t)(RC_AUTO_PATTERN_PAUSE_MS)) {
+      // Settle-verify for pivots: with the body fully stopped and settled,
+      // re-read the absolute heading error. Coast or a shove can leave the
+      // body outside tolerance even though the live loop saw "reached" --
+      // re-run the SAME turn (bounded retries) before advancing, so corners
+      // end square instead of "tolerance + coast" off.
+      RcAutoPatternStep &settled = rcAutoPatternSteps[rcAutoPatternStepIndex];
+      if (settled.type == 1 &&
+          rcAutoPatternTurnRetries < (int)(RC_AUTO_PATTERN_TURN_SETTLE_RETRIES)) {
+        double settledErr = imuWrap180(rcAutoPatternRunStartYaw +
+                                       (double)settled.bodyTargetDeg - imuRelativeYawDeg);
+        double settledErrAbs = settledErr < 0.0 ? -settledErr : settledErr;
+        if (settledErrAbs > (double)(RC_AUTO_PATTERN_TURN_TOL_DEG)) {
+          rcAutoPatternTurnRetries++;
+          rcAutoPatternPhase = 0;
+          rcAutoPatternStepStartMs = now;
+          rcAutoPatternResetStepState(now);
+          rcAutoPatternStatusPrint(now, "TURN_SETTLE_RETRY");
+          return;
+        }
+      }
       rcAutoPatternStepIndex++;
       rcAutoPatternPhase = 0;
       rcAutoPatternStepStartMs = now;
       rcAutoPatternResetStepState(now);
+      rcAutoPatternTurnRetries = 0;
     }
     rcAutoPatternStatusPrint(now, "PAUSE");
     return;
@@ -5552,8 +5645,23 @@ void rcAutoPatternTick(uint32_t now) {
     // Heading-hold straight: the planned body heading for this step is
     // absolute (run-start yaw + bodyTargetDeg), and B counters any veer so
     // the lane stays straight instead of drifting left/right open-loop.
+    // DRIVE_STEER_SIGN flips the feedback for drivetrains whose yaw response
+    // to B while translating is inverted relative to a stationary pivot
+    // (this rover, per the 2026-06-12 field log).
     double headingErrDeg = imuWrap180(rcAutoPatternRunStartYaw +
                                       (double)step.bodyTargetDeg - imuRelativeYawDeg);
+    double headingErrAbs = headingErrDeg < 0.0 ? -headingErrDeg : headingErrDeg;
+    if (headingErrAbs >= (double)(RC_AUTO_PATTERN_DRIVE_ABORT_ERR_DEG)) {
+      // Safety net: the lane is diverging (wrong sign for this surface, a
+      // dragged wheel, a shove). Stop the lane early; the next pivot or the
+      // settle logic re-aims at the absolute target instead of carving a
+      // donut at full throttle.
+      motorStopWithSource("RC_AUTO_PATTERN");
+      rcAutoPatternPhase = 1;
+      rcAutoPatternStepStartMs = now;
+      rcAutoPatternStatusPrint(now, "DRIVE_ABORT_HEADING");
+      return;
+    }
     float holdB = (float)(headingErrDeg * (double)(RC_AUTO_PATTERN_HEADING_KP));
     float maxHoldB = (float)(RC_AUTO_PATTERN_HEADING_MAX_B);
     if (holdB > maxHoldB) {
@@ -5562,7 +5670,8 @@ void rcAutoPatternTick(uint32_t now) {
     if (holdB < -maxHoldB) {
       holdB = -maxHoldB;
     }
-    holdB += (float)(RC_AUTO_PATTERN_DRIVE_B_TRIM);
+    holdB = (float)(RC_AUTO_PATTERN_DRIVE_STEER_SIGN) * holdB +
+            (float)(RC_AUTO_PATTERN_DRIVE_B_TRIM);
     applyPhysicalABManualEquivalentCommandWithSource(step.a, holdB, "RC_AUTO_PATTERN");
     if (now - rcAutoPatternStepStartMs >= step.ms) {
       motorStopWithSource("RC_AUTO_PATTERN");
@@ -5579,7 +5688,21 @@ void rcAutoPatternTick(uint32_t now) {
   double remaining = imuWrap180(rcAutoPatternRunStartYaw +
                                 (double)step.bodyTargetDeg - imuRelativeYawDeg);
   double remainingAbs = remaining < 0.0 ? -remaining : remaining;
-  bool reached = remainingAbs <= (double)(RC_AUTO_PATTERN_TURN_TOL_DEG);
+  // Track the live pivot rate (EWMA over >=50 ms windows) so the stop can be
+  // commanded EARLY by the expected coast: a fast pivot (~80 deg/s measured)
+  // otherwise slides well past the target after the motors stop.
+  if (now - rcAutoPatternTurnRateMs >= 50) {
+    double windowS = (now - rcAutoPatternTurnRateMs) / 1000.0;
+    double instDps =
+        imuWrap180(imuRelativeYawDeg - rcAutoPatternTurnRateYaw) / windowS;
+    rcAutoPatternTurnRateDps = 0.5 * rcAutoPatternTurnRateDps + 0.5 * instDps;
+    rcAutoPatternTurnRateMs = now;
+    rcAutoPatternTurnRateYaw = imuRelativeYawDeg;
+  }
+  double coastDeg = rcAutoPatternTurnRateDps < 0.0 ? -rcAutoPatternTurnRateDps
+                                                   : rcAutoPatternTurnRateDps;
+  coastDeg *= (double)(RC_AUTO_PATTERN_TURN_COAST_S);
+  bool reached = remainingAbs <= (double)(RC_AUTO_PATTERN_TURN_TOL_DEG) + coastDeg;
   bool timedOut = now - rcAutoPatternStepStartMs >= step.ms;
   if (reached || timedOut) {
     motorStopWithSource("RC_AUTO_PATTERN");

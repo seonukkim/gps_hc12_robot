@@ -240,20 +240,31 @@ RC transmitter after the cable is removed:
   resumes. A longer outage resets and disarms; recovery then requires the
   fresh MANUAL(>=1 s) -> AUTO sequence again, which restarts from step 0.
 
-Heading control (why lanes stay straight):
+Heading control (why lanes stay straight and corners end square):
 
 - Every step carries an ABSOLUTE body heading target chained from the yaw
   captured at AUTO start (`RUN_START` in the log). Lane veer and corner
   residue therefore cannot accumulate across the pattern.
-- Straights run heading-hold: `B = clamp(heading_error_deg * --heading-kp,
-  +/- --heading-hold-max-b) + --drive-b-trim`, re-evaluated every loop tick,
-  for forward AND reverse lanes. A rover that used to bow a lane 60 deg to
-  the left now steers continuously back to the planned heading.
-- Pivots aim at the absolute target heading and pick their direction from
-  the live remaining angle each tick, so an overshoot (or a shove) turns
-  back instead of stopping early with a permanent error. Stall escalation
-  still grows B by 30% per 1.5 s without ~5 deg of progress (cap 0.6) and
-  resets to base authority whenever the turn direction flips.
+- Straights run heading-hold: `B = --drive-steer-sign *
+  clamp(heading_error_deg * --heading-kp, +/- --heading-hold-max-b)
+  + --drive-b-trim`, re-evaluated every loop tick, forward AND reverse.
+  `--drive-steer-sign` defaults to -1 because this drivetrain's yaw response
+  to B while TRANSLATING is inverted relative to a stationary pivot
+  (field-proven 2026-06-12: pivots converged, lanes ran away under the pivot
+  sign). Watch `heading_err_deg` during DRIVE: it must shrink. A lane whose
+  error still diverges past `--drive-abort-err-deg` (60) stops early
+  (`DRIVE_ABORT_HEADING`) instead of carving a donut.
+- Pivots aim at the absolute target heading, pick their direction from the
+  live remaining angle each tick (overshoot turns back), stop EARLY by the
+  expected coast (`--turn-coast-s` x measured yaw rate), and after the
+  settle pause re-check the heading: if outside tolerance the SAME pivot
+  re-runs up to `--turn-settle-retries` times (`TURN_SETTLE_RETRY`). Stall
+  escalation still grows B by 30% per 1.5 s without ~5 deg of progress
+  (cap 0.6) and resets whenever the turn direction flips.
+- Gyro bias re-zeroes itself whenever the body is stationary >=0.7 s
+  (temperature drift compensation; -1.3 deg/s was measured after a long hot
+  session). The default `--pause-ms 800` makes every step boundary a re-zero
+  window, so "fine at first, drifts later" no longer applies.
 
 ```bash
 # 1.8 m lanes / 0.6 m step at the calibrated ~0.43 m/s forward speed.
@@ -263,7 +274,8 @@ bash scripts/run_physical_path_planner.sh rc-auto-pattern \
   --turn-b-left 0.24 --turn-b-right -0.12 \
   --turn-target-deg 90 --turn-tol-deg 8 \
   --heading-kp 0.015 --heading-hold-max-b 0.25 \
-  --duration-s 20 \
+  --pause-ms 800 \
+  --duration-s 30 \
   --out-dir outputs/physical_path_planning/rc_auto_pattern
 ```
 
