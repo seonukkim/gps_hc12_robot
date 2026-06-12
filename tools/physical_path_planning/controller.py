@@ -1702,6 +1702,9 @@ def build_stop_correct_go_summary(
             "connector_overshoot_count": sum(
                 1 for r in connector_rows if r.get("turn_overshoot") is True
             ),
+            "connector_handed_off_count": sum(
+                1 for r in connector_rows if r.get("turn_handed_off") is True
+            ),
         }
     )
     if turn_calibration_angles:
@@ -1858,6 +1861,7 @@ def run_stop_correct_go(
             remaining_angle = requested_angle
             turn_completed = False
             turn_overshoot = False
+            turn_handed_off = False
             budget: int | None = fixed_budget
             chunk_index = 0
             while True:
@@ -1925,6 +1929,17 @@ def run_stop_correct_go(
                     # heading correction (which picks its own direction) clean up.
                     turn_overshoot = (
                         not turn_completed and remaining_angle * requested_angle < 0.0
+                    )
+                    # Hand-off guard for coarse/variable pulses: when the
+                    # remaining angle is under half of one pulse's expected
+                    # rotation, another full pulse would land FARTHER from the
+                    # corner than we already are. Stop and let the next lane's
+                    # finer IMU heading correction own the small remainder.
+                    turn_handed_off = (
+                        not turn_completed
+                        and not turn_overshoot
+                        and per_pulse is not None
+                        and abs(remaining_angle) < per_pulse / 2.0
                     )
                     turn_measured = True
                 else:
@@ -2007,6 +2022,7 @@ def run_stop_correct_go(
                         "turn_measured_by_imu": turn_measured,
                         "connector_turn_completed": turn_completed,
                         "turn_overshoot": turn_overshoot,
+                        "turn_handed_off": turn_handed_off,
                     }
                 )
                 rows.append(row)
@@ -2018,7 +2034,12 @@ def run_stop_correct_go(
                 if manual_after_pulse:
                     abort_reason = MANUAL_SWITCH_ABORT_REASON
                     break
-                if turn_completed or turn_overshoot or chunk_index >= int(budget or 1):
+                if (
+                    turn_completed
+                    or turn_overshoot
+                    or turn_handed_off
+                    or chunk_index >= int(budget or 1)
+                ):
                     break
             if abort_reason != "NONE":
                 break

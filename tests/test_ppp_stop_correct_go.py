@@ -752,3 +752,56 @@ def test_connector_overshoot_stops_same_direction_pulsing() -> None:
         abort_reason=abort_reason,
     )
     assert summary["connector_overshoot_count"] == 1
+
+
+def test_connector_hands_off_small_remainder_instead_of_coarse_pulse() -> None:
+    # Right-turn field data: one ~90 deg-class pulse with 2-3x variance. When a
+    # pulse lands close (remaining 12 deg < half of the 30 deg per-pulse
+    # angle), firing another full pulse would end FARTHER from the corner, so
+    # the connector stops and hands the remainder to lane heading correction.
+    handle = FakeSerial(
+        [
+            _hb(35.0, 129.0, imu_yaw_deg=0.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=50.0),  # strong-ish pulse
+            _hb(35.0, 129.0, imu_yaw_deg=50.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=78.0),  # remaining 12 < 30/2
+        ]
+    )
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[_left_connector()],
+        resolved_calibration=_small_left_turn_calibration(30.0),
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+    )
+
+    assert abort_reason == "NONE"
+    connector_rows = [r for r in rows if r.get("phase") == "connector"]
+    assert len(connector_rows) == 2
+    last = connector_rows[-1]
+    assert last["turn_handed_off"] is True
+    assert last["connector_turn_completed"] is False
+    assert last["turn_overshoot"] is False
+    assert float(last["remaining_turn_error_deg"]) == 12.0
+    summary = controller.build_stop_correct_go_summary(
+        connector_rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        goal_distance_m=1.11,
+        fallback_to_repeated_pulses=False,
+        sensor_trust_mode="imu_gps_first",
+        allow_calibration_fallback=True,
+        abort_reason=abort_reason,
+    )
+    assert summary["connector_handed_off_count"] == 1
