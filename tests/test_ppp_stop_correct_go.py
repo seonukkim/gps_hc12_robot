@@ -700,3 +700,55 @@ def test_mission_heading_holds_body_heading_on_backward_lane() -> None:
     assert rows[0]["correction_success"] is True
     move_cmds = [w for w in handle.writes if w.startswith("USB_PULSE_TEST_CMD")]
     assert all("a=-0.080" in w for w in move_cmds)  # reverse-driven chunks
+
+
+def test_connector_overshoot_stops_same_direction_pulsing() -> None:
+    # High-variance motors can blow past the corner in one pulse (field data:
+    # 1.6-43 deg from the same command). Once the measured remaining error
+    # flips sign, pulsing the same direction again must stop; the next lane's
+    # heading correction owns the cleanup.
+    handle = FakeSerial(
+        [
+            _hb(35.0, 129.0, imu_yaw_deg=0.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=60.0),  # strong pulse
+            _hb(35.0, 129.0, imu_yaw_deg=60.0),
+            *_PULSE_OK,
+            _hb(35.0, 129.0, imu_yaw_deg=115.0),  # overshoot: 25 past the 90 target
+        ]
+    )
+    rows, _raw, abort_reason = controller.run_stop_correct_go(
+        handle,
+        segments=[_left_connector()],
+        resolved_calibration=_small_left_turn_calibration(30.0),
+        start_lat=35.0,
+        start_lon=129.0,
+        start_yaw_deg=None,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        settle_after_move_ms=0,
+        telemetry_stabilize_ms=0,
+        event_timeout_s=1.0,
+        heartbeat_timeout_s=1.0,
+    )
+
+    assert abort_reason == "NONE"
+    connector_rows = [r for r in rows if r.get("phase") == "connector"]
+    assert len(connector_rows) == 2  # budget was 5 but the overshoot stops it
+    last = connector_rows[-1]
+    assert last["turn_overshoot"] is True
+    assert last["connector_turn_completed"] is False
+    assert float(last["remaining_turn_error_deg"]) == -25.0
+    summary = controller.build_stop_correct_go_summary(
+        connector_rows,
+        start_lat=35.0,
+        start_lon=129.0,
+        goal_lat=35.0000100,
+        goal_lon=129.0,
+        goal_distance_m=1.11,
+        fallback_to_repeated_pulses=False,
+        sensor_trust_mode="imu_gps_first",
+        allow_calibration_fallback=True,
+        abort_reason=abort_reason,
+    )
+    assert summary["connector_overshoot_count"] == 1

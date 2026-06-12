@@ -5007,6 +5007,7 @@ def _write_stop_correct_go_artifacts(
             "remaining_turn_error_deg": row.get("remaining_turn_error_deg"),
             "turn_measured_by_imu": row.get("turn_measured_by_imu"),
             "connector_turn_completed": row.get("connector_turn_completed"),
+            "turn_overshoot": row.get("turn_overshoot"),
         }
         for row in cycle_rows
     ]

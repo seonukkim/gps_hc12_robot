@@ -1354,7 +1354,12 @@ def run_controller(
                 if connector_yaw_ref is not None and yaw_after_turn is not None:
                     applied_turn = geometry.wrap_deg(yaw_after_turn - connector_yaw_ref)
                     remaining_turn = geometry.wrap_deg(connector_requested_angle - applied_turn)
-                    if abs(remaining_turn) <= DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG:
+                    # Done within tolerance, or overshot: never keep pulsing the
+                    # same direction past the corner.
+                    if (
+                        abs(remaining_turn) <= DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG
+                        or remaining_turn * connector_requested_angle < 0.0
+                    ):
                         break
             progress = telemetry._optional_float(row.get("along_track_progress_m")) or 0.0
             if str(segment["segment_type"]).endswith("_lane") and progress >= float(
@@ -1694,6 +1699,9 @@ def build_stop_correct_go_summary(
             "connector_imu_measured_pulse_count": sum(
                 1 for r in connector_rows if r.get("turn_measured_by_imu") is True
             ),
+            "connector_overshoot_count": sum(
+                1 for r in connector_rows if r.get("turn_overshoot") is True
+            ),
         }
     )
     if turn_calibration_angles:
@@ -1849,6 +1857,7 @@ def run_stop_correct_go(
             applied_delta = 0.0
             remaining_angle = requested_angle
             turn_completed = False
+            turn_overshoot = False
             budget: int | None = fixed_budget
             chunk_index = 0
             while True:
@@ -1910,6 +1919,13 @@ def run_stop_correct_go(
                     applied_delta = geometry.wrap_deg(yaw - connector_yaw_ref)
                     remaining_angle = geometry.wrap_deg(requested_angle - applied_delta)
                     turn_completed = abs(remaining_angle) <= abs(connector_turn_tolerance_deg)
+                    # Overshoot guard: motors with high pulse-to-pulse variance can
+                    # blow past the corner; pulsing further in the SAME direction
+                    # would only widen the error, so stop and let the next lane's
+                    # heading correction (which picks its own direction) clean up.
+                    turn_overshoot = (
+                        not turn_completed and remaining_angle * requested_angle < 0.0
+                    )
                     turn_measured = True
                 else:
                     if per_pulse is not None:
@@ -1990,6 +2006,7 @@ def run_stop_correct_go(
                         "remaining_turn_error_deg": telemetry._fmt(remaining_angle),
                         "turn_measured_by_imu": turn_measured,
                         "connector_turn_completed": turn_completed,
+                        "turn_overshoot": turn_overshoot,
                     }
                 )
                 rows.append(row)
@@ -2001,7 +2018,7 @@ def run_stop_correct_go(
                 if manual_after_pulse:
                     abort_reason = MANUAL_SWITCH_ABORT_REASON
                     break
-                if turn_completed or chunk_index >= int(budget or 1):
+                if turn_completed or turn_overshoot or chunk_index >= int(budget or 1):
                     break
             if abort_reason != "NONE":
                 break
