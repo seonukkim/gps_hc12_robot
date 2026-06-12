@@ -56,19 +56,23 @@ connector_turn(제자리 ~90°) -> step_lane(간격만큼 직진/후진) -> conn
 - 레거시 플랜(`path_connector` 단일 세그먼트)도 그대로 실행 가능.
   새 플랜을 옛 방식으로 만들려면 `--connector-style single_turn`.
 
-### 4.2 connector 회전 = 연속 IMU 폐루프 피벗 (live-drive)
+### 4.2 connector/보정 회전 = 버스트→정지→측정 사이클
 
-- IMU yaw가 있으면 코너는 **연속 회전 1회**: 보정 회전과 같은 live-drive
-  SET/STOP 메커니즘으로, 측정 yaw 변화가 요청 각도(±`--connector-turn-tolerance-deg`,
-  기본 10)에 도달할 때까지 돌고, `--max-connector-turn-ms`(기본 10초)로 상한.
-  과회전(목표 통과)을 감지하면 즉시 멈춤(`turn_overshoot`).
-- 이 방식이라 **펌웨어 가드 펄스 최대길이(COMMAND_EXCEEDS_MAX_MS, 업로드 시
-  구워지는 값)에 안 걸리고**, 펄스마다 정지마찰을 다시 이길 필요도 없다.
+- **모터가 도는 동안에는 yaw를 읽지 않는다.** 펌웨어가 출력 중 MOTOR_TRACE를
+  2ms마다 쏟아내 시리얼(115200bps)을 포화시켜, 주행 중 heartbeat가 거의
+  도착하지 않기 때문(2026-06-12 필드런에서 연속 피드백 회전 4/4가 10초
+  타임아웃으로 실명 회전). 대신:
+  1. 남은 각도 ÷ 회전속도 추정(`target_angle_deg/pulse_ms`)의 80%로 버스트
+     길이 계산(250~1000ms 클램프) → live SET 1회 → 정지(LIVE_STOP)
+  2. 정지하면 trace 홍수가 멈춤 → 안정화된 정지 yaw 측정
+  3. 남은 각도 갱신 후 반복. 종료: 허용오차(기본 10°)/과회전(부호 반전)/
+     정체(진전 3° 미만 = 모터 멈춤·역방향)/REJECT/MANUAL/시간상한
+     (`--max-connector-turn-ms` 기본 20초, 보정은
+     `--max-heading-correction-ms` 기본 8초).
+- 버스트는 펌웨어 안전 길이라 가드 펄스 최대길이(COMMAND_EXCEEDS_MAX_MS,
+  업로드 시 구워짐) 문제 없음.
 - IMU가 없을 때만 개루프 펄스 폴백: `ceil(|각도|/target_angle_deg)`개,
   펄스당 1000ms로 클램프(횟수는 비례 보정).
-- 캘리브레이션 `target_angle_deg`는 개루프 폴백과 플랜 표기에 쓰임
-  (`--turn-calibration-angle-policy from_json` 기본,
-  `--turn-angle-deg-override`로 JSON 수정 없이 대체 가능).
 
 ### 4.3 heading 기준 = mission (기본)
 

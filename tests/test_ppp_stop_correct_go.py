@@ -7,7 +7,15 @@ with a scripted fake serial and ``settle_after_move_ms=0`` /
 
 from __future__ import annotations
 
+import pytest
+
 from tools.physical_path_planning import controller, geometry
+
+
+@pytest.fixture(autouse=True)
+def _no_turn_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Turn bursts sleep in real time on hardware; tests run them instantly.
+    monkeypatch.setattr(controller, "_turn_sleep", lambda _s: None)
 
 
 # --- scripted serial -----------------------------------------------------------
@@ -342,11 +350,8 @@ def test_connector_live_turn_stops_on_measured_imu_target() -> None:
     handle = FakeSerial(
         [
             _hb(35.0, 129.0, imu_yaw_deg=0.0),  # connector preflight
-            _hb(None, None, imu_yaw_deg=30.0, with_gps=False),  # turn feedback
-            _hb(None, None, imu_yaw_deg=60.0, with_gps=False),
-            _hb(None, None, imu_yaw_deg=88.0, with_gps=False),  # within tolerance
-            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
-            _hb(35.0, 129.0, imu_yaw_deg=88.0),  # stabilized read-back
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",  # burst 1 stop confirm
+            _hb(35.0, 129.0, imu_yaw_deg=88.0),  # stationary measure: within tolerance
         ]
     )
     rows, _raw, abort_reason = controller.run_stop_correct_go(
@@ -373,7 +378,9 @@ def test_connector_live_turn_stops_on_measured_imu_target() -> None:
     assert row["turn_measured_by_imu"] is True
     assert float(row["applied_turn_delta_deg"]) == 88.0
     set_writes = [w for w in handle.writes if w.startswith("USB_DRIVE_LIVE_SET")]
-    assert set_writes and all("a=0.000" in w and "b=0.240" in w for w in set_writes)
+    assert len(set_writes) == 1  # one burst was enough
+    assert "a=0.000" in set_writes[0] and "b=0.240" in set_writes[0]
+    assert "duration_ms=1000" in set_writes[0]  # 90 deg at ~50 dps, capped at the burst max
     assert any(w.startswith("USB_DRIVE_LIVE_STOP") for w in handle.writes)
     # The connector never issues a guarded pulse command.
     assert not any(w.startswith("USB_PULSE_TEST_CMD") for w in handle.writes)
@@ -414,7 +421,6 @@ def test_connector_live_turn_times_out_on_stalled_motors() -> None:
     handle = FakeSerial(
         [
             _hb(35.0, 129.0, imu_yaw_deg=0.0),  # connector preflight
-            _hb(None, None, imu_yaw_deg=0.0, with_gps=False),  # no rotation
         ]
     )
     rows, _raw, abort_reason = controller.run_stop_correct_go(
@@ -497,13 +503,13 @@ def _under_turned_corner_responses(*, with_correction_rows: bool) -> list[bytes]
         _hb(35.0, 129.0, imu_yaw_deg=0.0),
         *_PULSE_OK,
         _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),
-        # connector live turn: reaches only 40 of 90 deg, then a REJECT ends
-        # the turn deterministically (recorded, not mission-aborting).
+        # connector live bursts: rotation stalls at 40 of 90 deg -- burst 2
+        # measures no progress, so the turn stops and records the under-turn.
         _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),  # connector preflight
-        _hb(None, None, imu_yaw_deg=40.0, with_gps=False),  # partial rotation
-        b"USB_PULSE_TEST event=REJECT\n",
-        b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
-        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),  # stabilized read-back
+        b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",  # burst 1 stop confirm
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),  # measure: 40 of 90
+        b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",  # burst 2 stop confirm
+        _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),  # measure: stalled
         # lane 2, chunk 1: still pointing 40 deg while the lane needs 90.
         _hb(35.0, _LON_1M_EAST, imu_yaw_deg=40.0),
         *_PULSE_OK,
@@ -512,8 +518,8 @@ def _under_turned_corner_responses(*, with_correction_rows: bool) -> list[bytes]
     if with_correction_rows:
         responses.extend(
             [
-                _hb(_LAT_HALF_M_NORTH, _LON_1M_EAST, imu_yaw_deg=88.0),  # turn feedback
-                b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+                b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",  # correction burst stop confirm
+                _hb(_LAT_HALF_M_NORTH, _LON_1M_EAST, imu_yaw_deg=88.0),  # measure
             ]
         )
     # Without a correction the body keeps pointing 40 deg; with one it ends ~88.
@@ -677,8 +683,8 @@ def test_mission_heading_holds_body_heading_on_backward_lane() -> None:
             _hb(35.0, _LON_1M_EAST, imu_yaw_deg=0.0),  # preflight at lane start
             *_PULSE_OK,
             _hb(35.0, 129.0000055, imu_yaw_deg=20.0),  # mid-lane, body drifted +20
-            _hb(None, None, imu_yaw_deg=2.0, with_gps=False),  # correction feedback
-            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",  # correction burst stop confirm
+            _hb(None, None, imu_yaw_deg=2.0, with_gps=False),  # stationary measure
             _hb(35.0, 129.0000055, imu_yaw_deg=2.0),  # preflight chunk 2
             *_PULSE_OK,
             _hb(35.0, 129.0, imu_yaw_deg=2.0),  # lane end reached
@@ -718,9 +724,8 @@ def test_connector_live_turn_stops_on_overshoot() -> None:
     handle = FakeSerial(
         [
             _hb(35.0, 129.0, imu_yaw_deg=0.0),  # connector preflight
-            _hb(None, None, imu_yaw_deg=115.0, with_gps=False),  # 25 past the 90 target
-            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",
-            _hb(35.0, 129.0, imu_yaw_deg=115.0),  # stabilized read-back
+            b"USB_PULSE_TEST event=STOP final_left_cmd=0.000 final_right_cmd=0.000 physical_output_active=false\n",  # burst 1 stop confirm
+            _hb(35.0, 129.0, imu_yaw_deg=115.0),  # stationary measure: 25 past the target
         ]
     )
     rows, _raw, abort_reason = controller.run_stop_correct_go(

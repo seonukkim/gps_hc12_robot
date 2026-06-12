@@ -159,11 +159,14 @@ Notes:
 
 - Align the rover with the first lane heading before starting when using
   `--initial-heading-align none`; the mission heading frame is captured there.
-- Each ㄹ corner runs as ONE continuous IMU-feedback pivot (the live-drive
-  mechanism, capped by `--max-connector-turn-ms`, default 10 s). Long
-  calibrated pulse durations are therefore safe: the firmware's guarded-pulse
-  maximum (`COMMAND_EXCEEDS_MAX_MS`, baked in at upload) only applies to the
-  no-IMU open-loop fallback, whose pulses are clamped to 1000 ms.
+- Each ㄹ corner (and each heading correction) turns in burst -> stop ->
+  measure cycles: short live bursts with a full stop and a stationary yaw
+  read between them, because in-motion telemetry is starved by the firmware's
+  MOTOR_TRACE stream. Expect a corner to look like 1-4 short rotations with
+  brief pauses (cap `--max-connector-turn-ms`, default 20 s). Long calibrated
+  pulse durations are safe: the firmware's guarded-pulse maximum
+  (`COMMAND_EXCEEDS_MAX_MS`, baked in at upload) only applies to the no-IMU
+  open-loop fallback, whose pulses are clamped to 1000 ms.
 - Keep `--cross-track-correction-threshold-m` well under the lane spacing
   (0.35 m for 1.2 m lanes); a threshold larger than the spacing disables the
   recovery that pulls the rover back onto its lane.
@@ -186,11 +189,18 @@ stops the rover immediately (worst case one move chunk), records
 `stop_reason=USER_SWITCHED_TO_MANUAL`, and leaves RC manual in control.
 
 ```bash
-# Optional: pre-plan the field, then arm against the switch.
+# Example: a 1.8 m x 1.8 m field swept with 0.6 m lanes, anchored at the
+# rover's position, armed against the CH5 switch.
 bash scripts/run_physical_path_planner.sh auto-relative-run \
-  --goal-east-m 2.4 --goal-north-m 2.4 \
-  --workspace-width-m 2.4 --step-spacing-m 1.2 \
+  --goal-east-m 1.8 --goal-north-m 1.8 \
+  --workspace-width-m 1.8 --step-spacing-m 0.6 \
   --path-control-mode stop_correct_go \
+  --initial-heading-align none \
+  --move-chunk-ms 800 --max-segment-chunks 160 \
+  --heading-correction-threshold-deg 15 --heading-correction-tolerance-deg 8 \
+  --heading-correction-b-left 0.24 --heading-correction-b-right -0.12 \
+  --cross-track-correction-threshold-m 0.30 \
+  --max-gps-jump-m 1.0 \
   --gps-timeout-s 300 --auto-switch-timeout-s 300 \
   --out-dir outputs/physical_path_planning/auto_relative_run_$RUN_ID
 ```
@@ -199,6 +209,12 @@ To run the same designated path again after a MANUAL stop, re-run the command:
 each AUTO flip executes the path once, re-anchored at the rover's current
 position. `--allow-keyboard-start true` substitutes Enter for the switch when
 no PPM receiver is attached.
+
+Firmware caveat: the supervised firmware that executes paths ignores RC stick
+input for motor output (`usb_pulse_test_ignore_rc_input=true`); the CH5 switch
+is honored for start/stop, but driving the rover manually with the sticks
+requires flashing the PPM manual firmware (`manual-control`) afterwards.
+Merging both behaviors into one firmware profile is a future task.
 
 ## Rectangle Geometry
 

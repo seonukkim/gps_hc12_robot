@@ -123,17 +123,19 @@ one pulse completes a corner:
 
 - `calibration.connector_primitive` surfaces `target_angle_deg` (falling back
   to the measured `imu_yaw_delta_deg`, then 90).
-- With IMU yaw available, a `stop_correct_go` connector runs as ONE continuous
-  IMU-feedback pivot (the same bounded live-drive SET/STOP mechanism as the
-  lane heading correction): it captures the yaw at the connector's start and
-  turns at the calibrated B until the measured yaw delta reaches the segment's
-  requested `turn_angle_deg` within `--connector-turn-tolerance-deg`
-  (default 10), capped by `--max-connector-turn-ms` (default 10 s). This
-  avoids the firmware's guarded-pulse duration maximum
-  (`COMMAND_EXCEEDS_MAX_MS`, a compile-time flag baked in at upload) and does
-  not re-fight motor stiction pulse by pulse. Overshooting past the target
-  between feedback samples stops the turn (`turn_overshoot`); the next lane's
-  heading correction owns the residual in its own direction.
+- With IMU yaw available, a `stop_correct_go` connector (and the lane heading
+  correction) turns in **burst -> stop -> measure** cycles: one bounded
+  deadman live SET sized from the remaining angle and a turn-rate estimate
+  (`target_angle_deg / pulse_ms`), then a full stop and a settled stationary
+  yaw read before the next burst. In-motion feedback is not used because the
+  firmware's MOTOR_TRACE stream saturates the serial link while motors run
+  and starves yaw heartbeats (field data: every continuous-feedback turn ran
+  blind to its time cap). Stops on tolerance
+  (`--connector-turn-tolerance-deg`, default 10), overshoot (sign flip),
+  stall (no measurable progress -- wrong-direction or stalled motors), REJECT,
+  MANUAL switch, or `--max-connector-turn-ms` (default 20 s). Bursts are
+  capped at the firmware-safe live-drive duration, so the guarded-pulse
+  maximum (`COMMAND_EXCEEDS_MAX_MS`, baked in at upload) cannot trigger.
 - Without IMU yaw, the open-loop count `ceil(|angle| / target_angle_deg)` of
   guarded pulses is used -- never blind extras -- with each pulse clamped to
   the firmware-safe 1000 ms (and the count scaled accordingly).

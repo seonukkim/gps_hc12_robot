@@ -69,8 +69,19 @@ DEFAULT_HEADING_CORRECTION_TOLERANCE_DEG = 5.0
 DEFAULT_CROSS_TRACK_CORRECTION_THRESHOLD_M = 0.35
 DEFAULT_HEADING_CORRECTION_B_LEFT = 0.24
 DEFAULT_HEADING_CORRECTION_B_RIGHT = -0.12
-DEFAULT_MAX_HEADING_CORRECTION_MS = 1800
+# Turns run as burst -> stop -> measure cycles (see _run_stop_correct_go_heading_turn);
+# each cycle costs the burst plus ~0.8 s of settle/stabilize, so the caps cover
+# several cycles. The slow left turn (~13 deg/s at B=0.24) needs ~7 s of rotation
+# alone for a quarter turn.
+DEFAULT_MAX_HEADING_CORRECTION_MS = 8000
 DEFAULT_HEADING_CORRECTION_CHUNK_MS = 300
+MIN_TURN_BURST_MS = 250
+# One burst is capped at the firmware-safe live-drive duration (upload-baked).
+DEFAULT_TURN_BURST_MAX_MS = 1000
+DEFAULT_TURN_RATE_GUESS_DPS = 45.0
+TURN_STALL_MIN_PROGRESS_DEG = 3.0
+# Test hook: bursts sleep in real time on hardware; unit tests stub this out.
+_turn_sleep = time.sleep
 SENSOR_TRUST_MODES = {"imu_gps_first", "calibration_fallback"}
 DEFAULT_SENSOR_TRUST_MODE = "imu_gps_first"
 
@@ -82,9 +93,9 @@ TURN_ANGLE_POLICIES = {"from_json", "assume_90"}
 DEFAULT_TURN_ANGLE_POLICY = "from_json"
 DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN = 6
 DEFAULT_CONNECTOR_TURN_TOLERANCE_DEG = 10.0
-# Cap for one connector's continuous IMU-feedback pivot. The slow left turn on
-# this rover (~13 deg/s at B=0.24) needs ~7 s for a quarter turn.
-DEFAULT_MAX_CONNECTOR_TURN_MS = 10000
+# Cap for one connector's burst->measure pivot sequence. The slow left turn on
+# this rover (~13 deg/s at B=0.24) needs ~7 s of rotation plus measure pauses.
+DEFAULT_MAX_CONNECTOR_TURN_MS = 20000
 # Firmware-safe single guarded-pulse duration for the no-IMU fallback: the
 # flashed guarded-pulse firmware rejects longer commands (COMMAND_EXCEEDS_MAX_MS).
 OPEN_LOOP_CONNECTOR_PULSE_MS_CAP = 1000
@@ -1525,70 +1536,99 @@ def _run_stop_correct_go_heading_turn(
     raw_lines: list[str],
     verbose_raw: bool = True,
     abort_on_manual_switch: bool = False,
+    settle_after_move_ms: int = DEFAULT_SETTLE_AFTER_MOVE_MS,
+    telemetry_stabilize_ms: int = DEFAULT_TELEMETRY_STABILIZE_MS,
+    heartbeat_timeout_s: float = DEFAULT_HEARTBEAT_TIMEOUT_S,
+    rate_dps_hint: float | None = None,
+    max_burst_ms: int = DEFAULT_TURN_BURST_MAX_MS,
 ) -> dict[str, object]:
-    """Rotate in place with IMU yaw feedback until the heading error is corrected.
+    """Rotate in place toward the target in burst -> stop -> measure cycles.
 
-    Issues bounded ``USB_DRIVE_LIVE_SET`` turn setpoints (A=0, B=correction) and a
-    final ``USB_DRIVE_LIVE_STOP`` (same bounded-deadman pattern as the alignment
-    turn and :func:`executor.send_live_drive`), breaking early on the IMU stop
-    condition rather than a fixed duration. ``abort_on_manual_switch`` stops the
-    turn the moment a telemetry row reports the physical switch back in MANUAL.
+    While the motors run, the firmware floods the serial link with MOTOR_TRACE
+    lines and saturates the UART, so yaw-bearing heartbeats rarely survive --
+    continuous in-motion feedback is blind in practice (field data: every
+    connector ran to its time cap). Each cycle therefore issues ONE bounded
+    deadman live SET (the burst, sized from the remaining angle and a turn-rate
+    estimate), stops, lets telemetry recover, and reads a settled stationary
+    yaw before deciding the next burst. Stops on: tolerance reached, overshoot
+    (sign flip), stall (no measurable progress), REJECT, MANUAL switch
+    (``abort_on_manual_switch``), or the ``max_correction_ms`` deadline.
     """
     seq = 1
-    duration_ms = max(1, int(chunk_ms))
-    update_period_s = 1.0 / max(1.0, float(update_hz))
     start_time = time.monotonic()
     deadline = start_time + max(0.0, max_correction_ms / 1000.0)
+    rate_dps = abs(rate_dps_hint) if rate_dps_hint else DEFAULT_TURN_RATE_GUESS_DPS
+    rate_dps = max(rate_dps, 1.0)
     yaw_latest = yaw_turn_start
     remaining = initial_heading_error_deg
+    bursts = 0
     timed_out = False
     rejected = False
     manual_switch = False
     overshoot = False
-    while True:
-        if time.monotonic() >= deadline:
+    no_progress = False
+    last_row: dict[str, str] | None = None
+    while abs(remaining) > abs(heading_tolerance_deg):
+        budget_ms = int((deadline - time.monotonic()) * 1000.0)
+        if budget_ms < MIN_TURN_BURST_MS:
             timed_out = True
             break
+        # Aim ~80% of the estimated remaining-time so a fast motor lands short
+        # of the target instead of past it; the next cycle finishes the rest.
+        burst_ms = int(abs(remaining) / rate_dps * 1000.0 * 0.8)
+        burst_ms = max(MIN_TURN_BURST_MS, min(burst_ms, int(max_burst_ms), budget_ms))
+        bursts += 1
         executor.write_command(
             handle,
             (
                 f"USB_DRIVE_LIVE_SET seq={seq} a=0.000 b={float(correction_b_cmd):.3f} "
-                f"duration_ms={duration_ms} ttl_ms={int(ttl_ms)}"
+                f"duration_ms={burst_ms} ttl_ms={burst_ms + max(int(ttl_ms), 300)}"
             ),
         )
-        row = executor.wait_for_row(
+        _turn_sleep(burst_ms / 1000.0)
+        executor.write_command(handle, f"USB_DRIVE_LIVE_STOP seq={seq}")
+        confirm_rows = executor.wait_for_event(
+            handle, raw_lines, executor.STOP_CONFIRM_EVENTS, event_timeout_s, verbose_raw=verbose_raw
+        )
+        if any(telemetry.event(r) == "REJECT" for r in confirm_rows):
+            rejected = True
+            break
+        row = _collect_stabilized_heartbeat(
             handle,
             raw_lines,
-            lambda r: telemetry.imu_relative_yaw_deg(r) is not None
-            or telemetry.event(r) in {"ACTIVE", "REJECT"},
-            min(update_period_s, event_timeout_s),
+            settle_after_move_ms=settle_after_move_ms,
+            telemetry_stabilize_ms=telemetry_stabilize_ms,
+            heartbeat_timeout_s=heartbeat_timeout_s,
             verbose_raw=verbose_raw,
         )
-        if row is not None:
-            if telemetry.event(row) == "REJECT":
-                rejected = True
-                break
-            if abort_on_manual_switch and mode_switch_state(row) == "MANUAL":
-                manual_switch = True
-                break
-            yaw = telemetry.imu_relative_yaw_deg(row)
-            if yaw is not None:
-                yaw_latest = yaw
-                yaw_delta = geometry.wrap_deg(yaw - yaw_turn_start)
-                remaining = remaining_turn_error_deg(initial_heading_error_deg, yaw_delta)
-                if abs(remaining) <= abs(heading_tolerance_deg):
-                    break
-                if remaining * initial_heading_error_deg < 0.0:
-                    # Rotated past the target between samples: keeping the same
-                    # turn direction would only widen the error, so stop here.
-                    overshoot = True
-                    break
-        else:
-            time.sleep(min(update_period_s, 0.05))
-    executor.write_command(handle, f"USB_DRIVE_LIVE_STOP seq={seq}")
-    executor.wait_for_event(
-        handle, raw_lines, executor.STOP_CONFIRM_EVENTS, event_timeout_s, verbose_raw=verbose_raw
-    )
+        if row is None:
+            no_progress = True
+            break
+        last_row = row
+        if abort_on_manual_switch and mode_switch_state(row) == "MANUAL":
+            manual_switch = True
+            break
+        yaw = telemetry.imu_relative_yaw_deg(row)
+        if yaw is None:
+            no_progress = True
+            break
+        yaw_latest = yaw
+        previous_remaining = remaining
+        remaining = geometry.wrap_deg(
+            initial_heading_error_deg - geometry.wrap_deg(yaw - yaw_turn_start)
+        )
+        if abs(remaining) <= abs(heading_tolerance_deg):
+            break
+        if remaining * initial_heading_error_deg < 0.0:
+            # Rotated past the target during the burst: keeping the same turn
+            # direction would only widen the error, so stop here.
+            overshoot = True
+            break
+        if abs(previous_remaining) - abs(remaining) < TURN_STALL_MIN_PROGRESS_DEG:
+            # Stalled motors or a wrong-direction response: stop instead of
+            # burning the whole time budget on bursts that change nothing.
+            no_progress = True
+            break
     return {
         "yaw_turn_start": yaw_turn_start,
         "yaw_final": yaw_latest,
@@ -1602,6 +1642,9 @@ def _run_stop_correct_go_heading_turn(
         "rejected": rejected,
         "manual_switch": manual_switch,
         "overshoot": overshoot,
+        "no_progress": no_progress,
+        "bursts": bursts,
+        "last_row": last_row,
     }
 
 
@@ -1885,13 +1928,16 @@ def run_stop_correct_go(
             connector_yaw_ref = telemetry.imu_relative_yaw_deg(heartbeat)
 
             if connector_yaw_ref is not None:
-                # Continuous IMU-feedback pivot (the same mechanism as the lane
-                # heading correction): bounded deadman SET commands stopped by
-                # the measured yaw delta. A long calibrated pulse duration never
-                # hits the firmware's guarded-pulse max (COMMAND_EXCEEDS_MAX_MS)
-                # and the motors roll through the whole corner instead of
-                # re-fighting stiction pulse by pulse.
+                # IMU-feedback pivot in burst -> stop -> measure cycles (the
+                # same mechanism as the lane heading correction). Yaw is read
+                # only while stopped, because the firmware's MOTOR_TRACE flood
+                # saturates the serial link during motion and starves
+                # heartbeats; no long guarded pulse is sent, so the firmware's
+                # guarded-pulse max (COMMAND_EXCEEDS_MAX_MS) cannot trigger.
                 primitive_index += 1
+                rate_hint = None
+                if per_pulse is not None and pulse_ms > 0:
+                    rate_hint = per_pulse / float(pulse_ms) * 1000.0
                 try:
                     turn = _run_stop_correct_go_heading_turn(
                         handle,
@@ -1907,18 +1953,15 @@ def run_stop_correct_go(
                         raw_lines=raw_lines,
                         verbose_raw=verbose_raw,
                         abort_on_manual_switch=require_auto_switch,
-                    )
-                    after = _collect_stabilized_heartbeat(
-                        handle,
-                        raw_lines,
                         settle_after_move_ms=settle_after_move_ms,
                         telemetry_stabilize_ms=telemetry_stabilize_ms,
                         heartbeat_timeout_s=heartbeat_timeout_s,
-                        verbose_raw=verbose_raw,
-                    ) or heartbeat
+                        rate_dps_hint=rate_hint,
+                    )
                 except OSError:
                     abort_reason = "SERIAL_DISCONNECT"
                     break
+                after = turn.get("last_row") or heartbeat
                 gps_after = dead_reckon_gps(after, gps_cache)
                 lat = float(gps_after["lat"]) if gps_after["lat"] is not None else start_lat
                 lon = float(gps_after["lon"]) if gps_after["lon"] is not None else start_lon
@@ -2339,6 +2382,15 @@ def run_stop_correct_go(
             phase = "move"
             if decision["needs_correction"] and not manual_after_pulse:
                 phase = "correction"
+                correction_turn = connector_command(
+                    resolved_calibration, str(decision["turn_direction"])
+                )
+                correction_rate_hint = None
+                correction_target = correction_turn.get("target_angle_deg")
+                if correction_target is not None and int(correction_turn["pulse_ms"]) > 0:
+                    correction_rate_hint = (
+                        float(correction_target) / float(correction_turn["pulse_ms"]) * 1000.0
+                    )
                 try:
                     turn = _run_stop_correct_go_heading_turn(
                         handle,
@@ -2354,6 +2406,10 @@ def run_stop_correct_go(
                         raw_lines=raw_lines,
                         verbose_raw=verbose_raw,
                         abort_on_manual_switch=require_auto_switch,
+                        settle_after_move_ms=settle_after_move_ms,
+                        telemetry_stabilize_ms=telemetry_stabilize_ms,
+                        heartbeat_timeout_s=heartbeat_timeout_s,
+                        rate_dps_hint=correction_rate_hint,
                     )
                 except OSError:
                     abort_reason = "SERIAL_DISCONNECT"
