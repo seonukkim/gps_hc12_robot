@@ -1,0 +1,443 @@
+% 스테이션(PC) 라우팅/구동 코드 가이드 — 흑백 · 그리드 레이아웃
+% 컴파일: xelatex station_routing_code_guide.tex   (2회 권장)
+\documentclass[11pt,a4paper]{article}
+
+% ---- 한글/폰트 -------------------------------------------------------------
+\usepackage{kotex}
+\usepackage{fontspec}
+\setmainfont{Noto Sans CJK KR}
+\setsansfont{Noto Sans CJK KR}
+\setmonofont{Noto Sans Mono CJK KR}[Scale=0.88]
+\setmainhangulfont{Noto Sans CJK KR}
+\setsanshangulfont{Noto Sans CJK KR}
+\setmonohangulfont{Noto Sans Mono CJK KR}[Scale=0.88]
+
+% ---- 지오메트리(그리드) ----------------------------------------------------
+\usepackage[a4paper, top=2.7cm, bottom=2.3cm, left=2.4cm, right=2.4cm,
+            headheight=15pt, headsep=14pt]{geometry}
+
+% ---- 흑백 팔레트 (색상 없음, 회색 단계만) ----------------------------------
+\usepackage[table]{xcolor}
+\definecolor{ink}{gray}{0.10}
+\definecolor{muted}{gray}{0.45}
+\definecolor{hair}{gray}{0.00}
+\definecolor{codebg}{gray}{0.955}
+\definecolor{zebra}{gray}{0.965}
+\color{ink}
+
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\setlist{nosep, leftmargin=1.5em, itemsep=2pt}
+\usepackage{needspace}
+\usepackage{listings}
+\usepackage{titlesec}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\hypersetup{pdftitle={스테이션(PC) 라우팅/구동 코드 가이드}, pdfauthor={gps\_hc12\_robot}}
+
+% ---- 러닝 헤더/푸터 (그리드 골격) ------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancyhead[L]{\footnotesize\color{muted}스테이션(PC) 라우팅 · 구동 코드 가이드}
+\fancyhead[R]{\footnotesize\color{muted}\thepage\,/\,\pageref{LastPage}}
+\usepackage{lastpage}
+
+% ---- 섹션 스타일: 번호 hang + 하단 헤어라인 (편집 그리드) -------------------
+\titleformat{\section}[hang]
+  {\normalfont\large\bfseries\color{ink}}
+  {\makebox[1.5em][l]{\thesection}}{0em}{}
+  [\vspace{2pt}{\color{hair}\titlerule[0.9pt]}]
+\titlespacing*{\section}{0pt}{1.15em}{0.55em}
+\titleformat{\subsection}[hang]
+  {\normalfont\normalsize\bfseries\color{ink}}
+  {\thesubsection}{0.6em}{}
+\titlespacing*{\subsection}{0pt}{0.8em}{0.3em}
+
+% ---- 본문 리듬 -------------------------------------------------------------
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.46em}
+\linespread{1.05}
+
+% ---- 인라인 코드: url 기반 → 밑줄 escape 불필요 + 긴 경로 자동 줄바꿈 -------
+\urlstyle{tt}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\ra}{\textrightarrow}
+
+% ---- 복붙용 명령 카드: 검은 좌측 바 + 연회색 배경 + 줄바꿈 표시 -------------
+\lstdefinestyle{cmd}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=l, framerule=2.4pt, rulecolor=\color{hair},
+  framexleftmargin=12pt, xleftmargin=12pt, xrightmargin=3pt,
+  breaklines=true, breakindent=16pt, breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{muted}{$\hookrightarrow$}\ },
+  columns=fullflexible, keepspaces=true, upquote=true, showstringspaces=false,
+  aboveskip=1pt, belowskip=2pt,
+}
+\lstset{style=cmd}
+
+% 명령 카드의 라벨(문단을 독립적으로 구분) --------------------------------
+\newcommand{\cmdcap}[1]{%
+  \par\addvspace{5pt}\needspace{4\baselineskip}%
+  \noindent{\footnotesize\bfseries #1}\par\nobreak\vspace{2pt}}
+% 카드 뒤 짧은 확인/설명 라인
+\newcommand{\cmdnote}[1]{{\footnotesize\color{muted}#1}\par}
+
+\newcommand{\hrulefull}{\vspace{0.2em}{\color{hair}\hrule height 0.6pt}\vspace{0.6em}}
+
+\begin{document}
+
+% ====================== 표제 블록 ======================
+\thispagestyle{fancy}
+{\fontsize{22}{25}\selectfont\bfseries 스테이션(PC) 라우팅 · 구동 코드 가이드}\par
+\vspace{3pt}
+{\large\color{muted}로버에 연결해 실행하는 코드는 무엇이고, 어떻게 실행하며,
+\code{.py}와 \code{.ino}가 어떻게 연결되는가}\par
+\vspace{5pt}
+{\footnotesize\color{muted}저장소 \texttt{github.com/seonukkim/gps\_hc12\_robot}
+\hfill 대상 OpenRB-150 로버 + HC-12 + GPS/IMU}\par
+\hrulefull
+
+% ---- 목차 스트립 (그리드형 2열) ----
+\noindent
+{\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.5em}X p{0.5em}X@{}}
+\textbf{1} & 전체 구조 & \textbf{5} & 파이썬 $\leftrightarrow$ 아두이노 연결\\
+\textbf{2} & 두 가지 운용 방식 & \textbf{6} & 실행 순서 (복붙용 명령)\\
+\textbf{3} & 설치와 실행 · 모드 표 & \textbf{7} & 라우팅 코드만 원할 때 · 참고\\
+\textbf{4} & 파일별 역할 & &\\
+\end{tabularx}}
+\vspace{2pt}
+\hrulefull
+
+% ---- 한 줄 요약 (인용형 좌측 바) ----
+\noindent\begin{minipage}{\linewidth}
+{\color{hair}\vrule width 2.4pt}\hspace{8pt}%
+\begin{minipage}{\dimexpr\linewidth-14pt\relax}
+\textbf{한 줄 요약.}\; 로버 안에서 도는 코드는
+\code{firmware/openrb_robot_controller/openrb_robot_controller.ino} \emph{하나}.
+PC(스테이션)의 ``라우팅 파이썬''은 \code{tools/physical_path_planning/} 패키지(진입점
+\code{cli.py})이고, 순수 경로 계산은 \code{gps_coverage_core/planner.py}에 있다.
+PC와 로버는 USB 시리얼 케이블 하나(\code{/dev/ttyACM0}, 115200 baud)로 연결된다.
+\end{minipage}
+\end{minipage}
+
+% ====================== 1. 전체 구조 ======================
+\section{전체 구조}
+
+\begin{center}
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw=hair, line width=0.7pt, align=left, inner sep=8pt,
+              text width=5.7cm, minimum height=2.7cm},
+  lbl/.style={font=\footnotesize, fill=white, inner sep=2.5pt},
+]
+  \node[box] (pc) {%
+    \textbf{스테이션 PC (Mac)}\par\smallskip
+    {\footnotesize
+     \code{tools/physical_path_planning/}\newline
+     \textcolor{muted}{진입 \code{cli.py} · 실행 · 보정 · 안전}\par\smallskip
+     \code{gps_coverage_core/planner.py}\newline
+     \textcolor{muted}{순수 경로 계산 = 라우팅}}};
+  \node[box, right=3.6cm of pc] (rv) {%
+    \textbf{로버 OpenRB-150}\par\smallskip
+    {\footnotesize
+     \code{firmware/.../*.ino}\newline
+     \textcolor{muted}{유일한 컨트롤러(모드별 빌드)}\par\smallskip
+     \textcolor{muted}{모터 2 · GPS · IMU(BMI160)}\newline
+     \textcolor{muted}{RC 수신기(PPM) · HC-12}}};
+  \draw[-{Latex[length=2.2mm]}, line width=0.7pt] ([yshift=5mm]pc.east)
+        -- node[lbl,above]{명령 \textrm{(SET / STOP / ARM \dots)}} ([yshift=5mm]rv.west);
+  \draw[-{Latex[length=2.2mm]}, line width=0.7pt] ([yshift=-5mm]rv.west)
+        -- node[lbl,below]{텔레메트리 \textrm{(\code{USBDBG} \dots)}} ([yshift=-5mm]pc.east);
+  \node[below=1mm of pc.south, font=\scriptsize\color{muted}] {두뇌: 경로·판단};
+  \node[below=1mm of rv.south, font=\scriptsize\color{muted}] {실행: 모터·센서·안전};
+\end{tikzpicture}
+\end{center}
+
+\vspace{-0.2em}
+\cmdnote{연결 = USB 시리얼(\code{/dev/ttyACM0} · 115200) 한 줄.
+PC\ra 로버는 저수준 구동 명령, 로버\ra PC는 약 0.5초마다 \code{USBDBG} 텔레메트리 한 줄.}
+
+\textbf{역할 분리.}\; 두뇌(경로·판단)는 \textbf{파이썬}, 안전 실행(모터·센서)은
+\textbf{펌웨어(\code{.ino})}. 모든 실행 요약에는 안전 플래그
+\code{ready_for_full_path_following=false}가
+강제된다(완전 자율이 아니라 감독·가드 구동).
+
+% ====================== 2. 두 가지 운용 방식 ======================
+\section{두 가지 운용 방식}
+
+상대가 말한 ``PC 라우팅 코드''는 보통 \textbf{①\,유선}이다.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\linewidth}{@{}p{2.2cm} X@{}}
+\toprule
+\textbf{①\, 유선}\newline{\footnotesize\color{muted}두뇌 = PC}
+ & PC 파이썬이 경로·판단을 하고 USB로 \emph{실시간 구동 명령}을 보낸다.
+   모드 \code{auto-relative-run} / \code{run} / \code{execute-plan}.
+   USB를 뽑으면 데드맨이 즉시 정지(설계).\\
+\midrule
+\textbf{②\, 무선}\newline{\footnotesize\color{muted}두뇌 = 로버}
+ & PC로 온보드 패턴 펌웨어를 \emph{1회 업로드}만 하면 이후 USB 없이 RC 송신기로 동작.
+   모드 \code{rc-auto-pattern}(ㄹ자 왕복). 이때 PC 파이썬은 빌드·업로드 도구로만 쓰인다.\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ====================== 3. 설치와 실행 ======================
+\section{설치와 실행}
+
+\subsection{설치 (PC, 최초 1회)}
+\cmdcap{의존성 설치}
+\begin{lstlisting}[style=cmd]
+uv sync --extra dev
+# 또는
+pip install -r requirements.txt
+\end{lstlisting}
+\cmdnote{핵심 의존성: \code{pyserial}, \code{pynmea2}, \code{numpy}/\code{scipy}/\code{pyproj}/\code{geographiclib}, \code{matplotlib}.
+펌웨어 업로드 모드는 \code{arduino-cli} + OpenRB-150 보드 코어가 필요.}
+
+\subsection{모든 실행의 공통 진입점}
+\cmdcap{디스패처 (실제 로직은 \code{cli.py}의 \code{cmd_*} 함수)}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh <mode> [options]
+\end{lstlisting}
+\cmdnote{\code{<mode>}는 아래 표의 모드 이름.}
+
+\subsection{주요 모드}
+\begin{center}
+\renewcommand{\arraystretch}{1.28}
+\rowcolors{2}{zebra}{white}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{모드} & \textbf{모터} & \textbf{역할}\\
+\midrule
+\code{diagnose}          & 정지     & 연결·센서 확인(텔레메트리만 요약)\\
+\code{gps-wait}          & 정지     & 쓸 만한 GPS 픽스 대기\\
+\code{rc-input-diagnose} & 정지     & RC 수신기 채널 입력 진단\\
+\code{manual-control}    & 수동(RC) & PPM 수동 조작 펌웨어 업로드·모니터\\
+\code{preview}           & 정지     & ㄹ자 커버리지 경로 계획 + PNG 렌더\\
+\code{inspect-plan}      & 정지     & 저장된 플랜/이미지 확인\\
+\code{tune-motion}       & 구동     & 대화형 모터 캘리브레이션\\
+\code{calibrate-turn}    & 구동     & 회전 각도 캘리브레이션(IMU yaw)\\
+\code{calibration-check} & 정지     & 캘리브레이션 완성도 점검\\
+\code{align-heading}     & 구동     & 첫 레인 방향으로 로버 정렬\\
+\code{run} / \code{execute-plan} & 구동 & 경로를 유선으로 실행\\
+\code{auto-relative-run} & 구동     & AUTO 스위치 대기 후 상대경로 1회 유선 실행\\
+\code{rc-auto-pattern}   & 구동     & 무선 온보드 ㄹ자 패턴 펌웨어 업로드\\
+\bottomrule
+\end{tabularx}
+\end{center}
+\cmdnote{산출물(트레이스 CSV · 요약 JSON · PNG)은 \code{outputs/} 아래에 저장되며 깃에 커밋하지 않는다.}
+
+% ====================== 4. 파일별 역할 ======================
+\section{파일별 역할}
+
+임포트 방향은 한 방향(리프 먼저):
+\code{geometry, calibration, telemetry, safety, checks} \ra{} \code{executor}
+\ra{} \code{controller} \ra{} \code{cli}.
+
+\subsection{\texttt{tools/physical\_path\_planning/} — PC 실행·구동의 본체}
+\begin{center}
+\renewcommand{\arraystretch}{1.24}
+\rowcolors{2}{zebra}{white}
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{파일} & \textbf{역할}\\
+\midrule
+\code{cli.py}         & 사용자 CLI · 시리얼 오픈 · 펌웨어 빌드/업로드 · 요약(JSON) 기록 (가장 큼)\\
+\code{geometry.py}    & ㄹ자 경로 기하 생성. 코너를 회전\ra 스텝\ra 회전으로 분해\\
+\code{calibration.py} & 전진/후진/회전 캘리브레이션 값 · 회전 실제각(\code{target_angle_deg})\\
+\code{telemetry.py}   & \code{USBDBG} 라인 파싱 + GPS/IMU/RC/모터 필드 접근자\\
+\code{executor.py}    & 시리얼에 명령 쓰기 · 가드 펄스 FSM(ARM\ra ACK\ra 완료\ra STOP)\\
+\code{controller.py}  & 경로 실행 감독 루프(\code{stop_correct_go}): 구동\ra 정지\ra 읽기\ra 보정 반복\\
+\code{alignment.py}   & 초기 헤딩 정렬(GPS 변위 프로브 + IMU 제자리 회전)\\
+\code{tuning.py}      & 대화형 캘리브레이션 후보 조정·승인·백업/리셋\\
+\code{preview.py}     & 계획 경로를 PNG로 렌더(현장에서 눈으로 확인)\\
+\code{safety.py}, \code{checks.py} & ACK/STOP·출력0 확인 · \code{ready_for_full_path_following}=false 강제\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{\texttt{gps\_coverage\_core/} — 순수 경로 계산(하드웨어 비의존)}
+\begin{center}
+\renewcommand{\arraystretch}{1.24}
+\rowcolors{2}{zebra}{white}
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{파일} & \textbf{역할}\\
+\midrule
+\code{planner.py}           & 위경도\,\ra\,미터 변환, 레인 오프셋, 왕복 웨이포인트 — \textbf{라우팅의 심장}\\
+\code{protocol.py}          & PC\,\ra\,로버 명령 프레임 · XOR 체크섬 · 값 클램프\\
+\code{geo.py}               & 거리·방위 계산\\
+\code{nmea.py}              & GPS NMEA 파싱\\
+\code{imu.py}               & IMU 계산 헬퍼\\
+\code{side_tool_planner.py} & 보조 도구(사이드 툴) 경로\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{펌웨어와 ROS2}
+\begin{itemize}
+  \item \code{firmware/openrb_robot_controller/openrb_robot_controller.ino} — 로버의
+    유일한 컨트롤러. \emph{하나의 파일}을 컴파일 \code{-D} 플래그로 여러 모드로 빌드
+    (수동 조작 / 가드 펄스 / 무선 패턴). PPM 디코드·GPS·IMU·모터·안전게이트·\code{USBDBG} 회신.
+  \item \code{firmware/*_probe}, \code{*_test} — GPS/IMU/PPM 배선 점검용 일회성 진단 스케치(운용과 무관).
+  \item \code{ros2_ws/} — ROS2 노드. \textbf{현재 스켈레톤이라 지금 전달할 라우팅 코드에는 불포함.}
+\end{itemize}
+
+% ====================== 5. .py <-> .ino 연결 ======================
+\section{파이썬 $\leftrightarrow$ 아두이노 연결}
+
+두 지점에서 연결된다.
+
+\subsection{빌드타임 — 파이썬이 펌웨어를 빌드·업로드}
+업로드가 필요한 모드에서 \code{cli.py}가 \code{arduino-cli}를 호출해 \emph{같은} \code{.ino}를
+모드별 \code{-D} 플래그로 컴파일·업로드한다.
+\cmdcap{예: 무선 패턴 빌드 플래그}
+\begin{lstlisting}[style=cmd]
+arduino-cli compile --fqbn OpenRB-150:samd:OpenRB-150 \
+  --build-property "compiler.cpp.extra_flags=-DRC_AUTO_PATTERN=1 -DMANUAL_CONTROL_PPM=1 -DIMU_ENABLE=1 ..." \
+  firmware/openrb_robot_controller
+\end{lstlisting}
+\cmdnote{즉 ``어떤 파이썬 모드로 올렸나''가 ``로버가 어떤 펌웨어 모드로 도나''를 결정한다.}
+
+\subsection{런타임 — USB 시리얼 문자열 프로토콜}
+포트/속도: \code{/dev/ttyACM0} · 115200 baud (Mac은 \code{/dev/tty.usbmodemXXXX}).
+\code{a}(physical A)는 전/후진, \code{b}(physical B)는 좌/우 조향이며 각각 $[-1,1]$로
+클램프되어 로버가 좌·우 바퀴로 믹싱한다.
+
+\cmdcap{PC \ra 로버 \normalfont\color{muted}— 개행 종료 ASCII (\code{executor.write_command} 전송)}
+\begin{lstlisting}[style=cmd]
+USB_DRIVE_LIVE_SET seq=N a=<fwd> b=<steer> ms=.. ttl=..   # 연속 구동 setpoint
+USB_DRIVE_LIVE_STOP seq=N                                 # 연속 구동 정지
+USB_PULSE_TEST_ARM / USB_PULSE_TEST_STOP  seq=N           # 가드 펄스
+STOP                                                      # 즉시 정지
+\end{lstlisting}
+\cmdnote{첫 줄 \code{USB_DRIVE_LIVE_SET}이 실시간 구동의 핵심.}
+
+\textbf{로버 \ra PC}\; (약 0.5초마다 \code{USBDBG} 한 줄, 공백 구분 \code{key=value})
+\cmdcap{텔레메트리 한 줄 예시}
+\begin{lstlisting}[style=cmd]
+USBDBG mode=AUTO_RUNNING event=ACK rc_ok=true auto_sw=true
+  gps_sats=7 gps_hdop=1.2 imu_relative_yaw_deg=172.8
+  final_left_cmd=0.31 final_right_cmd=0.29 physical_output_active=true ...
+\end{lstlisting}
+\cmdnote{\code{telemetry.parse_usbdbg_rows}가 \code{dict}로 파싱. \code{event=ARM/ACK/STOP}는 가드 펄스 상태 확인용.}
+
+% ====================== 6. 실행 순서 ======================
+\section{실행 순서 (복붙용 명령)}
+
+로버 USB 연결 상태에서 위에서 아래로. \textbf{각 블록을 그대로 복사해 실행한다.}
+
+\cmdcap{1 · 연결·센서 확인 \normalfont\color{muted}— 모터 정지}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh diagnose \
+  --out-dir outputs/physical_path_planning/diagnose
+\end{lstlisting}
+\cmdnote{확인: \code{USBDBG}가 올라오고 GPS/IMU/RC 필드가 보이는지.}
+
+\cmdcap{2 · GPS 픽스 대기 \normalfont\color{muted}— 모터 정지}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh gps-wait \
+  --timeout-s 300 --min-sats 5 --max-hdop 2.5 \
+  --out-dir outputs/physical_path_planning/gps_wait
+\end{lstlisting}
+\cmdnote{확인: \code{gps_sats}\,$\geq$\,5, \code{hdop}가 임계값 이하로 안정.}
+
+\cmdcap{3 · 경로 미리보기 \normalfont\color{muted}— PNG 생성, 모터 정지}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh preview \
+  --goal-mode relative_enu --goal-east-m 1.8 --goal-north-m 1.8 \
+  --workspace-width-m 1.8 --step-spacing-m 0.6 \
+  --out-dir outputs/physical_path_planning/preview
+\end{lstlisting}
+\cmdnote{확인: 경로를 눈으로 먼저(\code{preview_*.png}).}
+
+\cmdcap{4 · (필요 시) 모터 캘리브레이션 \normalfont\color{muted}— 구동}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh tune-motion \
+  --primitive forward \
+  --out-dir outputs/physical_path_planning/tune_forward
+\end{lstlisting}
+\cmdnote{전진/후진/회전 각각(회전은 \code{calibrate-turn}).}
+
+\cmdcap{5 · 첫 레인 방향 정렬 \normalfont\color{muted}— 구동}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh align-heading \
+  --out-dir outputs/physical_path_planning/align
+\end{lstlisting}
+\cmdnote{GPS 변위 프로브 + IMU 제자리 회전.}
+
+\cmdcap{6 · 유선 실행 — 상대경로 1회 \normalfont\color{muted}— 구동}
+\begin{lstlisting}[style=cmd]
+bash scripts/run_physical_path_planner.sh auto-relative-run \
+  --goal-east-m 1.8 --goal-north-m 1.8 \
+  --workspace-width-m 1.8 --step-spacing-m 0.6 \
+  --out-dir outputs/physical_path_planning/auto_run
+\end{lstlisting}
+\cmdnote{RC를 AUTO로 넘기면 현재 GPS를 원점으로 시작. 무선은 대신 \code{rc-auto-pattern}으로 1회 업로드 후 USB를 뽑고 RC 송신기로 운용.}
+
+% ====================== 7. 라우팅 코드만 원할 때 ======================
+\section{라우팅 코드만 원할 때 · 참고}
+
+\textbf{A. 순수 ``경로 계산 로직''을 원하면} \ra{} 이 세 파일(우선순위 순):
+\begin{enumerate}[label=\textbf{\arabic*.}, leftmargin=1.8em]
+  \item \code{gps_coverage_core/planner.py} — 위경도\,\ra\,미터, 레인 오프셋, 왕복 웨이포인트(라우팅의 심장).
+  \item \code{tools/physical_path_planning/geometry.py} — 그 경로를 로버가 밟을 수 있는
+        ㄹ자 세그먼트(직진/코너 회전/스텝)로 분해.
+  \item \code{tools/physical_path_planning/controller.py} — 세그먼트를 GPS/IMU 피드백으로
+        보정하며 실행하는 감독 루프.
+\end{enumerate}
+
+\textbf{B. ``구동 인터페이스''를 원하면} \ra{}
+\code{tools/physical_path_planning/executor.py} + \code{gps_coverage_core/protocol.py}
+(§5 시리얼 프로토콜).
+
+\vspace{0.3em}
+\textbf{데이터 흐름}
+\begin{center}
+\footnotesize
+\begin{tikzpicture}[node distance=3.5mm, font=\footnotesize,
+  n/.style={draw=hair, line width=0.6pt, inner sep=4pt, align=center, minimum height=8mm}]
+\node[n] (a) {현장 GPS\\/목표};
+\node[n, right=of a] (b) {\ttfamily planner.py\\웨이포인트};
+\node[n, right=of b] (c) {\ttfamily geometry.py\\ㄹ자 세그먼트};
+\node[n, right=of c] (d) {\ttfamily controller.py\\보정 실행};
+\node[n, right=of d] (e) {\ttfamily executor.py\\\normalfont SET 명령};
+\node[n, right=of e] (f) {로버 \ttfamily.ino\\\normalfont 모터};
+\foreach \x/\y in {a/b,b/c,c/d,d/e,e/f}
+  \draw[-{Latex[length=1.6mm]}, line width=0.6pt] (\x) -- (\y);
+\end{tikzpicture}
+\end{center}
+
+\textbf{참고 문서 (\code{docs/})}
+\begin{center}
+\renewcommand{\arraystretch}{1.22}
+\rowcolors{2}{zebra}{white}
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{문서} & \textbf{내용}\\
+\midrule
+\code{README_physical_path_planning.md}      & 현장 실행 런북(유선/무선)\\
+\code{physical_path_planning_architecture.md} & 모듈 아키텍처\\
+\code{station_routing_code_guide.md}          & 이 문서의 원본 텍스트(전체 상세)\\
+\code{claude_collaboration_guide.md}          & 제어 의미론 · 트러블슈팅 결정 트리\\
+\code{protocol.md}, \code{wiring.md}, \code{rc_channel_map.md} & 프로토콜 · 배선 · RC 채널\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\hrulefull
+{\footnotesize\color{muted}\textbf{안전.} 완전 자율이 아니라 감독·가드 구동.
+실제 주행 전 \code{preview}로 경로를 확인하고, GPS 픽스·캘리브레이션을 먼저 끝낸다.
+\hfill 재생성 \texttt{xelatex station\_routing\_code\_guide.tex}}
+
+\end{document}
