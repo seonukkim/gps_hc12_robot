@@ -412,6 +412,10 @@ def test_mac_execute_plan_loads_approved_motion_calibration(tmp_path: Path) -> N
 
 
 def test_gps_degraded_continue_policy_does_not_abort_when_imu_available() -> None:
+    """GPS 열화 시 dead_reckon_gps 가 캐시로 대체(degraded 표시)하고, continue 정책이면 중단 안 함.
+
+    On degraded GPS, dead_reckon_gps uses the cache (flagged degraded); the continue
+    policy keeps going rather than aborting."""
     cache: dict[str, object] = {"lat": 35.1, "lon": 129.1, "degraded": False}
     gps = controller.dead_reckon_gps(
         {"gps_block_reason": "BAD_HDOP", "current_lat": "NA", "current_lon": "NA"},

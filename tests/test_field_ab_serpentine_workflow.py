@@ -801,6 +801,17 @@ def test_field_ab_to_serpentine_accepts_georef_points(tmp_path: Path) -> None:
 
 
 def test_station_tracker_replay_log_converts_lat_lon_with_georef(tmp_path: Path) -> None:
+    """georeference 가 있으면 리플레이 로그의 lat/lon 이 로컬 포즈로 변환되어 타깃이 계산됨.
+
+    패키지에 georef 를 심고 원점(35.0,129.0)과 같은 위경도 로그를 주면
+    local_pose_available=True, source=gps_georeference, reason=OK, 유한 거리로
+    변환됨을 확인. 펌웨어는 여전히 compile_time 이라 모터 준비는 False.
+
+    With georeference present, a lat/lon replay row converts to a local pose
+    (gps_georeference, reason OK, finite distance); target preview is ready but
+    motor test is not.
+    """
+    # georef 리터럴은 캡처 산출물 스키마를 흉내낸 것 / mimics the captured georef schema
     georef = {
         "georeference_available": True,
         "raw_A_lat": 35.0,
@@ -865,6 +876,14 @@ def test_station_tracker_replay_log_converts_lat_lon_with_georef(tmp_path: Path)
 
 
 def test_check_georef_path_package_reports_metadata(tmp_path: Path) -> None:
+    """georef 패키지 검사기가 메타데이터와 변환 정합성(sanity)을 보고하는지 확인.
+
+    check_georef_path_package.inspect_georef 가 georeference_available·
+    local_frame_type·conversion_sanity_check=True·무모터를 보고함을 검증.
+
+    The georef package checker reports metadata (frame type) and a passing
+    conversion sanity check, motor-free.
+    """
     georef = {
         "georeference_available": True,
         "raw_A_lat": 35.0,
@@ -904,7 +923,19 @@ def test_check_georef_path_package_reports_metadata(tmp_path: Path) -> None:
     assert result["motor_command_generated"] is False
 
 
+# ── 7. 스테이션 가상 제어 (Stage 14) / Station virtual control ──
+
+
 def test_virtual_controller_offline_pose_produces_virtual_control(tmp_path: Path) -> None:
+    """오프라인 포즈에서 가상 제어기가 클램프된 전진/회전 명령을 "가상으로" 산출.
+
+    offline_pose 모드로 virtual_control.csv 를 만들고 virtual_control_generated=True,
+    heading OK, forward<=0.10·|turn|<=0.05 로 클램프, 무모터/모터준비 False, PNG 존재를
+    확인(진단 전용 가상 명령).
+
+    In offline_pose the virtual controller emits clamped virtual forward/turn
+    commands (heading OK) that are motor-free and not motor-test-ready.
+    """
     package = field_ab_to_serpentine.build_path_package(
         raw_a=(8.0, 0.0),
         raw_b=(0.0, 1.2),
@@ -948,6 +979,16 @@ def test_virtual_controller_offline_pose_produces_virtual_control(tmp_path: Path
 
 
 def test_virtual_controller_replay_log_with_georef_produces_rows(tmp_path: Path) -> None:
+    """georef 리플레이 로그로 가상 제어기가 행을 생성하고 무모터/모터준비False 를 유지.
+
+    replay_log + georef 로 virtual_control.csv 를 만들고 펌웨어 타깃 compile_time·
+    virtual_control_generated=True·무모터/무물리출력을 확인, summary 에 가상 제어
+    프리뷰 준비 True·모터 시험 준비 False 가 표기됨을 검증.
+
+    A georeferenced replay log yields virtual-control rows (firmware still
+    compile-time) that stay motor-free; preview ready, motor test not.
+    """
+    # georef 리터럴은 캡처 산출물 스키마를 흉내낸 것 / mimics the captured georef schema
     georef = {
         "georeference_available": True,
         "raw_A_lat": 35.0,
@@ -1006,6 +1047,14 @@ def test_virtual_controller_replay_log_with_georef_produces_rows(tmp_path: Path)
 
 
 def test_virtual_controller_heading_missing_is_diag_only_not_motor_ready() -> None:
+    """헤딩이 없으면 가상 제어가 DIAG_ONLY 로 표기되고 모터 준비는 절대 True 가 안 됨.
+
+    현재 헤딩이 빈 문자열인 행에 compute_virtual_control 을 적용하면
+    virtual_heading_status=DIAG_ONLY, 프리뷰 준비 True 지만 모터 준비/무모터는 False.
+
+    Missing heading yields DIAG_ONLY virtual control: preview-ready but never
+    motor-ready, motor-free.
+    """
     row = {
         "local_pose_available": True,
         "target_distance_m": 2.0,
@@ -1025,6 +1074,15 @@ def test_virtual_controller_heading_missing_is_diag_only_not_motor_ready() -> No
 
 
 def test_virtual_controller_live_parser_rows_are_diagnostic_without_serial() -> None:
+    """시리얼 없이도 라이브 파서→타깃 행→가상 행이 진단(DIAG_ONLY)으로 생성되는지 확인.
+
+    Stage 12 build_rows_from_replay(live_usbdbg)로 타깃 행을 만든 뒤
+    build_virtual_rows 로 가상 행을 얹으면 virtual_control_generated=True·
+    DIAG_ONLY·모터준비False·무모터임을 검증(Stage12→Stage14 연동, 하드웨어 불필요).
+
+    Without serial, the live parser → target rows → virtual rows chain produces
+    DIAG_ONLY virtual control that is motor-free and not motor-ready.
+    """
     package = field_ab_to_serpentine.build_path_package(
         raw_a=(8.0, 0.0),
         raw_b=(0.0, 1.2),

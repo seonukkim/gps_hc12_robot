@@ -457,6 +457,7 @@ def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
 
 
 def test_manual_control_default_profile_uses_rc_mix_decoder() -> None:
+    """기본 rc-mix-ppm 프로파일(FALLING/4000us/min0, IMU off)을 선택 / Default rc-mix-ppm profile decode settings."""
     flags = cli.manual_control_firmware_flags(mode_channel_index=4)
     assert cli.MANUAL_CONTROL_DEFAULT_PROFILE == "rc-mix-ppm"
     assert "MANUAL_FORWARD_SIGN=-1" in flags
@@ -477,6 +478,7 @@ def test_manual_control_default_profile_uses_rc_mix_decoder() -> None:
 
 
 def test_manual_control_full_telemetry_profile_disables_imu_like_known_good() -> None:
+    """full-telemetry 프로파일도 known-good 처럼 IMU 를 끈다 / Full-telemetry profile keeps IMU off like known-good."""
     flags = cli.manual_control_firmware_flags(
         profile=cli.MANUAL_CONTROL_FULL_TELEMETRY_PPM_PROFILE,
         mode_channel_index=4,
@@ -489,6 +491,7 @@ def test_manual_control_full_telemetry_profile_disables_imu_like_known_good() ->
 
 
 def test_integrated_ppm_decoder_matches_old_moving_controller_edge() -> None:
+    """펌웨어 소스의 통합 PPM 디코더가 옛 이동 컨트롤러 엣지/임계 상수와 일치 / Firmware PPM decoder matches old edge/thresholds."""
     source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
     assert "#define PPM_SYNC_THRESHOLD_US 3000" in source
     assert "constexpr uint16_t PPM_SYNC_US = PPM_SYNC_THRESHOLD_US;" in source
@@ -501,6 +504,7 @@ def test_integrated_ppm_decoder_matches_old_moving_controller_edge() -> None:
 
 
 def test_manual_control_ppm_ch1_maps_to_physical_b() -> None:
+    """PPM CH1(조향)이 물리 B 로 매핑(좌=+1, 우=-1) / PPM CH1 steer maps to physical B."""
     low_left = cli.manual_control_mapping(steer_norm=-1.0, throttle_norm=0.0)
     high_right = cli.manual_control_mapping(steer_norm=1.0, throttle_norm=0.0)
     assert low_left["physical_a_cmd"] == pytest.approx(0.0)
@@ -509,6 +513,7 @@ def test_manual_control_ppm_ch1_maps_to_physical_b() -> None:
 
 
 def test_manual_control_ppm_ch2_maps_to_physical_a() -> None:
+    """PPM CH2(스로틀)이 물리 A 로 매핑(전진=+1, 후진=-1) / PPM CH2 throttle maps to physical A."""
     throttle_low_forward = cli.manual_control_mapping(steer_norm=0.0, throttle_norm=-1.0)
     throttle_high_backward = cli.manual_control_mapping(steer_norm=0.0, throttle_norm=1.0)
     assert throttle_low_forward["physical_a_cmd"] == pytest.approx(1.0)
@@ -516,7 +521,11 @@ def test_manual_control_ppm_ch2_maps_to_physical_a() -> None:
     assert throttle_high_backward["physical_a_cmd"] == pytest.approx(-1.0)
 
 
+# ── manual-control 텔레메트리 평가 + 상태 라인 / manual-control evaluation + status line ──
+
+
 def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
+    """옛 known-good 텔레메트리 행을 PASS 로 평가(GPS/IMU/경로패키지 불요) / Known-good telemetry evaluates to PASS."""
     rows = [
         {
             "mode": "MANUAL",
@@ -561,6 +570,7 @@ def test_manual_control_evaluates_old_known_good_telemetry_as_pass() -> None:
 
 
 def test_manual_control_unstable_ppm_does_not_pass_from_one_good_row() -> None:
+    """단 한 개의 좋은 행으로는 PASS 불가; 불안정 PPM 은 INVALID 로 분류 / One good row can't pass unstable PPM."""
     rows = [
         {
             "manual_control": "true",
@@ -605,6 +615,7 @@ def test_manual_control_unstable_ppm_does_not_pass_from_one_good_row() -> None:
 
 
 def test_manual_control_all_zero_ppm_reports_absent() -> None:
+    """전(全) 0 PPM 은 PPM_INPUT_ABSENT + D6 핀 안내로 보고 / All-zero PPM reports absent with D6 hint."""
     summary = cli.evaluate_manual_control_rows(cli.telemetry.parse_usbdbg_rows(_RC_ABSENT_LOG))
     assert summary["reason"] == "PPM_INPUT_ABSENT"
     assert summary["manual_switch"] == "UNKNOWN_PPM_ABSENT"
@@ -614,6 +625,7 @@ def test_manual_control_all_zero_ppm_reports_absent() -> None:
 
 
 def test_manual_control_no_frame_captured_does_not_report_missing_mode_channel() -> None:
+    """프레임 미포착 시 '모드채널 없음'이 아니라 PPM_INPUT_ABSENT 로 정정 / No frame -> absent, not missing-mode-channel."""
     rows = [
         {
             "manual_control": "true",
@@ -644,6 +656,7 @@ def test_manual_control_no_frame_captured_does_not_report_missing_mode_channel()
 
 
 def test_manual_control_sync_only_no_channels_is_precise_reason() -> None:
+    """싱크만 있고 채널 없음은 PPM_SYNC_ONLY_NO_CHANNELS 로 정밀 분류 / Sync-only maps to its precise reason."""
     rows = [
         {
             "manual_control": "false",
@@ -681,6 +694,7 @@ def test_manual_control_sync_only_no_channels_is_precise_reason() -> None:
 
 
 def test_manual_control_mode_missing_requires_captured_mode_channel_slot() -> None:
+    """채널은 잡혔지만 모드 슬롯이 0이면 MODE_CHANNEL_MISSING / Captured frame but empty mode slot -> mode-channel-missing."""
     rows = [
         {
             "manual_control": "true",
@@ -705,6 +719,7 @@ def test_manual_control_mode_missing_requires_captured_mode_channel_slot() -> No
 
 
 def test_manual_control_ppm_edge_mismatch_classifies_separately() -> None:
+    """기대 엣지와 다른 엣지로 프레임 없음이면 PPM_EDGE_MISMATCH 로 분리 분류 / Edge mismatch classified separately."""
     rows = [
         {
             "manual_control": "true",
@@ -730,6 +745,7 @@ def test_manual_control_ppm_edge_mismatch_classifies_separately() -> None:
 
 
 def test_manual_control_status_line_includes_full_telemetry_snapshot() -> None:
+    """상태 라인이 RC/PPM/모터/GPS/IMU 전 필드 스냅샷을 포함 / Status line includes the full telemetry snapshot."""
     rows = [
         {
             "rc_input_detected": "true",
@@ -801,6 +817,7 @@ def test_manual_control_status_line_includes_full_telemetry_snapshot() -> None:
 
 
 def test_manual_control_status_line_uses_raw_mode_channel_fallback() -> None:
+    """mode_us 없을 때 raw_mode_channel_us 로 폴백해 MANUAL 판정 / Falls back to raw mode-channel µs for the switch."""
     rows = [
         {
             "rc_input_detected": "true",
@@ -823,6 +840,7 @@ def test_manual_control_status_line_uses_raw_mode_channel_fallback() -> None:
 
 
 def test_manual_control_short_ppm_pulses_classify_as_invalid_channels() -> None:
+    """짧은 펄스로 유효 프레임 없음은 채널-무효(present-but-invalid)로 분류 / Short pulses classify as invalid channels."""
     rows = [
         {
             "manual_control": "true",
@@ -852,6 +870,7 @@ def test_manual_control_short_ppm_pulses_classify_as_invalid_channels() -> None:
 
 
 def test_manual_control_no_usbdbg_rows_classifies_without_all_na() -> None:
+    """USBDBG 행이 아예 없으면 NO_USBDBG_TELEMETRY 로 분류(전부 NA 남발 금지) / No rows -> explicit no-telemetry reason."""
     summary = cli.evaluate_manual_control_rows([])
     assert summary["reason"] == "NO_USBDBG_TELEMETRY"
     assert summary["manual_switch"] == "UNKNOWN_NO_USBDBG_TELEMETRY"
@@ -863,6 +882,7 @@ def test_manual_control_no_usbdbg_rows_classifies_without_all_na() -> None:
 
 
 def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """manual-control --print-cmd 가 프로파일/플래그/빌드경로 출력 + 표준 요약 기록 / print-cmd prints flags and writes summary."""
     rc = cli.main(["manual-control", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -880,7 +900,11 @@ def test_manual_control_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.
     assert data["ppm_input_pin"] == "D6"
 
 
+# ── usb-pulse-test 결과 분류 + 옛 별칭 경고 / usb-pulse-test classification + deprecated aliases ──
+
+
 def test_usb_pulse_test_classifies_no_command_sent_waiting_for_user() -> None:
+    """사용자 중단 + 명령 미전송 -> WAITING_FOR_USER_ENTER / User-aborted with no command -> waiting-for-user."""
     result, reason, action = cli.station_drive_classification([], user_aborted=True)
     assert result == "WAITING_FOR_USER_ENTER"
     assert reason == "WAITING_FOR_USER_ENTER"
@@ -888,6 +912,7 @@ def test_usb_pulse_test_classifies_no_command_sent_waiting_for_user() -> None:
 
 
 def test_usb_pulse_test_classifies_telemetry_motion_but_user_none() -> None:
+    """텔레메트리는 출력 활성인데 사용자가 '움직임 없음' 보고 -> 별도 사유 / Telemetry active but user saw none."""
     rows = [
         {
             "command_sent": True,
@@ -909,6 +934,7 @@ def test_usb_pulse_test_classifies_telemetry_motion_but_user_none() -> None:
 
 
 def test_usb_pulse_test_summary_names_are_clean() -> None:
+    """사용자 움직임 확인 시 PASS, 사유 문자열에 옛 'Stage' 잔재 없음 / User-confirmed motion passes with clean names."""
     rows = [
         {
             "command_sent": True,
@@ -932,6 +958,7 @@ def test_usb_pulse_test_summary_names_are_clean() -> None:
 def test_station_drive_alias_warns_and_maps_to_usb_pulse_test(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """옛 station-drive 별칭은 경고 후 usb-pulse-test 로 매핑 / Deprecated station-drive warns and maps to usb-pulse-test."""
     rc = cli.main(["station-drive", "--print-command", "true", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -943,6 +970,7 @@ def test_station_drive_alias_warns_and_maps_to_usb_pulse_test(
 def test_station_manual_alias_warns_and_maps_to_usb_pulse_test(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """옛 station-manual 별칭도 경고 후 usb-pulse-test 로 매핑 / Deprecated station-manual warns and maps too."""
     rc = cli.main(["station-manual", "--print-command", "true", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -951,7 +979,11 @@ def test_station_manual_alias_warns_and_maps_to_usb_pulse_test(
     assert data["mode"] == "usb-pulse-test"
 
 
+# ── station-hw 진단/수동: 링크·파서·데드맨·E-stop·A/B 매핑 / station-hw diagnose & manual ──
+
+
 def test_station_hw_diagnose_classifies_absent_link() -> None:
+    """스테이션 링크 무신호 -> STATION_HW_LINK_ABSENT / No station link -> link-absent classification."""
     rows = [
         {
             "station_age_ms": "NA",
@@ -968,6 +1000,7 @@ def test_station_hw_diagnose_classifies_absent_link() -> None:
 
 
 def test_station_hw_diagnose_classifies_rx_count_parse_fail() -> None:
+    """수신은 되나 파싱 실패 -> WRONG_STATION_FRAME_PARSER(전송/프로토콜/파서 명시) / RX-but-parse-fail names the wrong parser."""
     rows = [
         {
             "station_rx_count": "5",
@@ -989,6 +1022,7 @@ def test_station_hw_diagnose_classifies_rx_count_parse_fail() -> None:
 
 
 def test_station_hw_diagnose_classifies_deadman_false() -> None:
+    """유효 프레임이지만 데드맨 비활성 -> STATION_HW_DEADMAN_NOT_ACTIVE / Deadman off -> deadman-not-active."""
     rows = [
         {
             "station_seq": "7",
@@ -1003,6 +1037,7 @@ def test_station_hw_diagnose_classifies_deadman_false() -> None:
 
 
 def test_station_hw_diagnose_classifies_estop_true() -> None:
+    """E-stop 활성 -> STATION_HW_ESTOP_ACTIVE / E-stop asserted -> estop-active classification."""
     rows = [
         {
             "station_seq": "7",
@@ -1017,6 +1052,7 @@ def test_station_hw_diagnose_classifies_estop_true() -> None:
 
 
 def test_station_hw_manual_maps_forward_and_turn_to_physical_ab() -> None:
+    """station-hw-manual 이 forward/turn 을 물리 A/B 로 매핑하고 PASS(RC 불요) / Maps forward/turn to A/B and passes."""
     rows = [
         {
             "station_hw_manual_mode": "true",
@@ -1045,6 +1081,7 @@ def test_station_hw_manual_maps_forward_and_turn_to_physical_ab() -> None:
 
 
 def test_station_hw_manual_pass_does_not_require_gps_imu_or_rc() -> None:
+    """station-hw-manual PASS 는 GPS/IMU/RC 없이도 성립 / Manual PASS requires no GPS, IMU, or RC."""
     rows = [
         {
             "station_hw_manual_mode": "true",
@@ -1077,6 +1114,7 @@ def test_station_hw_manual_pass_does_not_require_gps_imu_or_rc() -> None:
 
 
 def test_station_hw_manual_classifies_valid_ab_without_motor_as_output_blocked() -> None:
+    """유효 A/B 지만 모터 미출력: manual=OUTPUT_BLOCKED(실패) vs diagnose=READY(성공) / Valid A/B, no motor: manual blocked, diagnose ready."""
     rows = [
         {
             "station_hw_manual_mode": "true",
@@ -1106,6 +1144,7 @@ def test_station_hw_manual_classifies_valid_ab_without_motor_as_output_blocked()
 
 
 def test_station_hw_status_line_contains_pipeline_fields() -> None:
+    """상태 라인이 스테이션 파이프라인 필드(rx/frame/deadman/A/B)를 담고 hc12 잔재 없음 / Status line carries station pipeline fields."""
     rows = [
         {
             "station_rx_count": "3",
@@ -1131,6 +1170,7 @@ def test_station_hw_status_line_contains_pipeline_fields() -> None:
 
 
 def test_station_hw_firmware_flags_enable_ab_mapping() -> None:
+    """station-hw-manual 펌웨어 플래그가 A/B 매핑 + RC 무시를 활성 / Flags enable A/B mapping and ignore RC."""
     flags = cli.station_hw_manual_firmware_flags()
     assert "STATION_HW_MANUAL_ENABLE=1" in flags
     assert "STATION_HW_MANUAL_A_B_MAPPING=1" in flags
@@ -1140,6 +1180,7 @@ def test_station_hw_firmware_flags_enable_ab_mapping() -> None:
 def test_station_hw_diagnose_print_command_writes_summary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """station-hw-diagnose --print-command 가 안내 출력 + 표준 요약 기록 / print-command prints guide and writes summary."""
     rc = cli.main(["station-hw-diagnose", "--print-command", "true", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -1149,6 +1190,7 @@ def test_station_hw_diagnose_print_command_writes_summary(
 
 
 def test_station_hw_manual_default_duration_is_continuous() -> None:
+    """station-hw-manual 기본 duration=0(연속), diagnose 는 유한 / Manual defaults to continuous, diagnose to finite."""
     parser = cli.build_parser()
     manual_args = parser.parse_args(["station-hw-manual"])
     diagnose_args = parser.parse_args(["station-hw-diagnose"])
@@ -1157,6 +1199,7 @@ def test_station_hw_manual_default_duration_is_continuous() -> None:
 
 
 def test_manual_control_default_duration_is_continuous() -> None:
+    """manual-control 기본 duration=0(연속), profile=rc-mix-ppm / Manual-control defaults to continuous, rc-mix-ppm."""
     parser = cli.build_parser()
     args = parser.parse_args(["manual-control"])
     assert args.duration_s == 0.0
@@ -1164,6 +1207,7 @@ def test_manual_control_default_duration_is_continuous() -> None:
 
 
 def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:
+    """펌웨어 루프가 오래된 데드맨/E-stop 에서 스테이션 수동 출력을 멈추는 소스 확인 / Firmware halts on stale deadman/estop."""
     source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
     assert "bool stationManualActive = stationManualFresh && stationManual.deadman && !stationEstop;" in source
     assert "if (stationEstop) {" in source
@@ -1173,6 +1217,7 @@ def test_station_hw_firmware_loop_stops_on_stale_deadman_or_estop() -> None:
 
 
 def test_station_hw_firmware_supports_auto_station_manual_parser() -> None:
+    """펌웨어가 MANUAL/AB/THROTTLE/STEER 자동 파서 + raw 프레임 덤프를 지원 / Firmware supports the auto station parser."""
     source = Path("firmware/openrb_robot_controller/openrb_robot_controller.ino").read_text()
     assert "parseStationManualLineAuto" in source
     assert 'command == "MANUAL"' in source
@@ -1183,6 +1228,7 @@ def test_station_hw_firmware_supports_auto_station_manual_parser() -> None:
 
 
 def test_station_hw_raw_frame_dumps_are_written(tmp_path: Path) -> None:
+    """raw 스테이션 프레임(디코드/hex)이 파일로 정확히 기록됨 / Raw station frames (decoded + hex) are written to files."""
     rows = [
         {
             "station_raw_frame": "MANUAL%2Cnot_matching%2C%23",
@@ -1208,6 +1254,7 @@ def test_station_hw_raw_frame_dumps_are_written(tmp_path: Path) -> None:
 def test_station_hw_monitor_ctrl_c_writes_summary_without_traceback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """모니터 중 Ctrl-C 는 트레이스백 없이 USER_ABORTED 요약 + CSV/로그 기록 / Ctrl-C -> clean USER_ABORTED summary."""
     class FakeSerialHandle:
         def __enter__(self) -> "FakeSerialHandle":
             return self
@@ -1252,6 +1299,7 @@ def test_station_hw_monitor_ctrl_c_writes_summary_without_traceback(
 
 
 def test_docs_quickstart_uses_unified_launcher_only() -> None:
+    """문서(README/필드매뉴얼)가 통합 런처만 안내하고 옛 stage 스크립트를 참조하지 않음 / Docs point only at the unified launcher."""
     readme = Path("README.md").read_text()
     ppp_readme = Path("docs/README_physical_path_planning.md").read_text()
     field_manual = Path("docs/field_test_manual.md").read_text()
@@ -1262,10 +1310,11 @@ def test_docs_quickstart_uses_unified_launcher_only() -> None:
     assert "RC_INPUT_ABSENT" in field_manual
 
 
-# --- preview (no serial, no motion) ------------------------------------------
+# ── preview (시리얼/모션 없음, 기하 전용) / preview (no serial, no motion) ──
 
 
 def test_preview_writes_guarded_summary(tmp_path: Path) -> None:
+    """preview 가 커버리지 계획 요약(세그먼트/레인 수, path_shape)을 가드된 상태로 기록 / Preview writes a guarded coverage summary."""
     rc = cli.main(
         ["preview", *_PREVIEW_GOAL, "--workspace-width-m", "2", "--no-png", "--out-dir", str(tmp_path)]
     )
@@ -1280,6 +1329,7 @@ def test_preview_writes_guarded_summary(tmp_path: Path) -> None:
 
 
 def test_preview_direct_line_needs_no_width(tmp_path: Path) -> None:
+    """direct_line 모양은 워크스페이스 폭 없이도 성공 / A direct_line path needs no workspace width."""
     rc = cli.main(
         ["preview", *_PREVIEW_GOAL, "--path-shape", "direct_line", "--no-png", "--out-dir", str(tmp_path)]
     )
@@ -1289,6 +1339,7 @@ def test_preview_direct_line_needs_no_width(tmp_path: Path) -> None:
 
 
 def test_preview_diagonal_without_width_fails_cleanly(tmp_path: Path) -> None:
+    """대각선 목표에 폭 없이 serpentine 요청 -> PLAN_INPUT_INVALID 로 깔끔히 실패 / Diagonal serpentine without width fails cleanly."""
     # A->B is the diagonal, so a serpentine plan requires a workspace width.
     rc = cli.main(["preview", *_PREVIEW_GOAL, "--no-png", "--out-dir", str(tmp_path)])
     assert rc == 2
@@ -1298,6 +1349,7 @@ def test_preview_diagonal_without_width_fails_cleanly(tmp_path: Path) -> None:
 
 
 def test_preview_captures_live_gps_start_from_log_when_omitted(tmp_path: Path) -> None:
+    """시작 좌표 생략 시 로그의 라이브 GPS fix 를 시작점으로 캡처 / Omitted start captures live GPS from the log."""
     log = tmp_path / "gps.log"
     log.write_text(
         "USBDBG event=HEARTBEAT gps_chars=120 gps_solution_valid=false gps_ready=false "
@@ -1337,6 +1389,7 @@ def test_preview_captures_live_gps_start_from_log_when_omitted(tmp_path: Path) -
 
 
 def test_preview_uses_fresh_cached_gps_when_live_gps_missing(tmp_path: Path) -> None:
+    """라이브 fix 없으면 신선한 캐시 GPS 를 시작점으로 사용 / Uses fresh cached GPS when the live fix is missing."""
     log = tmp_path / "gps.log"
     log.write_text(
         "USBDBG event=HEARTBEAT current_lat=NA current_lon=NA gps_cached_lat=35.5709000 "
@@ -1369,6 +1422,7 @@ def test_preview_uses_fresh_cached_gps_when_live_gps_missing(tmp_path: Path) -> 
 
 
 def test_preview_without_live_or_cached_gps_fails_cleanly(tmp_path: Path) -> None:
+    """라이브도 캐시도 없으면 NO_USABLE_START_GPS 로 안내와 함께 실패 / No live/cached GPS fails cleanly with guidance."""
     log = tmp_path / "gps.log"
     log.write_text("USBDBG event=HEARTBEAT current_lat=NA current_lon=NA gps_block_reason=NO_LOCATION\n")
     rc = cli.main(
@@ -1397,7 +1451,11 @@ def test_preview_without_live_or_cached_gps_fails_cleanly(tmp_path: Path) -> Non
     assert "pass --start-lat and --start-lon" in summary["next_recommended_action"]
 
 
+# ── gps-wait: 타임아웃/성공/파서불일치/중단/펌웨어 프로파일 / gps-wait lifecycle ──
+
+
 def test_gps_wait_timeout_writes_best_observed_values(tmp_path: Path) -> None:
+    """gps-wait 타임아웃 시 관측된 최선값(sats/hdop/imu)을 요약에 기록 / Timeout records best-observed GPS/IMU values."""
     log = tmp_path / "gps.log"
     log.write_text(
         "USBDBG event=HEARTBEAT gps_chars=100 gps_solution_valid=false gps_ready=false "
@@ -1417,6 +1475,7 @@ def test_gps_wait_timeout_writes_best_observed_values(tmp_path: Path) -> None:
 
 
 def test_gps_wait_success_detects_delayed_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """지연 도착한 유효 fix 를 감지해 GPS_READY 로 성공 / Detects a delayed fix and succeeds as GPS_READY."""
     monkeypatch.setattr(cli, "DEFAULT_GPS_CACHE", tmp_path / "gps_cache" / "latest_start.json")
     log = tmp_path / "gps.log"
     log.write_text(
@@ -1435,6 +1494,7 @@ def test_gps_wait_success_detects_delayed_fix(tmp_path: Path, monkeypatch: pytes
 
 
 def test_gps_wait_parse_mismatch_is_clear(tmp_path: Path) -> None:
+    """파싱 불가한 텔레메트리는 WRONG_FIRMWARE_PROFILE... 로 명확히 진단 + raw 샘플 저장 / Unparseable lines diagnosed clearly."""
     log = tmp_path / "gps.log"
     log.write_text("RAW_GPS_LINE without key value telemetry\nanother unparsed sample\n")
     rc = cli.main(["gps-wait", "--from-log", str(log), "--timeout-s", "300", "--out-dir", str(tmp_path)])
@@ -1445,6 +1505,7 @@ def test_gps_wait_parse_mismatch_is_clear(tmp_path: Path) -> None:
 
 
 def test_gps_wait_keyboard_interrupt_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """gps-wait 중 Ctrl-C 는 USER_ABORTED 요약 + raw 로그를 남기고 rc=130 / Ctrl-C -> USER_ABORTED summary, rc 130."""
     port = tmp_path / "ttyUSB-test"
     port.touch()
 
@@ -1482,6 +1543,7 @@ def test_gps_wait_keyboard_interrupt_writes_summary(tmp_path: Path, monkeypatch:
 def test_gps_wait_uploads_mac_physical_supervised_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """포트 지정 gps-wait 는 MAC_PHYSICAL_SUPERVISED 프로파일을 업로드 후 GPS_READY / Uploads the supervised profile then GPS_READY."""
     port = tmp_path / "ttyUSB-test"
     port.touch()
     compile_flags: list[str] = []
@@ -1525,6 +1587,7 @@ def test_gps_wait_uploads_mac_physical_supervised_profile(
 
 
 def test_gps_wait_serial_disconnect_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """시리얼 끊김(OSError)은 SERIAL_DISCONNECT 요약으로 귀결(트레이스백 없음) / Serial disconnect -> clean summary."""
     port = tmp_path / "ttyUSB-test"
     port.touch()
 
@@ -1562,6 +1625,7 @@ def test_gps_wait_serial_disconnect_writes_summary(tmp_path: Path, monkeypatch: 
 def test_preview_live_gps_start_uses_mac_physical_supervised_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """포트 지정 preview 도 감독 프로파일을 업로드하고 start_source=live_gps / Port preview uploads supervised profile, live GPS start."""
     port = tmp_path / "ttyUSB-test"
     port.touch()
     compile_flags: list[str] = []
@@ -1620,10 +1684,11 @@ def test_preview_live_gps_start_uses_mac_physical_supervised_profile(
     assert summary["start_source"] == "live_gps"
 
 
-# --- run / execute-plan: --print-plan stays no-serial -------------------------
+# ── run / execute-plan: --print-plan 은 시리얼 미개방 유지 / run/execute-plan --print-plan stays no-serial ──
 
 
 def test_run_print_plan_builds_without_opening_serial(tmp_path: Path) -> None:
+    """run --print-plan 은 시리얼 없이 계획을 만들고 PLAN_PRINTED 요약 / run --print-plan builds plan without serial."""
     rc = cli.main(
         ["run", *_PREVIEW_GOAL, "--workspace-width-m", "2", "--print-plan", "--out-dir", str(tmp_path)]
     )
@@ -1636,6 +1701,7 @@ def test_run_print_plan_builds_without_opening_serial(tmp_path: Path) -> None:
 
 
 def test_run_print_plan_waits_for_gps_before_planning(tmp_path: Path) -> None:
+    """run --print-plan 은 계획 전 GPS 준비를 기다려 라이브 시작점을 확보 / Waits for GPS before planning."""
     log = tmp_path / "gps.log"
     log.write_text(
         "USBDBG event=HEARTBEAT gps_chars=100 gps_solution_valid=false gps_ready=false "
@@ -1672,6 +1738,7 @@ def test_run_print_plan_waits_for_gps_before_planning(tmp_path: Path) -> None:
 
 
 def test_execute_plan_is_an_alias_of_run(tmp_path: Path) -> None:
+    """execute-plan 은 run 의 별칭(같은 계획 산출) / execute-plan is an alias of run."""
     rc = cli.main(
         ["execute-plan", *_PREVIEW_GOAL, "--workspace-width-m", "2", "--print-plan", "--out-dir", str(tmp_path)]
     )
@@ -1680,6 +1747,7 @@ def test_execute_plan_is_an_alias_of_run(tmp_path: Path) -> None:
 
 
 def test_execute_plan_chunking_defaults_are_safe() -> None:
+    """execute-plan 청킹/보정 기본값이 안전 범위(chunk/max/heading-hold 등) / Chunking defaults are safe."""
     parser = cli.build_parser()
     args = parser.parse_args(["execute-plan"])
     assert args.live_chunk_ms == 700
@@ -1691,6 +1759,7 @@ def test_execute_plan_chunking_defaults_are_safe() -> None:
 
 
 def test_execute_plan_can_load_existing_plan_dir_without_start_coords(tmp_path: Path) -> None:
+    """기존 plan-dir 을 시작 좌표 없이 로드(start_source=plan_dir) / Loads an existing plan-dir without start coords."""
     plan_dir = tmp_path / "preview"
     rc = cli.main(
         ["preview", *_PREVIEW_GOAL, "--workspace-width-m", "2", "--no-png", "--out-dir", str(plan_dir)]
@@ -1710,6 +1779,7 @@ def test_execute_plan_can_load_existing_plan_dir_without_start_coords(tmp_path: 
 
 
 def test_execute_plan_loads_default_motion_calibration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """기본 위치의 승인된 모션 캘리브레이션을 로드해 각도-보정/연속 드라이브로 계획 / Loads default motion calibration."""
     monkeypatch.chdir(tmp_path)
     cal_dir = tmp_path / "outputs" / "physical_path_planning" / "calibration"
     cal_dir.mkdir(parents=True)
