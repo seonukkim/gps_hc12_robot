@@ -1,23 +1,69 @@
-"""Unified physical-path-planning CLI: one field-facing entrypoint.
+"""물리 경로계획 통합 CLI: 현장에서 실제 로버를 다루는 단일 진입점.
+Unified physical-path-planning CLI: one field-facing entrypoint.
 
-    diagnose              read-only telemetry summary.
-    gps-wait              wait for GPS cold/warm start.
-    manual-rc             restore and validate manual RC passthrough.
-    manual-control        upload and monitor PPM physical manual control.
-    guarded-pulse-ready   upload/check IMU-enabled guarded pulse firmware.
-    station-hw-diagnose  read-only physical station hardware link diagnostic.
-    station-hw-manual    physical station hardware manual rover control.
-    usb-pulse-test       laptop USB bounded A/B rover pulse test.
-    calibrate-turn        run guarded pulse turn-angle calibration.
-    set-motion-calibration write a manual calibration preset/override. No motion.
-    preview               build + render the rectangle coverage plan.
-    inspect-plan          inspect saved plan artifacts and preview images. No motion.
-    execute-plan / run    execute a planned path with guarded pulses.
+목적/역할 (Purpose):
+    ``scripts/run_physical_path_planner.sh`` 뒤에 있는 사용자 대면 CLI. GPS 대기,
+    수동 제어, 미리보기, 모션 튜닝, 턴 보정, 계획 실행 등 모든 "모드"를 하나의
+    argparse 서브커맨드 트리로 제공한다. 로버 시리얼 포트를 열고, arduino-cli 로
+    펌웨어를 빌드/업로드하며, 각 실행의 JSON/Markdown 요약을 out-dir 에 기록한다.
+    This is the user-facing CLI behind ``run_physical_path_planner.sh``: every mode
+    is an argparse subcommand that may open the rover serial port, build/upload
+    firmware via arduino-cli, and write JSON summaries under its ``--out-dir``.
 
-Every summary is routed through ``checks.assert_not_ready_for_full_path_following``
-so no mode can ever claim full-path-following readiness. The hardware modes open
-serial only when actually invoked; ``--print-plan`` / ``--print-cmd`` /
-``--from-log`` give fully no-hardware paths for previewing exactly what would run.
+모드 → 핸들러 매핑 (Mode → ``cmd_*`` handler map; wired in :func:`build_parser`):
+    diagnose               -> cmd_diagnose            read-only telemetry summary.
+    gps-wait               -> cmd_gps_wait            wait for GPS cold/warm start.
+    rc-input-diagnose      -> cmd_rc_input_diagnose   read-only PPM channel probe.
+    manual-rc              -> cmd_manual_rc           restore/validate RC passthrough.
+    manual-control         -> cmd_manual_control      upload+monitor PPM manual control.
+    rc-auto-pattern        -> cmd_rc_auto_pattern     untethered CH5 MANUAL/AUTO ㄹ pattern.
+    station-hw-diagnose    -> cmd_station_hw_diagnose read-only station HW link diag.
+    station-hw-manual      -> cmd_station_hw_manual   station HW manual rover control.
+    usb-pulse-test         -> cmd_usb_pulse_test      laptop-USB bounded A/B pulse test.
+    usb-drive-live         -> cmd_usb_drive_live      continuous USB A/B setpoint drive.
+    tune-motion            -> cmd_tune_motion         interactive per-primitive calibration.
+    set-motion-calibration -> cmd_set_motion_calibration  write preset/override. No motion.
+    reset-motion-calibration -> cmd_reset_motion_calibration  back up + clear. No motion.
+    calibration-check      -> cmd_calibration_check   stop_correct_go readiness. No motion.
+    guarded-pulse-ready    -> cmd_guarded_pulse_ready upload/check IMU guarded firmware.
+    calibrate-turn         -> cmd_calibrate_turn      shell out to turn-angle calibration.
+    preview                -> cmd_preview             build + render coverage plan. No motion.
+    auto-relative-preview  -> cmd_auto_relative_preview  relative A->B preview. No motion.
+    inspect-plan           -> cmd_inspect_plan        inspect saved plan/images. No motion.
+    align-heading          -> cmd_align_heading       point rover at first lane heading.
+    execute-plan / run     -> cmd_run                 execute a planned path (guarded).
+    auto-relative-run      -> cmd_auto_relative_run   AUTO-switch-triggered relative run.
+
+핵심 개념·불변식 (Key concepts / invariants):
+    - 모든 요약(summary) dict 은 ``checks.assert_not_ready_for_full_path_following``
+      또는 ``write_summary_files`` 를 거치므로 어떤 모드도 "완전 경로추종 준비완료"를
+      주장할 수 없다 (``ready_for_full_path_following`` 는 항상 False). 이 불변식은
+      감독되지 않은 자율주행을 막는 안전장치이므로 절대 우회하지 말 것.
+      Every summary flows through ``assert_not_ready_for_full_path_following`` /
+      ``write_summary_files``, so no mode ever claims full-path-following readiness.
+    - 하드웨어 모드는 실제로 호출될 때만 시리얼을 연다. ``--print-plan`` /
+      ``--print-cmd`` / ``--from-log`` 는 하드웨어 없이 "무엇이 실행될지"만 보여주는
+      완전 무하드웨어 경로다. ``import serial`` 은 이 무하드웨어 경로가 pyserial 을
+      요구하지 않도록 각 핸들러 내부에서 지역 import 한다.
+      Hardware modes open serial only when invoked; the print/from-log paths stay
+      hardware-free (``import serial`` is deliberately local to each handler).
+    - 물리 명령 규약: physical A = throttle(전후진), physical B = turn(조향).
+      PPM 배선은 D6 신호 / CH1 조향 / CH2 스로틀 / CH5 모드(MANUAL/AUTO) 이다.
+      Physical A = throttle, physical B = turn; PPM wiring D6/CH1/CH2/CH5.
+
+사용법/진입점 (Entry point):
+    ``main(argv)`` -> :func:`build_parser` -> ``args.handler(args)``. 각 서브파서는
+    ``set_defaults(handler=cmd_*)`` 로 자신의 핸들러를 지정한다. ``station-manual`` /
+    ``station-drive`` 는 ``usb-pulse-test`` 의 폐기 예정 별칭으로 재작성된다.
+
+리팩토링 노트 (Refactoring notes):
+    이 파일은 순수(무하드웨어) 헬퍼 + 출력 라이터 + 모드 핸들러 + argparse 로 구성된다.
+    순수 헬퍼(예: ``evaluate_*_rows``, ``gps_snapshot``)는 단위 테스트가 직접 부르는
+    계약이므로 반환 dict 의 키/의미를 함부로 바꾸지 말 것. 실제 모션은 controller /
+    executor / alignment 모듈에 위임하며, 이 CLI 는 인자 → 그 함수 호출 매핑을 담당한다.
+    Structure: pure helpers, output writers, mode handlers, argparse. The pure
+    ``evaluate_*``/``gps_snapshot`` helpers are a tested contract; motion is
+    delegated to controller/executor/alignment and this CLI only maps args to them.
 """
 from __future__ import annotations
 
@@ -96,16 +142,37 @@ USB_PULSE_TEST_ALIASES = {
 }
 
 
+# ── 순수 무하드웨어 헬퍼 (단위 테스트 대상) / Pure no-hardware helpers ──
 # --- Pure, no-hardware helpers (directly unit-testable) -----------------------
 
 
+# 예전 stage 접두 telemetry 키와의 하위호환. 문자열을 런타임에 이어붙여, 소스에서
+# 이 파일을 "stage20" 잔재로 착각해 잡아내지 않도록 한다.
+# Back-compat with older "stageNN" telemetry keys; assembled at runtime so a grep
+# for the retired stage names does not flag this file.
 _COMPAT_GUARDED_MODE_KEY = "stage" + "20_physical_ab_guarded_crawl"
 _COMPAT_GUARDED_READY_KEY = "stage" + "20_firmware_ready"
 _COMPAT_GUARDED_STATE_KEY = "stage" + "20_cmd_state"
 _COMPAT_GUARDED_STATE_FALLBACK_KEY = "stage" + "16_cmd_state"
 
 
+# ── 펌웨어 컴파일 플래그 빌더 / Firmware compile-flag builders ──
+# 이 함수들은 arduino-cli 의 ``compiler.cpp.extra_flags`` 로 넘길 ``-D...`` 문자열을
+# 만든다. 모든 프로파일이 경로추종 계열 플래그를 명시적으로 0 으로 끄고(감독 불가
+# 자율주행 방지) 각 모드가 필요한 기능만 켠다 — 이 불변식은 안전상 유지해야 한다.
+# These build the ``-D...`` string passed to arduino-cli's extra_flags. Every
+# profile explicitly disables the path-following flags (no unsupervised autonomy)
+# and enables only what the mode needs; keep that invariant.
+
+
 def guarded_pulse_imu_flags(*, max_abs_a: float = 0.35, max_abs_b: float = 0.35, max_ms: int = 1500) -> str:
+    """가드된 펄스 + IMU 진단 펌웨어 플래그 문자열. / Guarded-pulse + IMU-diag flags.
+
+    A/B 명령 크기와 펄스 길이를 하드웨어에서 강제로 상한(max_abs_a/b, max_ms)으로
+    묶어 감독형 실험을 안전하게 만든다. RC 입력은 무시하고 IMU yaw 진단만 켠다.
+    Bounds A/B magnitude and pulse length in firmware for supervised safety;
+    ignores RC input and enables IMU yaw diagnostics only.
+    """
     return (
         "-DUSB_PULSE_TEST_GUARDED=1 "
         f"-DUSB_PULSE_TEST_MAX_ABS_A={max_abs_a} "
@@ -132,6 +199,16 @@ def mac_physical_supervised_firmware_flags(
     max_duration_ms: int = 1000,
     update_timeout_ms: int = 350,
 ) -> str:
+    """감독형(MAC_PHYSICAL_SUPERVISED) 펌웨어 플래그. / Supervised firmware flags.
+
+    gps-wait / preview / usb-pulse-test / usb-drive-live / tune-motion / run 이
+    공유하는 기본 프로파일. 펄스(guarded)와 실시간 setpoint 드라이브(live) 양쪽
+    상한, IMU, GPS/telemetry 를 켜되 경로추종·모터 자율출력은 끈다. ``update_timeout_ms``
+    는 라이브 명령의 데드맨 TTL 이라 이보다 오래 새 setpoint 가 없으면 정지한다.
+    Shared base profile; enables guarded + live-drive bounds, IMU and telemetry,
+    but keeps path-following/auto motor output off. ``update_timeout_ms`` is the
+    live-drive deadman TTL.
+    """
     return (
         "-DMAC_PHYSICAL_SUPERVISED=1 "
         "-DUSB_PULSE_TEST_GUARDED=1 "
@@ -163,6 +240,11 @@ def guarded_pulse_firmware_flags(
     max_ms: int = 1500,
     ignore_rc_input_for_usb_command: bool = False,
 ) -> str:
+    """guarded-pulse-ready 모드용 플래그. / Flags for the guarded-pulse-ready mode.
+
+    ``ignore_rc_input_for_usb_command`` 이 True 면 RC 입력이 없어도 USB 명령을
+    받도록 STATION_MANUAL_IGNORE_RC_INPUT 를 덧붙인다.
+    """
     flags = guarded_pulse_imu_flags(max_abs_a=max_abs_a, max_abs_b=max_abs_b, max_ms=max_ms)
     if ignore_rc_input_for_usb_command:
         flags += " -DSTATION_MANUAL_IGNORE_RC_INPUT=1"
@@ -175,6 +257,7 @@ def usb_pulse_test_firmware_flags(
     max_abs_b: float = 0.35,
     max_ms: int = 1000,
 ) -> str:
+    """usb-pulse-test 펌웨어 플래그(감독형 프로파일 위임). / usb-pulse-test flags."""
     return mac_physical_supervised_firmware_flags(
         max_abs_a=max_abs_a,
         max_abs_b=max_abs_b,
@@ -189,6 +272,7 @@ def usb_drive_live_firmware_flags(
     max_duration_ms: int = 3000,
     update_timeout_ms: int = 350,
 ) -> str:
+    """usb-drive-live 펌웨어 플래그(감독형 프로파일 위임). / usb-drive-live flags."""
     return mac_physical_supervised_firmware_flags(
         max_abs_a=max_abs_a,
         max_abs_b=max_abs_b,
@@ -198,6 +282,7 @@ def usb_drive_live_firmware_flags(
 
 
 def station_hw_manual_firmware_flags() -> str:
+    """물리 스테이션 HW 수동제어 펌웨어 플래그. / Station-hardware manual flags."""
     return (
         "-DSTATION_HW_MANUAL_ENABLE=1 "
         "-DSTATION_HW_MANUAL_A_B_MAPPING=1 "
@@ -211,10 +296,16 @@ def station_hw_manual_firmware_flags() -> str:
 
 
 def station_hw_diagnose_firmware_flags() -> str:
+    """스테이션 HW 진단 전용(모터 출력 없음) 플래그. / Diagnose-only station flags."""
     return station_hw_manual_firmware_flags() + " -DSTATION_HW_MANUAL_DIAGNOSE_ONLY=1"
 
 
 def manual_rc_recovery_flags(*, mode_channel_index: int | None = None) -> str:
+    """구형 검증된 수동 RC 복구 펌웨어 플래그. / Known-good manual RC recovery flags.
+
+    현장 검증된 방향 부호(FORWARD=-1, TURN=+1)와 좌우 미교환/보정 비활성을 고정한다.
+    Locks the field-proven direction signs and disables L/R swap + drive calibration.
+    """
     flags = (
         "-DMANUAL_RC_RECOVERY=1 "
         "-DMANUAL_FORWARD_SIGN=-1 "
@@ -238,6 +329,18 @@ def manual_control_firmware_flags(
     profile: str = MANUAL_CONTROL_DEFAULT_PROFILE,
     mode_channel_index: int | None = 4,
 ) -> str:
+    """PPM 수동제어 펌웨어 플래그를 프로파일별로 생성. / PPM manual-control flags.
+
+    프로파일마다 PPM 디코더 설정(에지/sync 임계/최소폭)이 다르다. 이 값들이 실제
+    수신기의 채널을 해독하느냐를 좌우하므로 프로파일이 곧 "어느 디코더를 쓸지" 선택이다:
+    - rc-mix-ppm: FALLING 에지, sync 4000us (2026-05-02 rc_mix_test 검증).
+    - old-working-ppm: RISING 에지, sync 3000us, 최소폭 800us (구형 검증 값).
+    - full-telemetry-ppm: 펌웨어 기본 디코드값 유지(감독형 펌웨어와 동일) — 이 수신기
+      채널을 해독한다고 현장 확인된 유일한 설정.
+    Each profile is a different PPM decoder setting (edge/sync/min-width); the
+    profile choice decides which decoder actually reads this receiver's channels.
+    Raises ``ValueError`` on an unknown profile.
+    """
     if profile == MANUAL_CONTROL_RC_MIX_PPM_PROFILE:
         flags = (
             "-DMANUAL_CONTROL_PPM=1 "
@@ -297,6 +400,11 @@ def manual_control_firmware_flags(
 
 
 def manual_control_build_path(profile: str) -> str:
+    """프로파일별 arduino-cli 빌드 캐시 경로. / arduino-cli build path per profile.
+
+    프로파일마다 별도 빌드 경로를 쓰면 프로파일을 바꿔도 재컴파일 캐시가 섞이지 않는다.
+    Separate build paths keep the compile cache clean across profile switches.
+    """
     if profile == MANUAL_CONTROL_RC_MIX_PPM_PROFILE:
         return MANUAL_CONTROL_RC_MIX_BUILD_PATH
     if profile == MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE:
@@ -307,6 +415,11 @@ def manual_control_build_path(profile: str) -> str:
 
 
 def manual_control_expected_ppm_edge(profile: str) -> str:
+    """프로파일이 기대하는 PPM 인터럽트 에지. / Expected PPM interrupt edge.
+
+    모니터가 실제 관측 에지와 비교해 에지 불일치(펌웨어/프로파일 오설정)를 잡는 데 쓴다.
+    Used to flag a PPM edge mismatch (wrong firmware/profile) against observed edges.
+    """
     if profile == MANUAL_CONTROL_RC_MIX_PPM_PROFILE:
         return "FALLING"
     return "RISING"
@@ -331,7 +444,16 @@ def manual_control_mapping(
     return {"physical_a_cmd": physical_a, "physical_b_cmd": physical_b}
 
 
+# ── PPM/RC telemetry 행(row) 분류 헬퍼 / PPM+RC telemetry row classifiers ──
+# 아래 ``_row_*`` 헬퍼들은 파싱된 USBDBG telemetry 한 행을 검사해 "PPM 입력이
+# 있나/유효한가/모드 채널이 잡혔나" 같은 참/거짓 판정을 내린다. 순수 함수이며
+# ``evaluate_manual_control_rows`` 와 상태줄(status line)이 이들을 조합한다.
+# These ``_row_*`` helpers inspect one parsed USBDBG row for PPM/RC presence and
+# validity; pure predicates composed by ``evaluate_manual_control_rows``.
+
+
 def _row_input_zero(row: dict[str, str]) -> bool:
+    """이 행의 모든 RC 채널값이 사실상 0인가. / All RC channel values ~zero in this row."""
     keys = [f"raw_ch{i}_us" for i in range(1, 9)] + [
         "steer_us",
         "throttle_us",
@@ -345,6 +467,7 @@ def _row_input_zero(row: dict[str, str]) -> bool:
 
 
 def _row_input_nonzero(row: dict[str, str]) -> bool:
+    """이 행에 0이 아닌 RC 채널이 하나라도 있나. / Any nonzero RC channel in this row."""
     keys = [f"raw_ch{i}_us" for i in range(1, 9)] + [
         "steer_us",
         "throttle_us",
@@ -355,12 +478,18 @@ def _row_input_nonzero(row: dict[str, str]) -> bool:
 
 
 def _row_rc_input_detected(row: dict[str, str]) -> bool:
+    """이 행이 실제 RC 입력 감지를 나타내는가. / Does this row indicate real RC input?
+
+    sync 펄스만 있거나 프레임 캡처가 없는 경우는(=채널 미해독) 감지로 치지 않는다.
+    Rows that are sync-only or have no captured frame do not count as detected.
+    """
     if _row_ppm_sync_only(row) or _row_no_ppm_frame_capture(row):
         return False
     return telemetry._parse_bool(row.get("rc_input_detected"), default=False) or _row_input_nonzero(row)
 
 
 def _row_optional_int(row: dict[str, str], key: str) -> int | None:
+    """행 값을 int 로(없으면 None). / Row value as int, or None when absent."""
     value = telemetry._optional_float(row.get(key))
     if value is None:
         return None
@@ -368,6 +497,7 @@ def _row_optional_int(row: dict[str, str], key: str) -> int | None:
 
 
 def _row_ppm_edge_mismatch(row: dict[str, str], expected_ppm_interrupt_edge: str | None = None) -> bool:
+    """관측 PPM 에지가 기대값과 다른가. / Observed PPM edge differs from expected?"""
     if not expected_ppm_interrupt_edge:
         return False
     edge = _row_value(row, ["ppm_interrupt_edge"], default="")
@@ -375,6 +505,13 @@ def _row_ppm_edge_mismatch(row: dict[str, str], expected_ppm_interrupt_edge: str
 
 
 def _row_ppm_sync_only(row: dict[str, str]) -> bool:
+    """sync 펄스만 있고 채널 프레임은 없는가. / Sync pulses seen but no channel frames?
+
+    D6 에 sync 유사 펄스는 들어오는데 CH1/CH2/CH5 구간이 해독되지 않는 상태.
+    보통 수신기가 결합 PPM 이 아니라 단일 PWM 을 내보내거나 디코더 프로파일이 틀린 경우.
+    Usually means the receiver is not emitting combined PPM (single PWM instead),
+    or the edge/sync decoder profile is wrong.
+    """
     decode_reason = _row_value(row, ["ppm_decode_reason", "mode_decode_reason"], default="")
     if decode_reason == "PPM_SYNC_ONLY_NO_CHANNELS":
         return True
@@ -389,6 +526,11 @@ def _row_ppm_sync_only(row: dict[str, str]) -> bool:
 
 
 def _row_no_ppm_frame_capture(row: dict[str, str]) -> bool:
+    """PPM 카운터는 있으나 프레임/채널을 하나도 못 잡았는가. / PPM counters but no capture.
+
+    PPM 관련 카운터 필드는 존재하지만 프레임 수·채널 수가 0이고 입력이 전부 0인 경우.
+    PPM counters are present yet frame/channel counts are 0 and all inputs are zero.
+    """
     frame_count = _row_optional_int(row, "ppm_frame_count")
     last_channel_count = _row_optional_int(row, "ppm_last_channel_count")
     has_ppm_counters = frame_count is not None or last_channel_count is not None
@@ -401,6 +543,11 @@ def _row_no_ppm_frame_capture(row: dict[str, str]) -> bool:
 
 
 def _row_mode_channel_capture_known(row: dict[str, str]) -> bool:
+    """모드 채널(CH5)까지 캡처됐다고 볼 수 있는가. / Was the mode channel (CH5) captured?
+
+    채널 수가 5개 이상 잡혔으면 CH5 도 캡처된 것으로 본다(모드 채널 존재 판단 근거).
+    A channel count >=5 implies CH5 was captured too (basis for "mode channel known").
+    """
     if _row_input_zero(row):
         return False
     last_channel_count = _row_optional_int(row, "ppm_last_channel_count")
@@ -413,6 +560,14 @@ def _row_mode_channel_capture_known(row: dict[str, str]) -> bool:
 
 
 def manual_control_mode_decode(row: dict[str, str]) -> tuple[str, str]:
+    """한 telemetry 행에서 (모드 스위치, 디코드 사유)를 결정. / Decode (mode, reason).
+
+    반환은 ``(manual_switch, mode_decode_reason)`` 튜플. 우선순위: telemetry 없음 →
+    sync-only → PPM 부재 → 펌웨어가 직접 보고한 값 → mode_us(us) 로 MANUAL/AUTO 판정.
+    mode_us 는 대략 <=1600us=MANUAL, >1600us=AUTO, 900~2100us 밖은 범위이탈로 본다.
+    Returns ``(manual_switch, mode_decode_reason)``; falls back from firmware-reported
+    values to a mode_us threshold (~<=1600us MANUAL, >1600us AUTO).
+    """
     if not row:
         return "UNKNOWN_NO_USBDBG_TELEMETRY", "NO_USBDBG_TELEMETRY"
     if _row_ppm_sync_only(row):
@@ -440,6 +595,11 @@ def manual_control_mode_decode(row: dict[str, str]) -> tuple[str, str]:
 
 
 def _latest_manual_control_row(rows: Sequence[dict[str, str]]) -> dict[str, str]:
+    """수동제어 상태 필드를 포함한 가장 최근 행. / Latest row carrying manual-control fields.
+
+    뒤에서부터 훑어 상태 키(모드/PPM/GPS/IMU 등)를 하나라도 가진 첫 행을 돌려준다.
+    Scans from the end for the first row bearing any manual-control status key.
+    """
     status_keys = {
         "manual_control",
         "manual_control_ppm",
@@ -483,6 +643,7 @@ def _latest_manual_control_row(rows: Sequence[dict[str, str]]) -> dict[str, str]
 
 
 def _row_value(row: dict[str, str], keys: Sequence[str], default: str = "NA") -> str:
+    """후보 키들 중 첫 번째 의미있는 값(빈/NA 제외). / First meaningful value among keys."""
     for key in keys:
         value = row.get(key)
         if value is not None and str(value).strip().upper() not in {"", "NA", "NAN", "NONE", "NULL"}:
@@ -491,6 +652,7 @@ def _row_value(row: dict[str, str], keys: Sequence[str], default: str = "NA") ->
 
 
 def _latest_non_na(rows: Sequence[dict[str, str]], keys: Sequence[str], default: str = "NA") -> str:
+    """행들을 뒤에서부터 훑어 첫 non-NA 값. / Latest non-NA value scanning rows backwards."""
     for row in reversed(rows):
         value = _row_value(row, keys, default="")
         if value:
@@ -499,6 +661,11 @@ def _latest_non_na(rows: Sequence[dict[str, str]], keys: Sequence[str], default:
 
 
 def format_manual_control_status(*, elapsed_s: int, rows: Sequence[dict[str, str]]) -> str:
+    """모니터 중 한 줄 상태 문자열 생성. / One-line live status during manual-control monitor.
+
+    최신 행에서 PPM/모드/모터/GPS/IMU 필드를 뽑아 ``key=value`` 나열로 만든다(부수효과 없음).
+    Pulls PPM/mode/motor/GPS/IMU fields from the latest row into a ``key=value`` line.
+    """
     last = _latest_manual_control_row(rows)
     manual_switch, mode_decode_reason = manual_control_mode_decode(last)
     mode_us = _row_value(last, ["mode_us", "raw_mode_channel_us"])
@@ -552,6 +719,18 @@ def evaluate_manual_control_rows(
     *,
     expected_ppm_interrupt_edge: str | None = None,
 ) -> dict[str, object]:
+    """수동제어 세션 전체 telemetry 를 판정 요약으로 축약. / Evaluate a manual-control session.
+
+    manual-control 모드의 핵심 순수 함수(단위 테스트 계약). 여러 행을 종합해
+    통과/사유(reason)와 다음 행동을 결정한다. 통과(pass_ready)는 RC OK + MANUAL 모드 +
+    RC_MANUAL 소스 + 0 아닌 최종 모터 명령 + 모터 write/출력 + 안정된 PPM 을 모두 만족할 때뿐.
+    반환 dict 은 요약 파일로 그대로 쓰이므로 키를 바꾸면 하위 소비자/테스트가 깨진다.
+    부수효과 없음. ``expected_ppm_interrupt_edge`` 로 에지 불일치도 사유로 승격한다.
+    Core pure classifier for manual-control (a tested contract): aggregates rows
+    into a pass/``reason``/next-action summary. Pass requires rc_ok + MANUAL +
+    RC_MANUAL + nonzero final motor cmd + motor write/output + stable PPM. No side
+    effects; the returned dict's keys are consumed downstream, so keep them stable.
+    """
     rows_with_input = [
         row for row in rows
         if any(
@@ -703,6 +882,13 @@ def evaluate_manual_control_rows(
 
 
 def evaluate_rc_input_diagnose_rows(rows: Sequence[dict[str, str]]) -> dict[str, object]:
+    """읽기전용 PPM 프로브 telemetry 를 분류. / Classify read-only PPM probe telemetry.
+
+    rc-input-diagnose 모드의 순수 판정 함수. 프레임 수/무효 프레임/0 아닌 채널을 세어
+    RC 입력이 없음/있으나 무효/유효 중 무엇인지 사유(reason)로 반환한다(부수효과 없음).
+    Pure classifier for rc-input-diagnose: counts frames/invalid/nonzero channels
+    to report RC input absent / present-but-invalid / present-and-valid.
+    """
     frame_counts = [int(float(row.get("frames", "0") or 0)) for row in rows if "frames" in row]
     invalid_counts = [int(float(row.get("invalid_frames", "0") or 0)) for row in rows if "invalid_frames" in row]
     total_frames = sum(frame_counts)
@@ -761,12 +947,21 @@ def evaluate_rc_input_diagnose_rows(rows: Sequence[dict[str, str]]) -> dict[str,
     }
 
 
+# ── 물리 스테이션 하드웨어 telemetry 평가 / Station-hardware telemetry evaluation ──
+# station-hw-diagnose / station-hw-manual 이 공유하는 순수 판정 헬퍼. 스테이션
+# 시리얼 프레임의 도착·파싱·deadman/estop·모터출력 여부로 링크/제어 상태를 사유화한다.
+# Pure helpers shared by station-hw-{diagnose,manual}: reason about link/parse/
+# deadman/estop/motor-output from the station serial frames.
+
+
 def _station_value_present(value: object) -> bool:
+    """값이 의미있게 존재하는가(빈/NA 아님). / Value present and not blank/NA."""
     text = str(value or "").strip().upper()
     return text not in {"", "NA", "NAN", "NONE", "NULL"}
 
 
 def _station_hw_link_row(row: dict[str, str]) -> bool:
+    """이 행이 스테이션 링크 프레임 수신을 보이는가. / Row shows a received station frame?"""
     if telemetry._parse_bool(row.get("station_link_seen")) is True:
         return True
     if _station_value_present(row.get("station_seq")) or _station_value_present(row.get("station_age_ms")):
@@ -778,6 +973,7 @@ def _station_hw_link_row(row: dict[str, str]) -> bool:
 
 
 def _station_hw_float_seen(rows: Sequence[dict[str, str]], *keys: str) -> bool:
+    """주어진 키 중 어느 것이든 0 아닌 float 이 관측됐나. / Any nonzero float across keys?"""
     for row in rows:
         for key in keys:
             value = telemetry._optional_float(row.get(key))
@@ -787,11 +983,24 @@ def _station_hw_float_seen(rows: Sequence[dict[str, str]], *keys: str) -> bool:
 
 
 def _station_last_present(last: dict[str, str], key: str, default: object = "NA") -> object:
+    """최신 행의 값(없으면 default). / Value from the last row, else default."""
     value = last.get(key)
     return value if _station_value_present(value) else default
 
 
 def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> dict[str, object]:
+    """스테이션 HW telemetry 전체를 판정 요약으로 축약. / Evaluate station-hardware rows.
+
+    station-hw-diagnose/manual 의 핵심 순수 함수. 우선순위대로 사유를 정한다: 링크 부재
+    → estop → 프레임은 오나 파싱 실패(파서 불일치) → deadman 미활성 → 모터출력=PASS →
+    A/B 명령만 → 유효. ``mode`` 에 따라 diagnose 는 "유효만 봐도 성공", manual 은 모터
+    출력까지 요구한다. 반환은 ``assert_not_ready_for_full_path_following`` 로 봉인된 dict.
+    부수효과 없음.
+    Core pure classifier for station-hw modes; priority: link-absent -> estop ->
+    frames-but-parser-mismatch -> deadman-inactive -> motor-output=PASS -> A/B-only
+    -> valid. ``mode`` decides whether valid-only counts as success (diagnose) or
+    motor output is required (manual). Returns a not-ready-sealed dict; no side effects.
+    """
     link_rows = [row for row in rows if _station_hw_link_row(row)]
     manual_valid_rows = [row for row in rows if telemetry._parse_bool(row.get("station_manual_valid")) is True]
     deadman_rows = [row for row in rows if telemetry._parse_bool(row.get("station_deadman")) is True]
@@ -926,6 +1135,7 @@ def evaluate_station_hw_rows(rows: Sequence[dict[str, str]], *, mode: str) -> di
 
 
 def _station_hw_status_line(summary: dict[str, object], *, elapsed_s: float) -> str:
+    """스테이션 HW 요약을 한 줄 상태 문자열로. / Station-hw summary to a one-line status."""
     return (
         f"elapsed_s={elapsed_s:.0f} "
         f"station_link_seen={str(summary.get('station_link_seen', False)).lower()} "
@@ -947,10 +1157,16 @@ def _station_hw_status_line(summary: dict[str, object], *, elapsed_s: float) -> 
 
 
 def station_hw_status_line(rows: Sequence[dict[str, str]], *, mode: str, elapsed_s: float) -> str:
+    """행들을 평가해 한 줄 상태로(공개 래퍼). / Evaluate rows into a status line (public)."""
     return _station_hw_status_line(evaluate_station_hw_rows(rows, mode=mode), elapsed_s=elapsed_s)
 
 
 def _station_raw_frame_dumps(rows: Sequence[dict[str, str]]) -> list[tuple[str, str]]:
+    """중복 제거된 원시 스테이션 프레임 (텍스트, hex) 최대 20개. / Dedup raw station frames.
+
+    파서가 맞지 않을 때 실제 바이트를 눈으로 비교하도록 원시/16진 프레임을 수집한다.
+    Collects raw + hex frames so a parser mismatch can be inspected byte-for-byte.
+    """
     dumps: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for row in rows:
@@ -971,6 +1187,11 @@ def _station_raw_frame_dumps(rows: Sequence[dict[str, str]]) -> list[tuple[str, 
 
 
 def write_station_raw_frame_dumps(out_dir: Path, rows: Sequence[dict[str, str]]) -> int:
+    """원시 스테이션 프레임을 파일로 기록하고 개수 반환. / Write raw station frame dumps.
+
+    부수효과: ``raw_station_frames.txt`` / ``raw_station_frames_hex.txt`` 생성.
+    Side effect: writes the two raw-frame files under ``out_dir``.
+    """
     dumps = _station_raw_frame_dumps(rows)
     if not dumps:
         return 0
@@ -985,7 +1206,15 @@ def write_station_raw_frame_dumps(out_dir: Path, rows: Sequence[dict[str, str]])
     return len(dumps)
 
 
+# ── 시리얼 포트 해석·요약 파일 쓰기 / Serial-port resolution + summary writers ──
+
+
 def arduino_cli_openrb_port() -> str | None:
+    """arduino-cli board list 에서 OpenRB-150 포트를 찾는다. / Find OpenRB-150 port.
+
+    부수효과: ``arduino-cli board list`` 서브프로세스 실행. 실패/미검출 시 None.
+    Side effect: runs the ``arduino-cli board list`` subprocess; None on failure.
+    """
     try:
         completed = subprocess.run(
             ["arduino-cli", "board", "list"],
@@ -1004,6 +1233,7 @@ def arduino_cli_openrb_port() -> str | None:
 
 
 def detected_serial_ports() -> list[str]:
+    """/dev 에서 USB 시리얼 후보 포트를 나열(mac/Linux 패턴). / List USB serial ports."""
     parent = Path("/dev")
     if not parent.exists():
         return []
@@ -1027,6 +1257,11 @@ def resolve_port(
     env: dict[str, str] | None = None,
     system_name: str | None = None,
 ) -> dict[str, object]:
+    """포트 결정 우선순위: 명시 > $PORT > arduino-cli > Linux 기본. / Resolve serial port.
+
+    ``{"port", "source"}`` 를 반환하며 ``source`` 로 어디서 정해졌는지 알려준다.
+    ``env``/``system_name`` 인자는 테스트 주입용. Returns ``{"port", "source"}``.
+    """
     env = os.environ if env is None else env
     system_name = platform.system() if system_name is None else system_name
     if explicit_port:
@@ -1043,6 +1278,14 @@ def resolve_port(
 
 
 def write_summary_files(out_dir: str | Path, summary: dict[str, object], *, title: str) -> dict[str, object]:
+    """summary.json + summary.md 를 쓰고 정규화된 dict 반환. / Write summary.json + .md.
+
+    거의 모든 모드가 결과를 남기는 공통 라이터. ``ready_for_full_path_following`` 를
+    강제로 False 로 봉인하고(안전 불변식) ``success`` 기본값을 채운 뒤 두 파일을 만든다.
+    부수효과: ``out_dir`` 생성 및 두 파일 기록.
+    Shared writer; forces the not-ready invariant, defaults ``success``, then
+    writes both files. Side effect: creates ``out_dir`` and the two files.
+    """
     path = Path(out_dir)
     path.mkdir(parents=True, exist_ok=True)
     normalized = dict(summary)
@@ -1064,6 +1307,10 @@ def write_failure_summary(
     mode: str | None = None,
     next_recommended_action: str = "Check the requested serial port or connect OpenRB-150 and retry.",
 ) -> None:
+    """포트 없음 등 초기 실패 요약을 기록. / Write an early-failure summary (e.g. no port).
+
+    ``out_dir`` 가 None 이면 아무 것도 하지 않는다. Side effect: writes summary files.
+    """
     if out_dir is None:
         return
     path = Path(out_dir)
@@ -1081,6 +1328,15 @@ def write_failure_summary(
 
 
 def ensure_port(args: argparse.Namespace) -> bool:
+    """포트를 해석해 ``args.port`` 에 채우고 존재 여부 검증. / Resolve+validate the port.
+
+    성공 시 True 를 돌려주며 ``args.port``/``args.port_source`` 를 설정한다. ``--from-log``
+    은 하드웨어가 필요 없으므로 즉시 True. 실패 시 실패 요약을 쓰고 사유를 출력한 뒤 False.
+    거의 모든 하드웨어 핸들러의 첫 관문(게이트)이다.
+    Returns True (setting ``args.port``/``port_source``); ``--from-log`` short-circuits
+    True. On failure writes a failure summary and returns False. Side effects: sets
+    args fields, may write summary + print.
+    """
     if getattr(args, "from_log", None):
         return True
     resolved = resolve_port(getattr(args, "port", None))
@@ -1102,6 +1358,11 @@ def ensure_port(args: argparse.Namespace) -> bool:
 
 
 def printable_port(explicit_port: str | None) -> str:
+    """--print-cmd 표시에 쓸 포트 문자열(미해석 시 ``$PORT``). / Printable port for --print-cmd.
+
+    실제 시리얼을 열지 않고 명령을 출력만 할 때 사용. 결정 못 하면 ``$PORT`` 리터럴.
+    Used when printing commands without opening serial; falls back to the ``$PORT`` literal.
+    """
     if explicit_port:
         return explicit_port
     resolved = resolve_port(None)
@@ -1181,6 +1442,7 @@ def resolve_calibration(args: argparse.Namespace) -> dict[str, object]:
 
 
 def motion_calibration_loaded(calibration_dict: dict[str, object]) -> bool:
+    """승인된 모션 보정 파일이 실제 디스크에 있나. / Is an approved motion calibration on disk?"""
     files = calibration_dict.get("calibration_files")
     if not isinstance(files, dict):
         return False
@@ -1188,7 +1450,15 @@ def motion_calibration_loaded(calibration_dict: dict[str, object]) -> bool:
     return bool(motion_path and Path(str(motion_path)).exists())
 
 
+# ── GPS 시작좌표 스냅샷/캐시 해석 / GPS start-coordinate snapshot + cache resolution ──
+# preview/run/auto-relative 가 공유. 라이브 telemetry 행에서 사용 가능한 시작 위경도를
+# 뽑거나(gps_snapshot/resolve_start_*), 최근 캐시(load_cached_start)로 대체한다.
+# Shared by preview/run/auto-relative: derive a usable start lat/lon from live
+# telemetry, or fall back to a recent on-disk cache.
+
+
 def _lat_lon_from_row(row: dict[str, str], lat_keys: Sequence[str], lon_keys: Sequence[str]) -> tuple[float | None, float | None]:
+    """후보 키들에서 (lat, lon) 을 추출. / Extract (lat, lon) from candidate keys."""
     lat = None
     lon = None
     for key in lat_keys:
@@ -1203,6 +1473,7 @@ def _lat_lon_from_row(row: dict[str, str], lat_keys: Sequence[str], lon_keys: Se
 
 
 def _fresh_cached_gps(row: dict[str, str], max_age_ms: int) -> bool:
+    """행의 캐시 GPS 가 충분히 최신인가. / Is this row's cached GPS fresh enough?"""
     age = telemetry._optional_float(row.get("gps_cached_age_ms", row.get("gps_age_ms")))
     if age is not None:
         return age <= max_age_ms
@@ -1210,7 +1481,13 @@ def _fresh_cached_gps(row: dict[str, str], max_age_ms: int) -> bool:
 
 
 def gps_snapshot(rows: Sequence[dict[str, str]], *, min_sats: float = 5.0, max_hdop: float = 2.5) -> dict[str, object]:
-    """Summarize cold-start GPS state from parsed telemetry rows."""
+    """파싱된 telemetry 에서 GPS 콜드스타트 상태를 요약. / Summarize cold-start GPS state.
+
+    최적 위성수/HDOP/좌표와 "준비된 행"(min_sats/max_hdop 충족 + fix 유효)을 찾아 dict 로
+    반환한다(순수 함수, 부수효과 없음). ``ready_row`` 는 시작좌표 확정에 쓰인다.
+    Pure: finds best sats/hdop/coords plus a ``ready_row`` (meets thresholds and a
+    valid fix), used to lock the plan start. No side effects.
+    """
     best_sats: float | None = None
     best_hdop: float | None = None
     best_lat: float | None = None
@@ -1273,6 +1550,7 @@ def gps_snapshot(rows: Sequence[dict[str, str]], *, min_sats: float = 5.0, max_h
 
 
 def _gps_status_line(elapsed_s: float, snapshot: dict[str, object]) -> str:
+    """GPS 대기 중 한 줄 상태 문자열. / One-line status while waiting for GPS."""
     return (
         f"elapsed_s={elapsed_s:.0f} "
         f"firmware_profile={snapshot['firmware_profile']} "
@@ -1295,6 +1573,13 @@ def _gps_status_line(elapsed_s: float, snapshot: dict[str, object]) -> str:
 
 
 def write_gps_cache(snapshot: dict[str, object]) -> None:
+    """확보된 시작좌표를 캐시 파일에 저장. / Persist the acquired start fix to the cache.
+
+    이후 preview/run 이 GPS 재확보 없이 최근 시작좌표를 재사용할 수 있게 한다.
+    부수효과: ``DEFAULT_GPS_CACHE`` JSON 기록(좌표 없으면 아무 것도 안 함).
+    Lets later preview/run reuse a recent start without re-acquiring GPS. Side
+    effect: writes the cache JSON (no-op when best_lat/lon is missing).
+    """
     lat = snapshot.get("best_lat")
     lon = snapshot.get("best_lon")
     if lat is None or lon is None:
@@ -1316,6 +1601,11 @@ def write_gps_cache(snapshot: dict[str, object]) -> None:
 
 
 def load_cached_start(max_age_s: float) -> dict[str, object] | None:
+    """캐시된 시작좌표를 나이 제한 내에서 로드. / Load a cached start fix within max age.
+
+    ``max_age_s`` 를 넘겼거나 좌표가 없으면 None. 성공 시 시작좌표 + 스냅샷 dict.
+    Returns None when stale/missing; otherwise a start-fix + snapshot dict.
+    """
     if not DEFAULT_GPS_CACHE.exists():
         return None
     try:
@@ -1408,7 +1698,17 @@ def resolve_start_gps_from_rows(
 
 
 def resolve_start_for_preview(args: argparse.Namespace) -> tuple[dict[str, object] | None, list[str]]:
-    """Resolve preview start coordinates, optionally opening serial for live GPS."""
+    """미리보기/실행의 시작좌표를 해석(필요시 시리얼 오픈). / Resolve start coords for preview/run.
+
+    우선순위: 명시 --start-lat/lon > (start_mode=explicit 이면 없음) > --from-log 파싱 >
+    라이브 시리얼(옵션으로 감독형 펌웨어 업로드 후 GPS 대기) > 최근 캐시. 반환은
+    ``(start_dict|None, raw_lines)``. preview 와 run 이 공유하는 시작좌표 획득 진입점.
+    부수효과: 라이브 경로에서 시리얼을 열고 펌웨어를 업로드할 수 있으며 상태줄을 출력한다.
+    Priority: explicit > (none if start_mode=explicit) > --from-log > live serial
+    (optionally uploading supervised firmware then waiting for GPS) > recent cache.
+    Returns ``(start_dict|None, raw_lines)``. Side effects on the live path: opens
+    serial, may upload firmware, prints status.
+    """
     if args.start_lat is not None and args.start_lon is not None:
         return {
             "start_lat": float(args.start_lat),
@@ -1586,6 +1886,13 @@ def build_resolved_field_config(args: argparse.Namespace, plan: dict[str, object
 
 
 def validate_resolved_field_config(args: argparse.Namespace, plan: dict[str, object]) -> None:
+    """계획 지오메트리 정합성 검증(위반 시 ValueError). / Validate plan geometry, raise on bad.
+
+    목표거리>0, 스텝 간격>0, (직선 외에는) 작업폭>0 을 요구한다. 작업폭이 A-B 대각선에
+    비해 과도하면 명시적 ``--allow-wide-field true`` 없이는 거부한다(현장 오설정 방지 가드).
+    Requires goal distance>0, step spacing>0, and (except direct_line) width>0;
+    rejects an over-wide field unless ``--allow-wide-field true`` is passed.
+    """
     distance = float(plan.get("goal_distance_m", 0.0))
     if distance <= 0.0:
         raise ValueError("goal distance must be > 0")
@@ -1605,6 +1912,7 @@ def validate_resolved_field_config(args: argparse.Namespace, plan: dict[str, obj
 
 
 def format_field_config(config: dict[str, object]) -> str:
+    """A/B 필드 구성을 사람이 읽을 여러 줄 텍스트로. / Field config as human-readable text."""
     ordered_keys = [
         "start_mode",
         "start_source",
@@ -1662,6 +1970,13 @@ def load_planner_config(path: Path) -> dict[str, object]:
 
 
 def load_plan_dir_plan(plan_dir: Path) -> dict[str, object]:
+    """저장된 plan-dir 를 계획 dict 로 복원. / Reconstruct a plan dict from a saved plan-dir.
+
+    plan.json/preview_summary.json 을 기준으로 세그먼트/프리미티브 JSON 을 다시 붙여 레인·
+    커넥터 수를 재계산한다. execute-plan/inspect-plan/auto-relative-run 이 공유한다.
+    Rebuilds segments/primitives and recomputes lane/connector counts. Raises if no
+    plan file is present.
+    """
     candidates = [plan_dir / "plan.json", plan_dir / "preview_summary.json"]
     plan_path = next((path for path in candidates if path.exists()), None)
     if plan_path is None:
@@ -1728,6 +2043,13 @@ def diagnose_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
 
 
 def guarded_pulse_ready_summary(rows: Sequence[dict[str, str]]) -> dict[str, object]:
+    """가드 펄스 펌웨어 준비 여부를 telemetry 로 판정. / Judge guarded-pulse firmware readiness.
+
+    가드 하트비트 + 펌웨어 ready + IMU(BMI160) 존재/yaw + RC OK + 중립 OK 를 모두
+    만족해야 ready. 하나라도 빠지면 사유 리스트를 모아 반환한다(순수, 부수효과 없음).
+    Ready requires guarded heartbeat + firmware ready + IMU(BMI160)/yaw + rc_ok +
+    neutral_ok; otherwise collects the missing reasons. Pure, no side effects.
+    """
     heartbeats = [row for row in rows if telemetry.event(row) == "HEARTBEAT"]
     last = heartbeats[-1] if heartbeats else {}
     guarded_seen = any(
@@ -1784,14 +2106,21 @@ def guarded_pulse_ready_summary(rows: Sequence[dict[str, str]]) -> dict[str, obj
     })
 
 
+# ── 출력 라이터 (JSON/CSV/원시 로그/미리보기 이미지) / Output writers ──
 # --- Output writers -----------------------------------------------------------
 
 
 def _write_json(path: Path, obj: object) -> None:
+    """객체를 들여쓴 JSON 으로 기록(직렬화 불가는 str). / Write obj as indented JSON."""
     path.write_text(json.dumps(obj, indent=2, default=str) + "\n")
 
 
 def _write_rows_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    """행 dict 들을 CSV 로(열은 관측 순서로 합집합). / Write row dicts to CSV.
+
+    빈 입력이면 빈 파일을 쓴다. 열 이름은 모든 행 키의 등장 순서 합집합.
+    Empty input writes an empty file; columns are the ordered union of all keys.
+    """
     if not rows:
         path.write_text("")
         return
@@ -1808,10 +2137,12 @@ def _write_rows_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
 
 
 def _write_raw_log(path: Path, lines: Sequence[str]) -> None:
+    """원시 시리얼 라인들을 로그 파일로. / Write raw serial lines to a log file."""
     path.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
 def _required_preview_image_paths(out_dir: Path) -> dict[str, str]:
+    """미리보기가 반드시 만들어야 하는 PNG 경로 맵. / Required preview PNG path map."""
     return {
         "preview_current_goal_rectangle_path": str(out_dir / "preview_current_goal_rectangle_path.png"),
         "preview_overview": str(out_dir / "preview_overview.png"),
@@ -1819,6 +2150,13 @@ def _required_preview_image_paths(out_dir: Path) -> dict[str, str]:
 
 
 def _write_required_preview_images(out_dir: Path, plan: dict[str, object]) -> dict[str, str]:
+    """필수 미리보기 PNG 를 렌더링(실패 시 RuntimeError). / Render required preview PNGs.
+
+    이미지가 실제로 생기지 않으면 ``PREVIEW_IMAGE_NOT_WRITTEN`` 로 예외를 던져, 렌더 실패를
+    물리 실행 전에 잡도록 한다(호출부가 이 예외를 실패 요약으로 변환).
+    Raises ``RuntimeError('PREVIEW_IMAGE_NOT_WRITTEN ...')`` if a PNG is not created,
+    so render failures are caught before physical execution.
+    """
     image_paths = _required_preview_image_paths(out_dir)
     for expected in image_paths.values():
         expected_path = Path(expected)
@@ -1838,6 +2176,13 @@ def _write_required_preview_images(out_dir: Path, plan: dict[str, object]) -> di
 
 
 def _write_plan_artifacts(out_dir: Path, plan: dict[str, object], field_config: dict[str, object]) -> dict[str, str]:
+    """계획 산출물(이미지+JSON+CSV) 일괄 기록. / Write all plan artifacts (images/JSON/CSV).
+
+    preview/run 공용. 미리보기 PNG, field_config, plan.json, 세그먼트/프리미티브/경로점
+    CSV·JSON 을 out_dir 에 남기고 image_paths 를 반환한다.
+    Shared by preview/run; writes PNGs, field_config, plan.json and the segment/
+    primitive/path CSV+JSON, returning the image path map.
+    """
     image_paths = _write_required_preview_images(out_dir, plan)
     field_config["image_paths"] = image_paths
     plan["image_paths"] = image_paths
@@ -1852,11 +2197,17 @@ def _write_plan_artifacts(out_dir: Path, plan: dict[str, object], field_config: 
 
 
 def _fail(message: str) -> int:
+    """stderr 에 ABORT 를 찍고 종료코드 2 반환. / Print ABORT to stderr, return exit code 2."""
     print(f"ABORT: {message}", file=sys.stderr)
     return 2
 
 
 def _fail_with_summary(args: argparse.Namespace, *, reason: str, message: str) -> int:
+    """실패 요약을 out_dir 에 쓰고 코드 2 반환. / Write a failure summary + return 2.
+
+    입력/구성 오류(예: PLAN_INPUT_INVALID)에서 실패도 감사 가능한 요약으로 남기는 헬퍼.
+    Records input/config failures as an auditable summary; side effect: writes files.
+    """
     out_dir = getattr(args, "out_dir", None)
     if out_dir is not None:
         write_summary_files(
@@ -1874,10 +2225,28 @@ def _fail_with_summary(args: argparse.Namespace, *, reason: str, message: str) -
     return _fail(message)
 
 
-# --- Mode handlers ------------------------------------------------------------
+# ══ 모드 핸들러 / Mode handlers (each = one CLI subcommand) ══════════════════
+# 여기서부터 각 ``cmd_*`` 는 하나의 CLI 서브커맨드를 구현한다. 공통 패턴:
+# (1) out_dir 준비 → (2) print/from-log 무하드웨어 분기 → (3) ensure_port +
+# (필요시) 펌웨어 컴파일/업로드 → (4) 시리얼 스트리밍 → (5) telemetry 를 순수
+# ``evaluate_*``/summary 로 축약 → (6) write_summary_files + stdout 출력 → 종료코드.
+# From here each ``cmd_*`` implements one subcommand; common shape: prepare out_dir,
+# handle print/from-log hardware-free branches, ensure_port + optional compile/
+# upload, stream serial, reduce telemetry via a pure evaluator, write summaries.
+
+
+# ── preview / 계획 미리보기 (모션 없음) / Coverage-plan preview (no motion) ──
 
 
 def cmd_preview(args: argparse.Namespace) -> int:
+    """coverage 계획을 만들고 렌더링(모션 없음). / Build + render the coverage plan. No motion.
+
+    시작좌표를 해석(명시/라이브 GPS/캐시)하고 계획을 세워 미리보기 PNG 와 요약을 남긴다.
+    시작좌표를 못 얻으면 NO_USABLE_START_GPS, 이미지 렌더 실패면 PREVIEW_IMAGE_NOT_WRITTEN.
+    부수효과: 라이브 경로에서 시리얼/펌웨어 업로드, out_dir 에 산출물 기록.
+    Resolves the start (explicit/live GPS/cache), builds the plan, writes preview
+    PNGs + summary. Side effects: serial/upload on the live path; writes artifacts.
+    """
     cal = resolve_calibration(args)
     start, raw_start_lines = resolve_start_for_preview(args)
     if start is None:
@@ -1979,6 +2348,9 @@ def cmd_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── gps-wait / GPS 콜드스타트 대기 (모션 없음) / Wait for GPS fix (no motion) ──
+
+
 def _gps_wait_summary(
     rows: Sequence[dict[str, str]],
     *,
@@ -1988,6 +2360,7 @@ def _gps_wait_summary(
     min_sats: float,
     max_hdop: float,
 ) -> dict[str, object]:
+    """gps-wait 결과 요약(준비/타임아웃). / Build the gps-wait summary (ready/timeout)."""
     snapshot = gps_snapshot(rows, min_sats=min_sats, max_hdop=max_hdop)
     summary = {k: v for k, v in snapshot.items() if k != "ready_row"}
     success = bool(snapshot["gps_ready"])
@@ -2013,6 +2386,11 @@ def _gps_wait_summary(
 
 
 def gps_telemetry_parse_mismatch(raw_lines: Sequence[str], rows: Sequence[dict[str, str]]) -> bool:
+    """원시 라인은 왔는데 GPS/IMU 필드를 못 알아봤나. / Raw arrived but GPS/IMU fields unparsed?
+
+    True 면 대개 펌웨어 프로파일 불일치 또는 파서 mismatch(잘못된 telemetry 포맷)를 뜻한다.
+    True usually indicates a wrong firmware profile or a telemetry parser mismatch.
+    """
     if not raw_lines:
         return False
     gps_keys = {
@@ -2037,11 +2415,20 @@ def gps_telemetry_parse_mismatch(raw_lines: Sequence[str], rows: Sequence[dict[s
 
 
 def write_raw_gps_samples(out_dir: Path, raw_lines: Sequence[str]) -> None:
+    """진단용 원시 GPS 라인 최대 20개 기록. / Write up to 20 raw GPS lines for diagnosis."""
     samples = [line for line in raw_lines if line][:20]
     (out_dir / "raw_gps_samples.txt").write_text("\n".join(samples) + ("\n" if samples else ""), encoding="utf-8")
 
 
 def cmd_gps_wait(args: argparse.Namespace) -> int:
+    """사용 가능한 GPS 시작 fix 를 대기(모션 없음). / Wait for a usable GPS start fix. No motion.
+
+    감독형 펌웨어를 (옵션) 업로드하고 시리얼을 스트리밍하며 준비될 때까지 대기, 성공 시
+    시작좌표를 캐시에 저장한다. Ctrl-C 는 USER_ABORTED(130), 시리얼 끊김은 SERIAL_DISCONNECT.
+    부수효과: 시리얼/업로드, 요약·CSV·원시로그 기록, 성공 시 GPS 캐시 쓰기.
+    Optionally uploads supervised firmware, streams serial until GPS is ready, and
+    caches the fix on success. Side effects: serial/upload, writes files + cache.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_lines: list[str] = []
@@ -2156,7 +2543,18 @@ def cmd_gps_wait(args: argparse.Namespace) -> int:
     return 0 if summary["success"] is True else 2
 
 
+# ── calibrate-turn / 턴 각도 보정 (외부 스크립트 위임) / Turn-angle calibration ──
+
+
 def cmd_calibrate_turn(args: argparse.Namespace) -> int:
+    """가드 펄스 턴 각도 보정 스크립트로 위임. / Shell out to guarded-pulse turn calibration.
+
+    이 CLI 는 직접 모터를 돌리지 않고 레거시 보정 스크립트에 argv 를 만들어 넘긴다
+    (IMU yaw 비교 강제). ``--print-cmd`` 는 시리얼/펌웨어 없이 명령만 출력.
+    부수효과: 서브프로세스 실행, 요약 기록. 반환은 스크립트 종료코드.
+    Builds argv for the legacy calibration script (forcing IMU yaw compare) and runs
+    it; ``--print-cmd`` only prints. Side effects: subprocess + summary write.
+    """
     if args.print_cmd:
         args.port = printable_port(args.port)
     if not args.print_cmd and not ensure_port(args):
@@ -2218,7 +2616,18 @@ def cmd_calibrate_turn(args: argparse.Namespace) -> int:
     return completed.returncode
 
 
+# ── manual-rc / 수동 RC 패스스루 복구·검증 / Manual RC passthrough recovery ──
+
+
 def cmd_manual_rc(args: argparse.Namespace) -> int:
+    """검증된 수동 RC 패스스루 펌웨어 업로드/검증. / Restore + validate manual RC passthrough.
+
+    업로드/검증 스크립트로 위임한다. 채널 매핑 플래그 중 미구현 조합은 경고로 표시.
+    ``--print-cmd`` 는 명령만 출력, ``--diagnose-only true`` 는 업로드를 건너뛴다.
+    부수효과: 서브프로세스 실행, 요약 병합/기록.
+    Delegates to the upload/validate scripts; flags unimplemented channel-mapping
+    combos as warnings. Side effects: subprocess + summary write.
+    """
     if args.print_cmd:
         args.port = printable_port(args.port)
     if not args.print_cmd and not ensure_port(args):
@@ -2365,6 +2774,9 @@ def cmd_manual_rc(args: argparse.Namespace) -> int:
         title="Manual RC Diagnostic",
     )
     return 0 if upload_success else 2
+
+
+# ── rc-auto-pattern / 무선(무테더) CH5 MANUAL·AUTO ㄹ 패턴 / Untethered RC AUTO pattern ──
 
 
 RC_AUTO_PATTERN_BUILD_PATH = "outputs/firmware_builds/rc_auto_pattern"
@@ -2639,7 +3051,20 @@ def cmd_rc_auto_pattern(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── manual-control / PPM 물리 수동제어 업로드·모니터 / PPM manual control ──
+
+
 def cmd_manual_control(args: argparse.Namespace) -> int:
+    """PPM 물리 수동제어 펌웨어 업로드 후 모니터링. / Upload + monitor PPM manual control.
+
+    선택한 PPM 프로파일로 컴파일/업로드하고 시리얼을 스트리밍하며 매초 상태줄을 출력한다.
+    종료 시 ``evaluate_manual_control_rows`` 로 통과/사유를 판정한다. ``--from-log`` 는
+    시리얼 없이 저장 로그를 재평가, ``--print-cmd`` 는 명령만 출력.
+    부수효과: 컴파일/업로드/시리얼, 요약·CSV·원시로그 기록.
+    Compiles/uploads the chosen PPM profile, streams serial with a per-second status
+    line, then classifies via ``evaluate_manual_control_rows``. Side effects: compile/
+    upload/serial + file writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.print_cmd:
@@ -2816,7 +3241,19 @@ def cmd_manual_control(args: argparse.Namespace) -> int:
     return 0 if summary["manual_control_ok"] is True else 2
 
 
+# ── rc-input-diagnose / 읽기전용 PPM 채널 프로브 / Read-only PPM channel probe ──
+
+
 def cmd_rc_input_diagnose(args: argparse.Namespace) -> int:
+    """읽기전용 RC 입력(PPM) 진단 펌웨어 업로드/판독. / Read-only RC input (PPM) probe.
+
+    모터/GPS/HC-12 를 끈 별도 프로브 스케치를 업로드해 채널 프레임을 읽고
+    ``evaluate_rc_input_diagnose_rows`` 로 RC 입력 존재/유효를 판정한다.
+    부수효과: 컴파일/업로드/시리얼, 요약·CSV·원시로그 기록.
+    Uploads a probe sketch (motors/GPS/HC-12 off), reads channel frames, and
+    classifies via ``evaluate_rc_input_diagnose_rows``. Side effects: compile/upload/
+    serial + file writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     compile_cmd = [
@@ -2916,7 +3353,18 @@ def cmd_rc_input_diagnose(args: argparse.Namespace) -> int:
     return 0 if summary["success"] is True else 2
 
 
+# ── guarded-pulse-ready / IMU 가드 펄스 펌웨어 준비 확인 / Guarded-pulse readiness ──
+
+
 def cmd_guarded_pulse_ready(args: argparse.Namespace) -> int:
+    """IMU 활성 가드 펄스 펌웨어를 업로드/점검. / Upload + check IMU guarded-pulse firmware.
+
+    가드 펄스 펌웨어를 (옵션) 업로드하고 하트비트/IMU/RC/중립을 스트리밍으로 확인해
+    턴 보정·usb-pulse-test 로 넘어갈 준비가 됐는지 판정한다(guarded_pulse_ready_summary).
+    부수효과: 컴파일/업로드/시리얼, 요약·CSV·원시로그 기록.
+    Optionally uploads then streams to verify heartbeat/IMU/RC/neutral readiness.
+    Side effects: compile/upload/serial + file writes.
+    """
     if getattr(args, "deprecated_alias", False):
         print("Deprecated alias: use guarded-pulse-ready.")
     if args.print_cmd:
@@ -2998,7 +3446,16 @@ def cmd_guarded_pulse_ready(args: argparse.Namespace) -> int:
     return 0 if summary["guarded_pulse_ready"] is True else 2
 
 
+# ── usb-pulse-test / 랩탑 USB 유계(有界) A·B 펄스 검증 / USB bounded pulse test ──
+# 노트북에서 USB 로 짧고 크기 제한된 A/B 펄스를 하나씩 보내 로버가 반응하는지 검증한다
+# (RC 입력 없이). ``station_drive_*`` 는 예전 "station drive" 명칭의 잔재로, 계획 생성·
+# 콘솔 표시·이벤트 집계·통과 분류를 담당하는 순수 헬퍼들이다.
+# Sends bounded single A/B pulses over laptop USB (no RC) to verify the rover reacts.
+# The ``station_drive_*`` helpers (legacy name) are pure: plan/display/count/classify.
+
+
 def _station_drive_name(name: str) -> str:
+    """프리미티브 별칭을 표준명으로(미지원은 오류). / Normalize primitive alias; raise if unknown."""
     normalized = USB_PULSE_TEST_ALIASES.get(name.strip().lower())
     if normalized is None:
         raise ValueError(f"unknown usb-pulse-test primitive: {name}")
@@ -3006,6 +3463,13 @@ def _station_drive_name(name: str) -> str:
 
 
 def station_drive_plan(*, sequence: str | None = None, single: str | None = None) -> list[dict[str, object]]:
+    """전송할 유계 펄스 목록(시리얼 명령 텍스트 포함) 생성. / Build the bounded-pulse plan.
+
+    기본은 forward/backward/left/right 순서. ``sequence`` 는 콤마목록, ``single`` 은 하나만.
+    각 항목에 ARM/CMD/STOP 시리얼 명령 문자열을 미리 채워 둔다. 순수 함수.
+    Defaults to fwd/back/left/right; ``sequence`` (comma list) or ``single`` override.
+    Each item is prefilled with ARM/CMD/STOP command strings. Pure.
+    """
     requested = [_station_drive_name(item["primitive"]) for item in USB_PULSE_TEST_SEQUENCE]
     if sequence:
         requested = [_station_drive_name(part) for part in sequence.split(",") if part.strip()]
@@ -3037,10 +3501,12 @@ def station_drive_plan(*, sequence: str | None = None, single: str | None = None
 
 
 def usb_pulse_test_plan(*, sequence: str | None = None, single: str | None = None) -> list[dict[str, object]]:
+    """``station_drive_plan`` 의 현재 명칭 별칭. / Current-name alias for station_drive_plan."""
     return station_drive_plan(sequence=sequence, single=single)
 
 
 def station_drive_display_block(item: dict[str, object]) -> str:
+    """--print-command 용 다중행 표시 블록. / Multi-line display block for --print-command."""
     label = {
         "forward": "FORWARD",
         "backward": "BACKWARD",
@@ -3051,10 +3517,12 @@ def station_drive_display_block(item: dict[str, object]) -> str:
 
 
 def station_drive_console_line(item: dict[str, object]) -> str:
+    """콘솔용 한 줄 펄스 설명. / One-line pulse description for the console."""
     return f"{str(item['primitive']).upper()}: A={float(item['a']):+0.2f} B={float(item['b']):+0.2f} {int(item['ms'])}ms"
 
 
 def station_drive_clean_plan(planned: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """요약 저장용 축약 계획(핵심 필드만). / Compact plan for summaries (core fields only)."""
     return [
         {
             "primitive": item["primitive"],
@@ -3067,6 +3535,11 @@ def station_drive_clean_plan(planned: Sequence[dict[str, object]]) -> list[dict[
 
 
 def station_drive_compatible(row: dict[str, str]) -> bool:
+    """이 하트비트 행이 usb-pulse-test 를 받을 준비가 됐나. / Ready to accept a USB pulse?
+
+    새 usb_pulse_test_mode/ready 신호이거나 레거시 가드펄스 호환이면 True.
+    True on the new usb_pulse_test ready signal or legacy guarded-pulse compatibility.
+    """
     clean_ready = (
         telemetry._parse_bool(row.get("usb_pulse_test_mode")) is True
         and telemetry._parse_bool(row.get("usb_pulse_test_ready")) is True
@@ -3075,6 +3548,7 @@ def station_drive_compatible(row: dict[str, str]) -> bool:
 
 
 def station_drive_event_counts(rows: Sequence[dict[str, object]]) -> dict[str, int]:
+    """검증 행들에서 ACK/ACTIVE/STOP/reject 등 이벤트 집계. / Tally pulse event counts."""
     def count_bool(key: str) -> int:
         return sum(1 for row in rows if row.get(key) is True)
 
@@ -3095,6 +3569,13 @@ def station_drive_event_counts(rows: Sequence[dict[str, object]]) -> dict[str, i
 
 
 def station_drive_classification(rows: Sequence[dict[str, object]], *, user_aborted: bool = False) -> tuple[str, str, str]:
+    """usb-pulse-test 결과를 (result, reason, 다음행동)으로 분류. / Classify the pulse test.
+
+    잘못된 펌웨어/미전송/거부/ACK없음/ACTIVE없음/STOP없음/모터차단/텔레메트리는 움직였는데
+    관측 없음 등을 순서대로 판정하고, 유효 펄스가 모두 정상 관측되면 PASS. 순수 함수.
+    Diagnoses wrong-firmware/no-command/reject/no-ACK/no-ACTIVE/no-STOP/motor-blocked/
+    telemetry-vs-observed and returns PASS when valid pulses observed cleanly. Pure.
+    """
     counts = station_drive_event_counts(rows)
     if any(row.get("wrong_firmware_manual_rc_recovery") is True for row in rows):
         return (
@@ -3177,6 +3658,7 @@ def station_drive_classification(rows: Sequence[dict[str, object]], *, user_abor
 
 
 def _station_drive_latest_state(row: dict[str, str]) -> str:
+    """행의 펄스 명령 상태(신·구 키 폴백). / Pulse command state (new/legacy key fallback)."""
     return (
         row.get("usb_pulse_test_cmd_state")
         or row.get("station_drive_cmd_state")
@@ -3187,6 +3669,16 @@ def _station_drive_latest_state(row: dict[str, str]) -> str:
 
 
 def cmd_usb_pulse_test(args: argparse.Namespace) -> int:
+    """랩탑 USB 로 유계 A/B 펄스를 하나씩 보내 모터 검증. / Bounded USB A/B pulse motor test.
+
+    감독형 펌웨어를 (옵션) 업로드하고, 계획된 펄스마다 하트비트 대기 → (옵션) Enter/카운트다운
+    → ARM/CMD/STOP 전송 → ACK/ACTIVE/STOP·모터출력 관측을 반복한다. 대화형이면 관측된 움직임을
+    사용자에게 묻는다. 종료 시 ``station_drive_classification`` 으로 통과/사유 판정.
+    ``--print-command``/``--print-cmd`` 는 계획만 출력. 부수효과: 업로드/시리얼/입력, 파일 기록.
+    Optionally uploads supervised firmware, then per planned pulse waits for a
+    heartbeat, optionally prompts, sends ARM/CMD/STOP and observes ACK/ACTIVE/STOP +
+    motor output; classifies at the end. Side effects: upload/serial/input + writes.
+    """
     if getattr(args, "deprecated_station_manual_alias", False):
         print("Deprecated alias: use usb-pulse-test.")
     if getattr(args, "deprecated_station_drive_alias", False):
@@ -3461,7 +3953,14 @@ def cmd_usb_pulse_test(args: argparse.Namespace) -> int:
     return 0 if success else 2
 
 
+# ── tune-motion / 대화형 프리미티브 모션 보정 / Interactive motion calibration ──
+# 한 프리미티브(forward/backward/left/right/turn-*-90)를 반복 펄스로 시각·IMU 피드백을
+# 받아가며 조정하고, 조작자가 승인하면 motion_calibration.json 에 저장한다.
+# Iteratively tunes one primitive with visual/IMU feedback; on approval saves it.
+
+
 def tune_motion_planned_command(candidate: dict[str, object], *, seq: int) -> dict[str, object]:
+    """후보 파라미터를 한 번 보낼 펄스 명령으로 변환. / Candidate -> one planned pulse command."""
     a_cmd = float(candidate["a"])
     b_cmd = float(candidate["b"])
     pulse_ms = int(candidate["ms"])
@@ -3487,6 +3986,11 @@ def tune_motion_trial_row(
     yaw_delta_deg: float | None,
     opposite_sign_transient: bool = False,
 ) -> dict[str, object]:
+    """한 튜닝 시도를 CSV 행으로 기록. / One tuning trial as a CSV row.
+
+    후보값·조작자 피드백·ACK/ACTIVE/STOP·IMU yaw 변화·최종 0 여부를 담는다.
+    Captures the candidate, operator feedback, ACK/ACTIVE/STOP, yaw delta, final-zero.
+    """
     last = pulse_rows[-1] if pulse_rows else {}
     final_left = telemetry._optional_float(last.get("final_left_cmd")) if last else None
     final_right = telemetry._optional_float(last.get("final_right_cmd")) if last else None
@@ -3528,6 +4032,7 @@ def tune_motion_summary(
     reason: str,
     calibration_out: Path,
 ) -> dict[str, object]:
+    """튜닝 세션 결과 요약(승인 후보 포함). / Tune-motion session summary (approved candidate)."""
     summary = {
         "mode": "tune-motion",
         "success": approved,
@@ -3559,6 +4064,9 @@ def tune_motion_summary(
     return checks.assert_not_ready_for_full_path_following(summary)
 
 
+# ── 감독형 펌웨어 컴파일·업로드 헬퍼 / Supervised firmware compile+upload helpers ──
+
+
 def _upload_mac_physical_supervised_firmware(
     args: argparse.Namespace,
     out_dir: Path,
@@ -3567,6 +4075,14 @@ def _upload_mac_physical_supervised_firmware(
     mode: str,
     build_path: str,
 ) -> int:
+    """감독형 펌웨어를 컴파일·업로드(공통 헬퍼). / Compile + upload supervised firmware.
+
+    gps-wait/preview/usb-pulse-test/usb-drive-live/tune-motion 이 공유. args 에서 상한
+    (max_abs_a/b, max_ms, TTL 등)을 읽어 플래그를 만들고 arduino-cli 로 빌드/업로드한다.
+    실패 시 실패 요약을 쓰고 arduino-cli 종료코드를, 성공 시 0 을 반환. 부수효과: 서브프로세스+파일.
+    Shared by several modes; reads bounds from args, builds flags, runs arduino-cli
+    compile/upload. On failure writes a summary and returns the arduino-cli code; 0 on OK.
+    """
     max_abs_a = float(getattr(args, "max_abs_a", 0.35))
     max_abs_b = float(getattr(args, "max_abs_b", 0.35))
     max_ms = int(getattr(args, "max_ms", 1000))
@@ -3637,6 +4153,7 @@ def _upload_mac_physical_supervised_firmware(
 
 
 def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, title: str) -> int:
+    """usb-pulse-test/tune-motion 펌웨어 업로드(빌드경로 title 로 선택). / Upload pulse-test firmware."""
     build_path = "/private/tmp/openrb-tune-motion" if title == "Tune Motion" else "/private/tmp/openrb-usb-pulse-test"
     mode = "tune-motion" if title == "Tune Motion" else "usb-pulse-test"
     return _upload_mac_physical_supervised_firmware(
@@ -3649,6 +4166,7 @@ def _upload_usb_pulse_test_firmware(args: argparse.Namespace, out_dir: Path, *, 
 
 
 def _upload_usb_drive_live_firmware(args: argparse.Namespace, out_dir: Path) -> int:
+    """usb-drive-live 펌웨어 업로드. / Upload the usb-drive-live firmware."""
     return _upload_mac_physical_supervised_firmware(
         args,
         out_dir,
@@ -3658,7 +4176,17 @@ def _upload_usb_drive_live_firmware(args: argparse.Namespace, out_dir: Path) -> 
     )
 
 
+# ── usb-drive-live / 연속 USB A·B setpoint 드라이브 / Continuous USB setpoint drive ──
+
+
 def usb_drive_live_summary(rows: Sequence[dict[str, str]], *, a_cmd: float, b_cmd: float, duration_s: float) -> dict[str, object]:
+    """연속 라이브 드라이브 결과 판정. / Judge the continuous live-drive result.
+
+    거부 없음 + STOP 관측 + 최종 명령 0 이면 성공. 순수 함수. 통과는 A/B 상수 setpoint 를
+    지정 시간 동안 데드맨 아래 안전하게 보냈고 정상 정지했음을 의미한다.
+    Success = no reject + STOP seen + final commands zero. Pure. Pass means the
+    constant A/B setpoint ran under the deadman and stopped cleanly.
+    """
     reject_seen = any(telemetry.event(row) == "REJECT" for row in rows)
     stop_seen = any(telemetry.event(row) in safety.STOP_EVENTS for row in rows)
     trace_rows = [row for row in rows if "physical_a_cmd" in row and "motor_write_called" in row]
@@ -3700,6 +4228,14 @@ def usb_drive_live_summary(rows: Sequence[dict[str, str]], *, a_cmd: float, b_cm
 
 
 def cmd_usb_drive_live(args: argparse.Namespace) -> int:
+    """USB 로 A/B setpoint 를 지정 시간 연속 전송(펌웨어 데드맨). / Continuous USB A/B drive.
+
+    먼저 --a/--b/--duration 이 상한을 넘지 않는지 검증(초과 시 실패 요약). 감독형 펌웨어를
+    (옵션) 업로드하고 ``executor.send_live_drive`` 로 주기적으로 setpoint 를 갱신한다.
+    부수효과: 업로드/시리얼, 요약·CSV·원시로그 기록.
+    Validates bounds, optionally uploads, then updates the setpoint via
+    ``executor.send_live_drive``. Side effects: upload/serial + file writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if abs(float(args.a)) > args.max_abs_a or abs(float(args.b)) > args.max_abs_b:
@@ -3901,6 +4437,16 @@ def cmd_set_motion_calibration(args: argparse.Namespace) -> int:
 
 
 def cmd_tune_motion(args: argparse.Namespace) -> int:
+    """대화형으로 한 프리미티브를 보정하고 승인 시 저장. / Interactively tune one primitive.
+
+    감독형 펌웨어를 (옵션) 업로드하고 최대 ``--max-iterations`` 회 반복한다. 매 시도마다
+    후보 펄스를 보내고 IMU yaw/시각 피드백을 받아 후보를 조정한다. 조작자가 ``approve`` 하면
+    ``tuning.save_approved_calibration`` 로 저장(반대부호 과도현상이면 거부). ``--print-candidate``
+    는 초기 후보만 출력. 부수효과: 업로드/시리얼/입력, 보정 파일·요약·CSV 기록.
+    Optionally uploads, then loops sending candidate pulses and adjusting from IMU/
+    visual feedback; ``approve`` saves the calibration. Side effects: upload/serial/
+    input + calibration/summary/CSV writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     primitive = tuning.normalize_primitive(args.primitive)
@@ -4050,7 +4596,15 @@ def cmd_tune_motion(args: argparse.Namespace) -> int:
     return 0 if approved else 2
 
 
+# ── station-hw-diagnose / station-hw-manual (물리 스테이션 HW) / Station HW modes ──
+
+
 def _station_hw_compile_upload_cmds(args: argparse.Namespace, *, diagnose_only: bool) -> tuple[list[str], list[str], str]:
+    """스테이션 HW 컴파일/업로드 명령과 플래그 생성. / Build station-HW compile/upload cmds+flags.
+
+    ``diagnose_only`` 면 모터 출력 없는 진단 플래그·빌드경로를 쓴다. 반환 ``(compile, upload, flags)``.
+    Diagnose-only uses motor-off flags/build path. Returns ``(compile, upload, flags)``.
+    """
     flags = station_hw_diagnose_firmware_flags() if diagnose_only else station_hw_manual_firmware_flags()
     build_path = "/private/tmp/openrb-station-hw-diagnose" if diagnose_only else "/private/tmp/openrb-station-hw-manual"
     compile_cmd = [
@@ -4079,6 +4633,16 @@ def _station_hw_compile_upload_cmds(args: argparse.Namespace, *, diagnose_only: 
 
 
 def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str, summary_name: str, mode: str) -> int:
+    """스테이션 HW 모니터 공통 본체(diagnose/manual 공유). / Shared station-HW monitor body.
+
+    (옵션) 펌웨어 업로드 후 시리얼을 스트리밍하며 매초 상태줄을 출력하고, 종료 시
+    ``evaluate_station_hw_rows`` 로 판정한다. Ctrl-C 는 USER_ABORTED(130), 시리얼 오류는
+    SERIAL_ERROR 로 요약을 덮어쓴다. 파서 불일치 시 원시 프레임 덤프를 남긴다.
+    부수효과: 업로드/시리얼, 요약·CSV·원시로그·(있으면)프레임덤프 기록.
+    Optionally uploads, streams serial with a per-second status line, and evaluates
+    at the end; overrides the summary on abort/serial error and dumps raw frames on a
+    parser mismatch. Side effects: upload/serial + file writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_lines: list[str] = []
@@ -4231,6 +4795,13 @@ def _read_station_hw_rows(args: argparse.Namespace, *, title: str, csv_name: str
 
 
 def cmd_station_hw_diagnose(args: argparse.Namespace) -> int:
+    """읽기전용 물리 스테이션 HW 링크 진단(모터 없음). / Read-only station-HW link diagnostic.
+
+    ``--print-cmd``/``--print-command`` 는 명령만 출력하고, 그 외에는 ``_read_station_hw_rows``
+    로 위임한다. 모터 명령을 절대 보내지 않는다.
+    Prints commands on request, else delegates to ``_read_station_hw_rows``; never
+    sends motor commands.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     compile_cmd, upload_cmd, flags = _station_hw_compile_upload_cmds(args, diagnose_only=True)
@@ -4272,6 +4843,13 @@ def cmd_station_hw_diagnose(args: argparse.Namespace) -> int:
 
 
 def cmd_station_hw_manual(args: argparse.Namespace) -> int:
+    """물리 스테이션 HW 수동 로버 제어(모터 출력 포함). / Station-HW manual rover control.
+
+    폐기 예정(수동제어는 manual-control PPM 권장). deadman 을 잡고 스테이션 스로틀/조향을
+    움직여 모터 출력을 검증한다. ``--print-cmd`` 는 명령만 출력, 그 외 ``_read_station_hw_rows`` 위임.
+    Deprecated (prefer manual-control PPM); verifies motor output under the station
+    deadman. Prints commands on request, else delegates.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     compile_cmd, upload_cmd, flags = _station_hw_compile_upload_cmds(args, diagnose_only=False)
@@ -4309,8 +4887,15 @@ def cmd_station_hw_manual(args: argparse.Namespace) -> int:
     )
 
 
+# ── align-heading / 첫 레인 방향 정렬 (GPS 프로브 + IMU 턴) / Heading alignment ──
+
+
 def _load_plan_segments(args: argparse.Namespace) -> tuple[list[dict[str, object]] | None, str, str]:
     """Load planned segments from --plan-dir; return (segments, reason, message).
+
+    --plan-dir 의 저장된 계획에서 정렬 대상 세그먼트를 읽는다. 실패 시 segments=None 과
+    기계용 사유·조작자 메시지를 함께 돌려준다. / Loads segments to align to; on failure
+    returns None plus a machine reason and operator message.
 
     ``segments`` is None on failure, with a machine reason and operator message.
     """
@@ -4335,6 +4920,7 @@ def _write_align_artifacts(
     trace: Sequence[dict[str, object]],
     raw_lines: Sequence[str],
 ) -> None:
+    """정렬 trace·원시로그·요약 파일을 기록. / Write alignment trace, raw log, and summary."""
     _write_rows_csv(out_dir / "align_heading_trace.csv", list(trace))
     _write_raw_log(out_dir / "raw_usbdbg.log", list(raw_lines))
     _write_json(out_dir / "align_heading_summary.json", summary)
@@ -4364,6 +4950,14 @@ def _align_kwargs(args: argparse.Namespace) -> dict[str, object]:
 
 
 def cmd_align_heading(args: argparse.Namespace) -> int:
+    """로버를 첫 레인 방향으로 정렬. / Point the rover at the first lane heading.
+
+    ``alignment.align_heading`` 로 위임한다. strategy=skip 은 시리얼 없이 계산만,
+    gps_probe 는 짧게 전진해 GPS 변위로 현재 헤딩을 재고 IMU 피드백 턴으로 목표에 맞춘다.
+    부수효과: (skip 아니면) 시리얼 오픈, 정렬 trace·요약 기록.
+    Delegates to ``alignment.align_heading``; skip is serial-free, gps_probe drives a
+    short probe then IMU-feedback turns. Side effects: serial + artifact writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     segments, reason, message = _load_plan_segments(args)
@@ -4713,7 +5307,11 @@ def _calibration_incomplete_summary(
     }
 
 
+# ── inspect-plan / 저장된 계획·이미지 점검 (모션 없음) / Inspect saved plan (no motion) ──
+
+
 def _load_plan_segments_from_dir(plan_dir: Path) -> list[dict[str, object]]:
+    """plan-dir 에서 세그먼트 로드(JSON→CSV→plan.json 순). / Load segments from a plan dir."""
     json_path = plan_dir / "planned_segments.json"
     if json_path.exists():
         loaded = json.loads(json_path.read_text())
@@ -4729,6 +5327,13 @@ def _load_plan_segments_from_dir(plan_dir: Path) -> list[dict[str, object]]:
 
 
 def cmd_inspect_plan(args: argparse.Namespace) -> int:
+    """저장된 계획 산출물과 미리보기 이미지를 점검(모션 없음). / Inspect saved plan + images.
+
+    로컬 전용(시리얼/펌웨어 없음). plan-dir 의 계획을 읽어 경로형태·레인/세그먼트/커넥터 수와
+    첫 20개 세그먼트를 요약하고, 필수 미리보기 이미지 존재 여부를 확인한다. 이미지가 빠지면 실패.
+    Local-only; summarizes shape/lane/segment/connector counts and the first 20
+    segments, and checks required preview images. Missing images -> failure.
+    """
     plan_dir = Path(args.plan_dir)
     out_dir = Path(args.out_dir or plan_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -4788,7 +5393,23 @@ def cmd_inspect_plan(args: argparse.Namespace) -> int:
     return 0 if not missing_images else 1
 
 
+# ── execute-plan / run / 계획 실행 (감독형 폐루프 모션) / Execute a planned path ──
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    """계획된 경로를 감독형으로 실행(execute-plan/run). / Execute a planned path (guarded).
+
+    이 파일에서 유일하게 실제로 로버를 움직이는 주 핸들러. 계획을 --plan-dir 에서 불러오거나
+    골 플래그+GPS 로 즉석 생성한다. ``--print-plan`` 은 시리얼 없이 계획만 저장. path_control_mode 가
+    stop_correct_go 면 먼저 보정 완비 여부를 확인하고(미완이면 모션 전 중단), 필요 시 초기 헤딩 정렬을
+    수행한 뒤 ``controller.run_stop_correct_go`` 또는 ``controller.run_controller`` 에 위임한다.
+    부수효과: 시리얼 오픈/실제 모터 명령, 폐루프 trace·요약·원시로그 기록. 반환 1=중단, 0=완료.
+    The one handler that actually drives the rover. Loads a plan (--plan-dir or goal
+    flags+GPS); ``--print-plan`` is serial-free. For stop_correct_go it checks
+    calibration completeness (aborts before motion if missing), optionally aligns
+    heading, then delegates to controller.run_stop_correct_go / run_controller.
+    Side effects: serial + real motor commands + artifact writes. Returns 1 on abort.
+    """
     cal = resolve_calibration(args)
     plan_dir_used = bool(getattr(args, "plan_dir", None))
     gps_cache_for_run = load_cached_start(float(getattr(args, "max_cached_start_age_s", 600.0)))
@@ -5143,7 +5764,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1 if summary["aborted"] else 0
 
 
-# --- AUTO-switch-triggered relative path planning -----------------------------
+# ── AUTO 스위치 트리거 상대경로 실행 / AUTO-switch-triggered relative path planning ──
+# auto-relative-preview 는 GPS 를 기다려 상대 A->B 필드를 렌더링(모션 없음)하고,
+# auto-relative-run 은 물리 CH5 모드 스위치가 AUTO 로 넘어갈 때만 폐루프 실행을 시작한다.
+# 실행 중 MANUAL 로 되돌리면(require_auto_switch) 안전하게 정지한다.
+# auto-relative-preview renders the relative A->B field (no motion); auto-relative-run
+# starts closed-loop execution only when the physical CH5 switch reads AUTO, and stops
+# safely if it flips back to MANUAL.
 
 
 def _write_closed_loop_artifacts(
@@ -5915,7 +6542,18 @@ def cmd_auto_relative_run(args: argparse.Namespace) -> int:
         handle.close()
 
 
+# ── diagnose / 읽기전용 telemetry 요약 / Read-only telemetry summary ──
+
+
 def cmd_diagnose(args: argparse.Namespace) -> int:
+    """읽기전용 telemetry 요약(모션 없음). / Read-only telemetry summary. No motion.
+
+    라이브 포트를 잠깐 읽거나 ``--from-log`` 로 저장 로그를 파싱해 ``diagnose_summary`` 로
+    행수·하트비트·GPS/IMU 상태를 요약한다. 모터 명령을 보내지 않는다.
+    부수효과: (라이브면) 시리얼 오픈, 요약·원시로그 기록.
+    Reads a live port briefly or parses ``--from-log`` and summarizes via
+    ``diagnose_summary``; sends no motor commands. Side effects: serial + file writes.
+    """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.from_log:
@@ -5960,10 +6598,22 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
-# --- Argument parser ----------------------------------------------------------
+# ══ argparse 설정 (서브커맨드 → 핸들러) / Argument parser (subcommand -> handler) ══
+# ``build_parser`` 가 모든 모드의 서브파서를 만들고 각각 ``set_defaults(handler=cmd_*)``
+# 로 핸들러를 지정한다. 공용 인자군은 ``_add_goal_arguments`` / ``_add_calibration_arguments``
+# 로 묶어 여러 모드가 재사용한다. 새 모드 추가 시: 서브파서 생성 → 인자 → handler 지정.
+# ``build_parser`` builds every mode's subparser and wires its handler; shared arg
+# groups live in the two helpers below. To add a mode: add a subparser + handler.
 
 
 def _add_goal_arguments(parser: argparse.ArgumentParser, *, require_start: bool = True) -> None:
+    """골/경로형태/작업폭 등 공통 계획 인자 추가. / Add shared goal + plan-shape arguments.
+
+    preview/auto-relative-preview/calibration-check/run 계열이 공유한다. ``require_start``
+    로 --start-lat/lon 필수 여부를 조절(라이브 GPS 로 채우는 모드는 False).
+    Shared by preview/calibration-check/run; ``require_start`` toggles whether the
+    start lat/lon are mandatory (False for modes that fill them from live GPS).
+    """
     parser.add_argument("--start-lat", type=float, required=require_start)
     parser.add_argument("--start-lon", type=float, required=require_start)
     parser.add_argument(
@@ -6001,6 +6651,7 @@ def _add_goal_arguments(parser: argparse.ArgumentParser, *, require_start: bool 
 
 
 def _add_calibration_arguments(parser: argparse.ArgumentParser) -> None:
+    """보정 JSON 경로/모드 공통 인자 추가. / Add shared calibration JSON/mode arguments."""
     parser.add_argument("--calibration-mode", default="auto")
     parser.add_argument("--motion-calibration-json", default=str(calibration.DEFAULT_MOTION_CALIBRATION))
     parser.add_argument("--fine-calibration-json", default=None)
@@ -6010,6 +6661,13 @@ def _add_calibration_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """모든 모드 서브파서를 구성해 argparse 파서를 반환. / Build the full argparse parser.
+
+    ``dest="mode"`` 서브파서에 각 모드를 등록하고 ``set_defaults(handler=cmd_*)`` 로
+    핸들러를 연결한다. station-hw 와 guarded-pulse-ready 는 내부 팩토리 함수로 만든다.
+    Registers every mode under the ``mode`` subparsers and wires each handler; the
+    station-HW and guarded-pulse-ready parsers are built by nested factory functions.
+    """
     parser = argparse.ArgumentParser(
         prog="physical_path_planner",
         description="Unified physical rover tools: station hardware manual, USB pulse tests, diagnostics, calibration, and supervised planning.",
@@ -6254,6 +6912,7 @@ def build_parser() -> argparse.ArgumentParser:
     rc_auto_p.set_defaults(handler=cmd_rc_auto_pattern)
 
     def add_station_hw_parser(name: str, *, diagnose_only: bool) -> None:
+        """station-hw-diagnose/manual 서브파서 등록. / Register a station-HW subparser."""
         station_p = sub.add_parser(
             name,
             help=(
@@ -6426,6 +7085,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_p.set_defaults(handler=cmd_inspect_plan)
 
     def add_guarded_pulse_ready_parser(name: str) -> None:
+        """guarded-pulse-ready 서브파서 등록. / Register the guarded-pulse-ready subparser."""
         guarded_p = sub.add_parser(
             name,
             help="upload/check IMU-enabled guarded pulse firmware",
@@ -6447,6 +7107,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_guarded_pulse_ready_parser("guarded-pulse-ready")
 
+    # run / execute-plan / auto-relative-run 은 인자 집합이 거의 같아 한 루프에서
+    # 같은 옵션을 세 서브파서에 붙인다. auto-relative-run 만 AUTO 스위치/키보드 시작
+    # 관련 인자와 기본 헤딩 정렬을 추가로 갖는다.
+    # These three share almost the same option set, so one loop adds them to all three;
+    # only auto-relative-run gets the extra AUTO-switch/keyboard args + default align.
     for name in ("run", "execute-plan", "auto-relative-run"):
         if name == "auto-relative-run":
             run_p = sub.add_parser(
@@ -6693,6 +7358,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """CLI 진입점: 인자 파싱 후 선택된 핸들러 실행. / CLI entry point; dispatch to handler.
+
+    폐기 예정 별칭 ``station-manual`` / ``station-drive`` 를 ``usb-pulse-test`` 로 재작성한
+    뒤 파싱하고, ``args.handler(args)`` 의 종료코드를 int 로 반환한다.
+    Rewrites the deprecated ``station-manual``/``station-drive`` aliases to
+    ``usb-pulse-test`` before parsing, then returns ``args.handler(args)`` as an int.
+    """
     parser = build_parser()
     normalized_argv = list(sys.argv[1:] if argv is None else argv)
     deprecated_station_manual_alias = False

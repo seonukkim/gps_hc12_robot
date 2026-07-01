@@ -1,3 +1,44 @@
+"""Stage 14 스테이션 가상 경로 제어기 — 진단 전용 가상 명령 프리뷰.
+Stage 14 station virtual path controller (diagnostic-only virtual commands).
+
+목적/역할:
+    Stage 12 타깃 상태 행(거리/방위/cross-track/헤딩 오차) 위에, 로버가 이 타깃을 따라가려면
+    어떤 전진/회전량이 필요한지 **가상으로** 계산해 좌/우 바퀴 명령까지 프리뷰한다. 이 값들은
+    firmware 모터 명령이 아니다 — 순수 진단 수치다. CSV/요약/그래프 PNG 로 출력한다.
+    On top of Stage 12 target rows, it computes *virtual* forward/turn (and L/R
+    wheel) commands as a preview. These are NOT firmware motor commands — pure
+    diagnostics. Outputs CSV + summary + a plot PNG.
+
+시스템 내 위치:
+    ``tools.station_path_package_tracker`` 를 재사용한다:
+    ``compute_target_status`` / ``build_rows_from_replay`` / ``_read_live_usbdbg`` 로 먼저
+    타깃 행을 만든 뒤 그 위에 가상 제어를 얹는다. 경로 패키지 해석은
+    ``path_no_motion_validation.resolve_path_package`` 에 위임한다. 상위 파이프라인에 속하지
+    않는 독립 진단 CLI 다.
+    Reuses ``station_path_package_tracker`` for target rows, then layers virtual
+    control; delegates package resolution to ``path_no_motion_validation``.
+
+핵심 개념·불변식:
+    - **무모터/무전송 불변식**: ``virtual_control_generated`` 가 True 여도 모터/시리얼로는
+      아무것도 보내지 않는다. ``motor_command_generated`` / ``physical_output_active`` /
+      ``ready_for_motor_test`` 는 항상 False. 이 진단값을 firmware 로 전달하지 말 것 (함정).
+    - 전진/회전 명령은 ``max_virtual_forward_cmd`` / ``max_virtual_turn_cmd`` 로 클램프된다.
+    - 헤딩 유무에 따라 회전 산식이 갈린다: 헤딩 있으면 heading_error 기반(OK), 없으면 target
+      bearing 기반(DIAG_ONLY). 로컬 타깃이 없으면 NO_LOCAL_TARGET 으로 0 명령.
+    - Invariants: nothing is ever sent (motor/serial); virtual commands are clamped
+      to the max-* limits; turn law differs by heading availability (OK vs DIAG_ONLY).
+
+사용법/진입점:
+    ``python tools/station_virtual_path_controller.py --mode {...} --out-dir OUT [...]`` —
+    ``main()`` 이 진입점. 모드는 Stage 12 와 동일(offline_pose/replay_log/live_usbdbg).
+    Entry point ``main()``; same three modes as Stage 12.
+
+리팩토링 노트:
+    ``VIRTUAL_FIELDS`` 순서는 CSV 계약이다. 튜닝 계수(0.7/0.3, 0.8/0.2, /90, /45 등)는
+    ``compute_virtual_control`` 안에 하드코딩돼 있으니 제어 특성을 바꿀 때 이 함수만 손대면 된다.
+    ``VIRTUAL_FIELDS`` order is the CSV contract; tuning constants live inside
+    ``compute_virtual_control``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +57,9 @@ from tools.path_no_motion_validation import PathPackageResolutionError, resolve_
 from tools import station_path_package_tracker
 
 
+# ── CSV 스키마 / CSV schema ──
+# virtual_control.csv 의 열 순서·이름 계약. 맨 끝 motor/ready_for_motor_test 는 항상 False.
+# Column order/names for virtual_control.csv; motor fields are always False.
 VIRTUAL_FIELDS = (
     "row_index",
     "mode",
@@ -45,7 +89,11 @@ VIRTUAL_FIELDS = (
 )
 
 
+# ── 스칼라 헬퍼 / Scalar helpers ──
+
+
 def _optional_float(value: object) -> float | None:
+    """유한 float 로 변환하되 빈 값/NA/NaN/변환 실패는 None. / Parse to finite float or None."""
     if value is None:
         return None
     text = str(value).strip()
@@ -59,7 +107,11 @@ def _optional_float(value: object) -> float | None:
 
 
 def _clamp(value: float, limit: float) -> float:
+    """대칭 클램프: 값을 [-limit, +limit] 로 제한한다. / Symmetric clamp to [-limit, +limit]."""
     return max(-limit, min(limit, value))
+
+
+# ── 가상 제어 계산 / Virtual control computation ──
 
 
 def compute_virtual_control(
@@ -69,6 +121,15 @@ def compute_virtual_control(
     max_virtual_turn_cmd: float = 0.05,
     lookahead_m: float = 1.0,
 ) -> dict[str, object]:
+    """한 타깃 행에서 가상 전진/회전/좌우 명령을 계산한 진단 행을 만든다(전송 없음).
+    Compute virtual forward/turn/L-R commands for one target row (never sent).
+
+    로컬 포즈+유한 타깃이 없으면 0 명령 + NO_LOCAL_TARGET. 있으면 전진은 거리 비례(상한
+    클램프), 회전은 헤딩 유무로 분기: 헤딩 있으면 heading_error 위주(OK), 없으면 target
+    bearing 위주(DIAG_ONLY). 좌/우 = 전진 ∓ 회전.
+    부수효과 없음. 모터/전송 관련 필드는 항상 False.
+    No local pose/finite target → zero commands. Otherwise forward ∝ distance
+    (clamped); turn law branches on heading availability. Pure; motor fields False."""
     distance = _optional_float(target_row.get("target_distance_m"))
     bearing = _optional_float(target_row.get("target_bearing_deg"))
     cross_track = _optional_float(target_row.get("cross_track_error_m"))
@@ -82,18 +143,24 @@ def compute_virtual_control(
         virtual_heading_status = "NO_LOCAL_TARGET"
         control_generated = False
     else:
+        # 전진은 거리 비례(계수 0.2)이되 상한으로 클램프 / forward ∝ distance, capped.
         virtual_forward = min(max_virtual_forward_cmd, max(0.0, float(distance) * 0.2))
         if heading is None or heading_error is None:
+            # 헤딩 미확보: 실제 헤딩 오차를 모르므로 target bearing 을 대리로 사용(진단 전용).
+            # No heading: fall back to target bearing as a proxy (diagnostic only).
             virtual_heading_status = "DIAG_ONLY"
             bearing_component = _clamp(float(bearing) / 90.0, 1.0)
             cross_component = _clamp(float(cross_track) / max(lookahead_m, 1e-6), 1.0)
             virtual_turn = _clamp((0.7 * bearing_component + 0.3 * cross_component) * max_virtual_turn_cmd, max_virtual_turn_cmd)
         else:
+            # 헤딩 확보: heading_error 를 주(0.8)로, cross-track 을 보조(0.2)로 섞는다.
+            # Heading known: weight heading_error (0.8) over cross-track (0.2).
             virtual_heading_status = "OK"
             heading_component = _clamp(float(heading_error) / 45.0, 1.0)
             cross_component = _clamp(float(cross_track) / max(lookahead_m, 1e-6), 1.0)
             virtual_turn = _clamp((0.8 * heading_component + 0.2 * cross_component) * max_virtual_turn_cmd, max_virtual_turn_cmd)
         control_generated = True
+    # 차동 구동 프리뷰: 좌/우 바퀴 = 전진 ∓ 회전 / differential drive: L/R = forward ∓ turn.
     virtual_left = virtual_forward - virtual_turn
     virtual_right = virtual_forward + virtual_turn
     ready_preview = bool(local_pose_available and target_finite and control_generated)
@@ -133,6 +200,8 @@ def build_virtual_rows(
     max_virtual_turn_cmd: float = 0.05,
     lookahead_m: float = 1.0,
 ) -> list[dict[str, object]]:
+    """모든 타깃 행에 ``compute_virtual_control`` 을 적용해 가상 제어 행 목록을 만든다.
+    Map ``compute_virtual_control`` over all target rows."""
     return [
         compute_virtual_control(
             row,
@@ -144,7 +213,12 @@ def build_virtual_rows(
     ]
 
 
+# ── 요약/출력 렌더링 / Summary & output rendering ──
+
+
 def _summary_from_rows(selected_path: Path, package: dict[str, object], rows: Sequence[dict[str, object]]) -> dict[str, object]:
+    """첫 행 기준 상위 요약(프리뷰 준비 여부 포함)을 만든다. ready_for_motor_test 는 항상 False.
+    Build the top-level summary from the first row; ready_for_motor_test stays False."""
     first = rows[0] if rows else {}
     primitive_valid = bool(package["summary"]["primitive_sequence_valid"])  # type: ignore[index]
     target_distance = _optional_float(first.get("target_distance_m"))
@@ -184,6 +258,8 @@ def _summary_from_rows(selected_path: Path, package: dict[str, object], rows: Se
 
 
 def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    """가상 제어 행들을 ``VIRTUAL_FIELDS`` 스키마로 CSV 에 쓴다. 부수효과: 파일 쓰기.
+    Write virtual-control rows to CSV using ``VIRTUAL_FIELDS``. Side effect: file write."""
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=VIRTUAL_FIELDS)
         writer.writeheader()
@@ -192,6 +268,8 @@ def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
 
 
 def _write_summary(path: Path, summary: dict[str, object]) -> None:
+    """요약 딕셔너리를 Markdown 파일로 쓴다(진단 전용 고지 포함). 부수효과: 파일 쓰기.
+    Write the summary dict as Markdown (with diagnostic-only notice). Side effect: file write."""
     lines = [
         "# Stage 14 Station Virtual Path Controller",
         "",
@@ -204,10 +282,14 @@ def _write_summary(path: Path, summary: dict[str, object]) -> None:
 
 
 def _plot_virtual_control(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    """행 인덱스에 따른 가상 forward/turn/left/right 명령을 PNG 그래프로 그린다. matplotlib 없으면 skip.
+    Plot virtual forward/turn/left/right vs row index to a PNG. No-op sans matplotlib.
+
+    부수효과: PNG 생성. Agg 백엔드 강제로 헤드리스 안전. / Side effect: writes PNG (Agg backend)."""
     try:
         import matplotlib
 
-        matplotlib.use("Agg")
+        matplotlib.use("Agg")  # 헤드리스 저장 전용 / headless, file-only
         import matplotlib.pyplot as plt
     except ImportError:
         return
@@ -233,7 +315,16 @@ def _plot_virtual_control(path: Path, rows: Sequence[dict[str, object]]) -> None
     plt.close(fig)
 
 
+# ── CLI 진입점 / CLI entry point ──
+
+
 def _target_rows_for_args(args: argparse.Namespace, package: dict[str, object]) -> list[dict[str, object]]:
+    """CLI 모드에 따라 Stage 12 타깃 행을 만들어 반환한다(가상 제어 계산의 입력).
+    Produce Stage 12 target rows per CLI mode (input to virtual control).
+
+    각 모드는 station_path_package_tracker 의 함수를 위임 호출한다: offline_pose 는
+    수동 좌표, replay_log 는 로그 파일, live_usbdbg 는 실시간 포트. 필수 인자 누락 시
+    ``SystemExit``. / Delegates to the tracker; ``SystemExit`` on missing required args."""
     if args.mode == "offline_pose":
         if args.current_x is None or args.current_y is None:
             raise SystemExit("--current-x and --current-y are required in offline_pose mode")
@@ -258,12 +349,16 @@ def _target_rows_for_args(args: argparse.Namespace, package: dict[str, object]) 
         )
     if not args.port:
         raise SystemExit("--port is required in live_usbdbg mode")
+    # Stage 12 의 라이브 리더를 재사용(_ 접두 private). 시리얼 로직을 중복 구현하지 않기 위함.
+    # Reuse Stage 12's live reader (private) to avoid duplicating serial logic.
     usbdbg_rows = station_path_package_tracker._read_live_usbdbg(args.port, args.duration_s)  # noqa: SLF001
     log_text = "\n".join(" ".join(f"{key}={value}" for key, value in row.items()) for row in usbdbg_rows)
     return station_path_package_tracker.build_rows_from_replay(package, log_text, args.mode)
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """CLI 인자 파서를 만든다(모드/포즈/로그/포트 + 가상 명령 상한·lookahead + 출력 디렉터리).
+    Build the argparse parser (mode, pose/log/port, virtual limits/lookahead, out dir)."""
     parser = argparse.ArgumentParser(description="Compute station-side virtual path control diagnostics.")
     parser.add_argument("--path-package", default="latest")
     parser.add_argument("--mode", choices=("offline_pose", "replay_log", "live_usbdbg"), required=True)
@@ -281,6 +376,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """타깃 행 → 가상 제어 행을 만들고 CSV/요약/그래프를 써서 프리뷰를 완성한다.
+    Run the controller: build target→virtual rows, write CSV/summary/plot, print status.
+
+    반환값: 정상 0, 경로 패키지 해석 실패 2. 부수효과: out-dir 생성 및 파일 3종 쓰기,
+    stdout 출력. 모터로는 아무것도 전송하지 않는다(무모터/무전송 불변식).
+    Returns 0 on success, 2 if the package can't be resolved. Side effects: creates
+    out-dir, writes 3 files, prints. Nothing is ever sent to motors."""
     args = build_parser().parse_args(argv)
     try:
         selected = resolve_path_package(args.path_package)

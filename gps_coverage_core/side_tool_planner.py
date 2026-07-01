@@ -1,9 +1,84 @@
+"""사이드 툴(측면 장착 청소/도장 도구) 커버리지 경로 계획 서브시스템.
+
+목적/역할:
+    로버 섀시의 옆(좌/우)에 오프셋되어 달린 "사이드 툴"이 직사각형 작업 영역을
+    빈틈없이 쓸고 지나가도록(coverage) 하는 경로를 **기하학적으로만** 계획한다.
+    핵심 아이디어는 "툴 우선(tool-first)": 먼저 툴 중심선이 지나갈 스트립(strip)을
+    그리드 집합피복(set-cover)으로 고르고, 그 다음 그 툴 배치를 지지(support)하도록
+    섀시 포즈를 역산한다. 결과 행(row)들은 미리보기용 기하 정보일 뿐이며,
+    모터 명령이 아니다(`motor_command_generated`는 항상 False).
+
+    Plans a coverage path for a *side-mounted* tool (cleaning/painting head)
+    offset laterally from the rover chassis. Strategy is "tool-first": tool
+    swept strips are chosen by a grid set-cover pass, then chassis poses are
+    derived to support them. Output rows are geometry-only previews, never
+    motor commands.
+
+시스템 내 위치 (pipeline):
+    - 이 모듈은 `gps_coverage_core` 안의 **보조(secondary)** 플래너다. 메인 커버리지
+      플래너는 `planner.py`(위경도↔로컬 변환 + 왕복 웨이포인트 생성)이며, 이 파일은
+      그와 독립적인 사이드 툴 전용 경로 모델을 제공한다.
+    - Import 하는 쪽: `tools/side_tool_path_preview.py`,
+      `tools/preview_side_tool_waypoints.py`, `tools/field_ab_to_serpentine.py`
+      (CLI 미리보기/시각화 도구). 이들은 공개 함수뿐 아니라 `_workspace_info`,
+      `_coverage_grid`, `_cells_for_polygon` 같은 밑줄 헬퍼도 직접 import 하므로,
+      리팩토링 시 이 "준(準)공개" 심볼들의 시그니처를 함부로 바꾸면 CLI가 깨진다.
+    - 이 파일이 import 하는 것: 표준 라이브러리 `math`, `dataclasses`, `typing`뿐.
+      NumPy/외부 의존성 없음(순수 파이썬 기하 계산).
+
+    Secondary planner in `gps_coverage_core`; the main path routing lives in
+    `planner.py`. Consumed by the `tools/*` preview CLIs, which import even the
+    underscore helpers — treat those as quasi-public when refactoring.
+
+핵심 개념·불변식 (concepts / invariants):
+    - **로컬 좌표계**: 계획은 작업 사각형의 로컬 프레임 (x = A→B 축 방향 길이,
+      y = 폭 방향, 0..workspace_width_m)에서 이뤄지고, 최종적으로만
+      `_workspace_to_world`로 월드 좌표로 사상된다.
+    - **A/B 의미(semantic)**는 `workspace_mode`마다 다르다(코너 대각선 vs 중심선+폭
+      vs 축+폭). `WorkspaceInfo.a_b_semantic` 참고.
+    - **오염(contamination) 모델**: 섀시가 이미 툴이 지나간(젖은) 셀 위를 다시 밟으면
+      위반. 시간 순서(temporal)로 셀별 최초 청소 시각을 기록해 검사한다.
+    - **미분 구동(differential-drive) 제약**: 옆으로 미끄러지는 이동 불가. 전이
+      (transition)는 내부 회전 포켓 안에서만 허용(외부 turn bay 금지).
+    - **차원 단위**: 모든 거리 필드 접미사 `_m`(미터), 각도 `_deg`(도). 각도는
+      `_normalize_angle_deg`로 (-180, 180] 범위 정규화.
+
+사용법/진입점 (entry points):
+    - `generate_side_tool_path(config)` — A/B 경계 기반 다중 레인 커버리지(주 진입점,
+      `ab_diagonal_center`/`ab_centerline_width` 등).
+    - `generate_tool_serpentine_preview(config)` — 단순 왕복(serpentine) 미리보기
+      (`tool_serpentine_ab` 전용, 레거시 레인 탐색을 쓰지 않는 신형 모델).
+    - `strategy_diagnostics(config)` — 여러 route-order 전략의 실패 원인 오프라인 진단.
+    - `summarize_side_tool_path`, `swept_volume_summary`, `contamination_analysis`
+      — 생성된 포즈열에 대한 지표/검증 요약.
+
+리팩토링 노트 (refactor cautions):
+    - 포즈 행(dict)은 CLI가 CSV로 그대로 내보내는 **넓은 계약(wide contract)**이다
+      (`_pose_dict` 참고). 키 이름을 바꾸면 CSV 스키마·시각화가 깨진다.
+    - `route_order`/`workspace_mode`/`chassis_boundary_mode` 등 문자열 리터럴은
+      `_validate_config`의 허용 집합과 반드시 동기화할 것.
+    - `SideToolPlanConfig`는 frozen dataclass다. 변형이 필요하면 `dataclasses.replace`
+      사용(예: `strategy_diagnostics`).
+    - 주의(gotcha): 4031행 `generate_tool_serpentine_preview`의
+      `_robot_length(config)` 호출 대상이 이 파일에 정의돼 있지 않다(잠재적 결함).
+      기존 동작 보존을 위해 여기서는 손대지 않는다.
+
+    Entry points: generate_side_tool_path / generate_tool_serpentine_preview /
+    strategy_diagnostics. Pose rows are a wide CSV-facing contract; do not rename
+    keys. Config is a frozen dataclass — mutate via dataclasses.replace.
+"""
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
 from typing import Literal
 
+# ── 타입 별칭 / Type aliases ──
+# 문자열 리터럴 유니온으로 계획 옵션의 유효값을 문서화·강제한다. 이 집합은
+# _validate_config 의 검사와 반드시 일치해야 한다.
+# String-literal unions documenting valid option values; keep in sync with
+# _validate_config.
 ToolSide = Literal["left", "right"]
 WorkspaceSide = Literal["left", "right"]
 SurfaceSide = Literal["left", "right", "centered"]
@@ -37,8 +112,24 @@ TurnClearanceMode = Literal["simple", "bounding_circle"]
 RowCount = int | Literal["auto"]
 
 
+# ── 데이터 구조: 설정과 결과 레코드 / Data structures: config & result records ──
+
+
 @dataclass(frozen=True)
 class SideToolPlanConfig:
+    """사이드 툴 플래너의 전체 입력 설정(불변).
+
+    작업 영역(A/B, 폭, 모드), 로봇/툴 치수, 경계·오염·운동학 제약, 경로 순서
+    전략 등 계획에 필요한 모든 파라미터를 담는다. frozen=True 이므로 변경은
+    `dataclasses.replace`로만 한다. 대부분의 문자열 필드는 위 Literal 타입의
+    유효값만 허용되며 `_validate_config`가 이를 검증한다.
+
+    Immutable full input config for the side-tool planner (workspace A/B,
+    robot/tool dimensions, boundary/contamination/kinematic constraints,
+    route-order strategy). Frozen — mutate via dataclasses.replace; values are
+    validated by _validate_config.
+    """
+
     workspace_mode: WorkspaceMode = "tool_serpentine_ab"
     tool_side: ToolSide = "left"
     tool_lateral_offset_m: float = 0.24
@@ -115,6 +206,17 @@ class SideToolPlanConfig:
 
 @dataclass(frozen=True)
 class WorkspaceInfo:
+    """설정에서 유도한 작업 영역 기하 정보(불변, 계획 전반의 공유 컨텍스트).
+
+    A/B 좌표, 사각형 길이·폭, 로컬 원점, 월드 경계 상자, 로봇/전이 반경, 헤딩
+    부호 등 계획 루틴들이 반복 사용하는 파생값을 한 번에 계산해 담는다.
+    `_workspace_info`가 생성한다.
+
+    Immutable derived workspace geometry (A/B, rectangle size, local origin,
+    world bbox, radii, heading signs) shared across planning routines; built by
+    _workspace_info.
+    """
+
     workspace_mode: WorkspaceMode
     a_b_semantic: str
     bounded: bool
@@ -148,6 +250,12 @@ class WorkspaceInfo:
 
 @dataclass(frozen=True)
 class CoverageGridInfo:
+    """커버리지 판정을 위한 균일 셀 격자 정보. / Uniform coverage grid over the workspace.
+
+    셀 인덱스는 `iy * nx + ix` 단일 정수로 인코딩된다(집합 연산용).
+    Cell index is encoded as a single int `iy * nx + ix` for set operations.
+    """
+
     nx: int
     ny: int
     cell_width_m: float
@@ -158,6 +266,15 @@ class CoverageGridInfo:
 
 @dataclass(frozen=True)
 class ToolStripCandidate:
+    """후보 툴 스트립 하나: 특정 y 오프셋·헤딩에서 툴이 덮는 셀 집합.
+
+    집합피복 선택(`_select_tool_strip_candidates`)의 원소이며, 파생 섀시 y와
+    툴 가장자리 y, 덮는 셀(frozenset)을 함께 보관한다.
+
+    One candidate tool strip (tool center y + heading) with its covered cell
+    set; an element of the set-cover selection.
+    """
+
     candidate_index: int
     tool_center_y_m: float
     tool_world_sign: int
@@ -173,6 +290,13 @@ class ToolStripCandidate:
 
 @dataclass(frozen=True)
 class TransitionChoice:
+    """레인 간 전이(방향 전환) 프리미티브 선택 결과와 그 포장(envelope) 검사.
+
+    선택된 전이 기법, 비용, 회전 포장 상자, 경계 내 여부/위반 사유를 담는다.
+    Chosen inter-lane transition primitive plus its swept envelope box and
+    boundary check (used to score/validate turns).
+    """
+
     primitive: str
     candidate_count: int
     cost: float
@@ -186,6 +310,15 @@ class TransitionChoice:
 
 @dataclass(frozen=True)
 class FootprintSample:
+    """경로를 따라 촘촘히 샘플링한 한 순간의 섀시+툴 자취(footprint) 스냅샷.
+
+    스위프 볼륨(swept-volume) 검증의 기본 단위. 각 샘플에서 섀시/툴 폴리곤,
+    결합 경계 상자, 작업 영역 내 포함 여부를 계산한다.
+
+    One sampled instant of chassis+tool footprint along the path (polygons,
+    bbox, inside-workspace flags); the unit of swept-volume validation.
+    """
+
     sample_index: int
     segment_id: str
     sample_type: str
@@ -206,6 +339,13 @@ class FootprintSample:
 
 @dataclass(frozen=True)
 class ContaminationEvent:
+    """오염 위반 사건 하나: 섀시가 이미 청소된(젖은) 셀을 밟은 시점 기록.
+
+    발생 시각(time_step)·세그먼트·겹친 셀/면적·사유·심각도를 담는다.
+    One contamination violation: chassis overlapping already-cleaned cells at a
+    given time step (segment, overlap cells/area, reason, severity).
+    """
+
     event_index: int
     time_step: int
     segment_id: str
@@ -222,6 +362,15 @@ class ContaminationEvent:
 
 @dataclass(frozen=True)
 class TimelineState:
+    """시간 축 한 스텝의 누적 상태(청소 면적·커버리지·오염 카운트 등) 스냅샷.
+
+    시각화·검증용 타임라인의 한 행. 지금까지 청소된 면적, 커버리지 비율, B까지
+    남은 거리, 재청소/오염 셀 수 등 누적 지표를 담는다.
+
+    Per-time-step cumulative state snapshot (cleaned area, coverage ratio,
+    contamination counts, distance-to-B) — one row of the timeline.
+    """
+
     time_step: int
     segment_id: str
     segment_type: str
@@ -247,21 +396,32 @@ class TimelineState:
     tool_active: bool
 
 
+# ── 기하 원시 함수 / Geometry primitives (angles, unit vectors, side signs) ──
+
+
 def _normalize_angle_deg(angle_deg: float) -> float:
+    """각도를 (-180, 180] 로 정규화. / Wrap an angle into (-180, 180] degrees."""
     return ((angle_deg + 180.0) % 360.0) - 180.0
 
 
 def _heading_unit(heading_deg: float) -> tuple[float, float]:
+    """헤딩 각의 전방 단위 벡터 (cos, sin). / Forward unit vector for a heading."""
     heading_rad = math.radians(heading_deg)
     return math.cos(heading_rad), math.sin(heading_rad)
 
 
 def _left_normal(heading_deg: float) -> tuple[float, float]:
+    """헤딩 기준 좌측 법선 단위 벡터. / Left-hand normal unit vector of a heading.
+
+    전방 벡터를 +90° 회전(=(-uy, ux))한 것. 툴 측면 오프셋 방향 계산의 기준.
+    Forward vector rotated +90°; basis for the tool's lateral offset direction.
+    """
     ux, uy = _heading_unit(heading_deg)
     return -uy, ux
 
 
 def _side_sign(side: str) -> int:
+    """'left'→+1, 'right'→-1 부호. / Sign for a side: left=+1, right=-1."""
     if side == "left":
         return 1
     if side == "right":
@@ -270,6 +430,7 @@ def _side_sign(side: str) -> int:
 
 
 def _surface_side_sign(side: SurfaceSide) -> int:
+    """청소 표면 측 부호. 'centered'는 +1로 취급. / Surface-side sign; 'centered'→+1."""
     if side == "left":
         return 1
     if side == "right":
@@ -280,6 +441,10 @@ def _surface_side_sign(side: SurfaceSide) -> int:
 
 
 def _normalize_transition_style(style: str) -> str:
+    """전이 스타일 문자열을 표준형으로 정규화(하이픈/언더스코어 허용).
+
+    Normalize transition-style aliases (hyphen vs underscore) to canonical form.
+    """
     if style in {"auto-internal", "auto_internal"}:
         return "auto_internal"
     if style in {"side-step-reverse-90", "side_step_reverse_90"}:
@@ -288,6 +453,11 @@ def _normalize_transition_style(style: str) -> str:
 
 
 def _direction_for_lane(first_lane_direction: LaneDirection, lane_index: int) -> int:
+    """레인 인덱스별 진행 부호(±1). 왕복(boustrophedon)이라 홀짝마다 뒤집힌다.
+
+    Travel sign (±1) per lane; alternates every lane for the boustrophedon
+    back-and-forth pattern.
+    """
     if first_lane_direction not in {"forward", "reverse"}:
         raise ValueError("first_lane_direction must be 'forward' or 'reverse'")
     first = 1 if first_lane_direction == "forward" else -1
@@ -295,10 +465,23 @@ def _direction_for_lane(first_lane_direction: LaneDirection, lane_index: int) ->
 
 
 def _motion_direction(travel_sign: int, heading_axis_sign: int) -> LaneDirection:
+    """진행 부호와 헤딩 축 부호가 같으면 전진, 다르면 후진.
+
+    forward if travel and heading-axis signs agree, else reverse.
+    """
     return "forward" if travel_sign == heading_axis_sign else "reverse"
 
 
+# ── 반경·간극·좌표 사상 헬퍼 / Radius, clearance & frame-mapping helpers ──
+
+
 def _robot_radius(config: SideToolPlanConfig) -> float:
+    """섀시의 대표 반경(회전 간극용). / Effective chassis radius for clearance.
+
+    명시 반경이 있으면 그 값, 없으면 폭/길이의 반대각선(외접원 반경)을 쓴다.
+    Uses explicit radius if given, else the half-diagonal (circumscribed radius)
+    of the width/length box.
+    """
     if config.robot_radius_m is not None:
         if config.robot_radius_m <= 0.0:
             raise ValueError("robot_radius_m must be positive")
@@ -313,6 +496,14 @@ def _robot_radius(config: SideToolPlanConfig) -> float:
 
 
 def _transition_clearance_radius(config: SideToolPlanConfig, robot_radius: float) -> float:
+    """제자리 전이 회전에 필요한 최대 간극 반경. / Clearance radius for in-place turns.
+
+    섀시 반경과 "툴의 가장 먼 모서리까지 거리" 중 큰 값. 툴이 옆으로 오프셋+폭을
+    가지므로 회전 시 툴 코너가 섀시보다 더 바깥을 쓸 수 있어 이를 포함한다.
+
+    max(chassis radius, tool far-corner radius); the offset side tool can sweep
+    wider than the chassis during a turn, so its corner reach is included.
+    """
     tool_corner_radius = math.hypot(
         tool_length_m(config) / 2.0,
         config.tool_lateral_offset_m + config.tool_width_m / 2.0,
@@ -321,6 +512,7 @@ def _transition_clearance_radius(config: SideToolPlanConfig, robot_radius: float
 
 
 def _has_ab(config: SideToolPlanConfig) -> bool:
+    """A/B 네 좌표가 모두 주어졌는지. / True iff all four A/B coords are provided."""
     return (
         config.a_x_m is not None
         and config.a_y_m is not None
@@ -337,6 +529,14 @@ def _axis_width_to_world(
     x_m: float,
     y_m: float,
 ) -> tuple[float, float]:
+    """(축 x, 폭 y) 로컬 좌표를 월드로 변환. / Map local (axis x, width y) to world.
+
+    axis_width/centerline 계열 모드에서 로컬 원점·A→B 헤딩·작업측 부호를 써서
+    로컬 좌표를 월드로 사상한다. y는 작업측(왼/오른쪽)에 따라 법선 방향이 뒤집힌다.
+
+    For axis_width/centerline modes: places local coords into world using origin,
+    A→B heading, and side sign (the width axis flips with workspace side).
+    """
     ux, uy = _heading_unit(heading_deg)
     left_x, left_y = _left_normal(heading_deg)
     side = _side_sign(workspace_side)
@@ -344,7 +544,18 @@ def _axis_width_to_world(
     return origin_x_m + ux * x_m + nx * y_m, origin_y_m + uy * x_m + ny * y_m
 
 
+# ── 설정 검증 / Config validation ──
+
+
 def _validate_config(config: SideToolPlanConfig) -> None:
+    """설정 값의 유효 범위·허용 리터럴을 검사(위반 시 ValueError).
+
+    부수효과 없음. 각 Literal 필드의 허용 집합이 파일 상단 타입 별칭과 동일해야
+    한다(둘을 함께 갱신할 것). `_workspace_info` 진입 시 가장 먼저 호출된다.
+
+    Validate config ranges and allowed string literals (raises ValueError). No
+    side effects; the allowed sets must match the type aliases above.
+    """
     _side_sign(config.tool_side)
     if config.workspace_mode not in {
         "tool_serpentine_ab",
@@ -466,12 +677,32 @@ def _validate_config(config: SideToolPlanConfig) -> None:
         raise ValueError("only end_policy='near_B_or_last_lane_feasible' is supported")
 
 
+# ── 작업 영역 유도 / Workspace derivation (mode-specific A/B → geometry) ──
+
+
 def _workspace_info(config: SideToolPlanConfig) -> WorkspaceInfo:
+    """설정을 검증하고 `workspace_mode`별로 작업 영역 기하를 계산한다.
+
+    각 모드는 A/B의 의미가 다르다:
+      - tool_serpentine_ab: A=좌상단, B=우하단 코너(축 정렬 사각형).
+      - ab_diagonal_center / diagonal_ab: A/B는 사각형의 대각선 반대 코너.
+      - ab_centerline_width / axis_width: A/B는 중심선 시작·끝, 폭은 별도 지정.
+      - (A/B 없음): 레거시 row_length 모드.
+    공통적으로 로컬 사각형(길이×폭), 로컬 원점, 월드 경계 상자, 로봇/전이 반경,
+    헤딩 축 부호, 엔드포인트 인셋을 계산해 `WorkspaceInfo`로 반환한다.
+
+    Validate config and derive workspace geometry per workspace_mode (A/B carry
+    different meanings per mode). Returns a WorkspaceInfo with local rectangle,
+    origin, world bbox, radii, heading signs, and endpoint inset. Raises
+    ValueError on degenerate/inconsistent inputs.
+    """
     _validate_config(config)
     bounded = _has_ab(config)
     robot_radius = _robot_radius(config)
 
     if bounded and config.workspace_mode == "tool_serpentine_ab":
+        # A는 좌상단, B는 우하단이어야 함(축 정렬 직사각형 규약).
+        # A must be top-left and B bottom-right (axis-aligned rectangle contract).
         assert config.a_x_m is not None
         assert config.a_y_m is not None
         assert config.b_x_m is not None
@@ -566,6 +797,10 @@ def _workspace_info(config: SideToolPlanConfig) -> WorkspaceInfo:
         )
         workspace_side = "right" if surface_side == "right" else "left"
         centerline_y = workspace_width / 2.0 if surface_side == "centered" else 0.0
+        # A/B는 청소 표면의 중심선을 정의한다. 로컬 원점(폭 y=0 모서리)은 A에서
+        # centerline만큼 되돌린 지점 → 이후 폭 방향 좌표를 0..width로 다룰 수 있다.
+        # A/B define the surface centerline; back off by `centerline` so the local
+        # width axis runs 0..width from a rectangle edge, not from the centerline.
         world_origin_x, world_origin_y = _axis_width_to_world(
             a_x,
             a_y,
@@ -682,6 +917,10 @@ def _workspace_info(config: SideToolPlanConfig) -> WorkspaceInfo:
         rectangle_length = ab_length
         workspace_width = config.workspace_width_m
         if workspace_width is None:
+            # 폭 미지정 시: 첫/마지막 레인 중심이 경계·반경·전이 간극을 모두 만족하도록
+            # 최소 작업 폭을 역산한다(레인 수와 간격 기반).
+            # No width given: back-solve a minimum width so first/last lane centers
+            # clear boundary margin, robot radius, and turn clearance.
             lane_span = (
                 (int(config.row_count) - 1) * config.lane_spacing_m
                 if config.row_count != "auto"
@@ -731,6 +970,8 @@ def _workspace_info(config: SideToolPlanConfig) -> WorkspaceInfo:
         ])
         a_b_semantic = "legacy_row_length"
 
+    # 헤딩 축 부호: 툴을 사각형 안쪽으로 향하게 하려면 툴 측 부호를 그대로 쓴다.
+    # Heading-axis sign: to keep the tool pointing inward, follow the tool-side sign.
     if config.auto_orient_tool_inside:
         heading_axis_sign = _side_sign(config.tool_side)
     else:
@@ -740,6 +981,8 @@ def _workspace_info(config: SideToolPlanConfig) -> WorkspaceInfo:
     chassis_heading = 0.0 if heading_axis_sign > 0 else 180.0
     transition_clearance_radius = _transition_clearance_radius(config, robot_radius)
     endpoint_inset = 0.0
+    # centerline_width 모드는 별도 X 인셋 로직을 쓰므로 여기서 자동 인셋 제외.
+    # centerline_width mode handles its own X inset elsewhere, so skip auto-inset.
     if config.auto_inset_endpoints and config.workspace_mode != "ab_centerline_width":
         endpoint_inset = transition_clearance_radius + config.boundary_margin_m
     if endpoint_inset * 2.0 >= ab_length:
@@ -779,6 +1022,14 @@ def _workspace_info(config: SideToolPlanConfig) -> WorkspaceInfo:
 
 
 def _workspace_to_world(info: WorkspaceInfo, x_m: float, y_m: float) -> tuple[float, float]:
+    """로컬 (x, y)를 월드로 변환. / Map local (x, y) to world coordinates.
+
+    코너 정렬 모드(serpentine/diagonal)는 단순 평행이동, 축+폭 모드는 헤딩 회전이
+    포함된 `_axis_width_to_world`를 쓴다.
+
+    Corner-aligned modes use a pure translation; axis+width modes rotate via
+    _axis_width_to_world.
+    """
     if info.workspace_mode in {"tool_serpentine_ab", "ab_diagonal_center", "diagonal_ab"}:
         return info.world_origin_x_m + x_m, info.world_origin_y_m + y_m
     return _axis_width_to_world(
@@ -791,7 +1042,15 @@ def _workspace_to_world(info: WorkspaceInfo, x_m: float, y_m: float) -> tuple[fl
     )
 
 
+# ── 폴리곤/자취 기하 / Polygon & footprint geometry ──
+
+
 def tool_length_m(config: SideToolPlanConfig) -> float:
+    """유효 툴 길이(m)를 결정. / Resolve the effective tool length in meters.
+
+    툴 길이 → (없으면) 로봇 길이 → (없으면) 기본 0.18m 순으로 대체(fallback).
+    Falls back tool_length → robot_length → 0.18 m.
+    """
     if config.tool_length_m is not None:
         return config.tool_length_m
     if config.robot_length_m is not None:
@@ -807,6 +1066,12 @@ def rectangle_polygon(
     length_m: float,
     width_m: float,
 ) -> tuple[tuple[float, float], ...]:
+    """중심·헤딩·길이·폭으로 정의된 회전 직사각형의 4코너를 반환.
+
+    코너는 (앞-좌, 앞-우, 뒤-우, 뒤-좌) 순서(CW/CCW 일관). 전방=length, 측방=width.
+    Corners of a rotated rectangle (front-left, front-right, back-right,
+    back-left) from center/heading/length/width.
+    """
     ux, uy = _heading_unit(heading_deg)
     nx, ny = _left_normal(heading_deg)
     half_length = length_m / 2.0
@@ -834,6 +1099,10 @@ def chassis_polygon(
     y_m: float,
     heading_deg: float,
 ) -> tuple[tuple[float, float], ...]:
+    """섀시 사각형 폴리곤(중심 = 섀시 위치). / Chassis rectangle polygon at (x, y).
+
+    길이 미지정 시 폭을 대신 사용(정사각형 근사). / Falls back to width if no length.
+    """
     robot_length = config.robot_length_m if config.robot_length_m is not None else config.robot_width_m
     return rectangle_polygon(
         center_x_m=x_m,
@@ -851,6 +1120,11 @@ def tool_polygon(
     chassis_y_m: float,
     heading_deg: float,
 ) -> tuple[tuple[float, float], ...]:
+    """섀시 위치에서 오프셋된 툴 사각형 폴리곤. / Tool rectangle polygon.
+
+    섀시 중심에서 측면 오프셋만큼 이동한 툴 중심을 `_tool_pose`로 구해 사각형화한다.
+    Tool center is the chassis center shifted by the lateral offset (_tool_pose).
+    """
     tool_x_m, tool_y_m, _, _ = _tool_pose(config, heading_deg, chassis_x_m, chassis_y_m)
     return rectangle_polygon(
         center_x_m=tool_x_m,
@@ -864,6 +1138,10 @@ def tool_polygon(
 def polygon_bbox(
     polygon: tuple[tuple[float, float], ...],
 ) -> tuple[float, float, float, float]:
+    """폴리곤의 축 정렬 경계 상자 (x_min, x_max, y_min, y_max).
+
+    Axis-aligned bounding box of a polygon.
+    """
     xs = [point[0] for point in polygon]
     ys = [point[1] for point in polygon]
     return min(xs), max(xs), min(ys), max(ys)
@@ -872,9 +1150,13 @@ def polygon_bbox(
 def _combined_bbox(
     polygons: list[tuple[tuple[float, float], ...]],
 ) -> tuple[float, float, float, float]:
+    """여러 폴리곤을 합친 경계 상자. / Combined bbox over multiple polygons."""
     xs = [point[0] for polygon in polygons for point in polygon]
     ys = [point[1] for polygon in polygons for point in polygon]
     return min(xs), max(xs), min(ys), max(ys)
+
+
+# ── 경계 포함 검사 / Boundary containment checks ──
 
 
 def _polygon_inside_workspace(
@@ -882,6 +1164,7 @@ def _polygon_inside_workspace(
     polygon: tuple[tuple[float, float], ...],
     margin_m: float,
 ) -> bool:
+    """폴리곤 전체가 마진 안쪽의 작업 사각형에 들어오는지. / All corners inside (with margin)."""
     return all(
         _in_interval(x, margin_m, info.ab_length_m - margin_m)
         and _in_interval(y, margin_m, info.workspace_width_m - margin_m)
@@ -896,6 +1179,16 @@ def _chassis_allowed_in_workspace(
     x_m: float,
     y_m: float,
 ) -> bool:
+    """섀시 중심이 현재 경계 모드에서 허용되는 위치인지 판정.
+
+    clean_surface_strict: 섀시 원반이 청소면 안(마진+반경)에 완전히 들어와야 함.
+    그 외(centerline_corridor 등): 섀시 중심이 A→B 기준선을 따라가고 폭 방향으로만
+    반경+마진만큼 삐져나가는 것을 허용(툴은 청소면으로 뻗을 수 있으므로).
+
+    Whether the chassis center is allowed under the active boundary mode. Strict
+    mode keeps the whole chassis disk on the clean surface; corridor mode lets
+    the center ride the A→B line and bulge out laterally by radius+margin.
+    """
     if config.chassis_boundary_mode == "clean_surface_strict":
         r = info.robot_radius_m
         margin = config.boundary_margin_m
@@ -926,6 +1219,15 @@ def _tool_clean_surface_ok(
     tool_edge_min_y_m: float,
     tool_edge_max_y_m: float,
 ) -> bool:
+    """활성 청소 레인에서 툴이 청소면(마진 안) 안에 완전히 들어오는지.
+
+    청소 레인이 아니면 항상 True(전이/정렬 중 툴은 청소면 밖도 허용). 청소 중에는
+    툴 중심(길이 방향)과 양쪽 폭 가장자리가 모두 경계 안이어야 한다.
+
+    Whether the tool stays on the clean surface during an active cleaning lane.
+    Non-cleaning primitives pass unconditionally; while cleaning, both the
+    length-wise center and both width edges must be within margins.
+    """
     if primitive_type != "cleaning_lane":
         return True
     margin = config.boundary_margin_m
@@ -938,7 +1240,18 @@ def _tool_clean_surface_ok(
     )
 
 
+# ── 셀 커버리지 래스터화 / Cell coverage rasterization ──
+
+
 def _point_in_polygon(x_m: float, y_m: float, polygon: tuple[tuple[float, float], ...]) -> bool:
+    """점이 폴리곤 내부인지(레이 캐스팅). / Ray-casting point-in-polygon test.
+
+    수평 반직선이 변과 홀수 번 교차하면 내부. `(yj - yi) or 1e-12`는 수평 변에서의
+    0 나눗셈을 피하기 위한 방어값.
+
+    Odd crossings of a horizontal ray → inside. The `or 1e-12` guards against
+    division by zero on horizontal edges.
+    """
     inside = False
     j = len(polygon) - 1
     for i, point in enumerate(polygon):
@@ -958,6 +1271,14 @@ def _cells_for_polygon(
     grid: CoverageGridInfo,
     polygon: tuple[tuple[float, float], ...],
 ) -> frozenset[int]:
+    """폴리곤이 덮는 격자 셀 인덱스 집합을 반환. / Grid cells covered by a polygon.
+
+    폴리곤 bbox로 후보 셀 범위를 좁힌 뒤, 각 셀 중심이 작업 영역 내이면서
+    폴리곤 내부인지 검사(중심점 샘플링). 셀 인덱스는 `iy*nx+ix`.
+
+    Narrows to the polygon bbox, then keeps cells whose center is inside both the
+    workspace and the polygon (center-sampling). Index = iy*nx+ix.
+    """
     x_min, x_max, y_min, y_max = polygon_bbox(polygon)
     ix_min = max(0, int(math.floor(x_min / grid.cell_width_m)))
     ix_max = min(grid.nx - 1, int(math.ceil(x_max / grid.cell_width_m)))
@@ -990,6 +1311,15 @@ def footprint_sample(
     y_m: float,
     heading_deg: float,
 ) -> FootprintSample:
+    """한 포즈에서 섀시+툴 자취 샘플을 만들고 경계 위반 사유를 채운다.
+
+    경계 모드에 따라 섀시/툴 포함 검사 방식이 다르다(strict=폴리곤 전체 포함,
+    corridor=섀시 중심 허용 + 활성 툴은 레인별 검사이므로 여기선 tool_inside=True).
+
+    Build a chassis+tool footprint sample at one pose and record boundary
+    violations. Containment differs by boundary mode (strict = full polygon;
+    corridor = chassis-center rule, tool checked per-lane so tool_inside=True).
+    """
     chassis = chassis_polygon(config, x_m=x_m, y_m=y_m, heading_deg=heading_deg)
     tool = tool_polygon(config, chassis_x_m=x_m, chassis_y_m=y_m, heading_deg=heading_deg)
     bbox = _combined_bbox([chassis, tool])
@@ -1032,16 +1362,22 @@ def footprint_sample(
     )
 
 
+# ── 스위프 볼륨 샘플링 / Swept-volume sampling (translation & rotation) ──
+
+
 def _interpolate_angle(start_deg: float, end_deg: float, t: float) -> float:
+    """두 각도를 최단 방향으로 t∈[0,1] 보간. / Shortest-arc angle interp at t∈[0,1]."""
     delta = _normalize_angle_deg(end_deg - start_deg)
     return _normalize_angle_deg(start_deg + delta * t)
 
 
 def _sample_count_for_distance(distance_m: float, step_m: float) -> int:
+    """이동 거리를 step_m 간격으로 샘플링할 개수(최소 2). / Sample count for a translation."""
     return max(2, math.ceil(distance_m / step_m) + 1)
 
 
 def _sample_count_for_rotation(start_deg: float, end_deg: float, step_deg: float) -> int:
+    """회전량을 step_deg 간격으로 샘플링할 개수(무회전이면 0). / Sample count for a rotation."""
     delta = abs(_normalize_angle_deg(end_deg - start_deg))
     if delta < 1e-9:
         return 0
@@ -1056,6 +1392,10 @@ def _sample_segment_translation(
     sample_index_start: int,
     sample_type: str,
 ) -> list[FootprintSample]:
+    """두 포즈 사이 직선 이동 구간을 자취 샘플 리스트로 이산화.
+
+    Discretize a straight-line move between two poses into footprint samples.
+    """
     distance = math.hypot(
         float(end["x_m"]) - float(start["x_m"]),
         float(end["y_m"]) - float(start["y_m"]),
@@ -1089,6 +1429,10 @@ def _sample_segment_rotation(
     end: dict[str, float | int | str | bool],
     sample_index_start: int,
 ) -> list[FootprintSample]:
+    """제자리 회전 구간을 자취 샘플 리스트로 이산화(회전 중심=끝 포즈).
+
+    Discretize an in-place rotation into footprint samples (center = end pose).
+    """
     count = _sample_count_for_rotation(
         float(start["heading_deg"]),
         float(end["heading_deg"]),
@@ -1123,6 +1467,15 @@ def geometry_samples_for_path(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> list[FootprintSample]:
+    """포즈열 전체를 촘촘한 자취 샘플 리스트로 전개(공개).
+
+    인접 포즈 쌍마다 이동+회전 구간을 나눠 샘플링한다. `swept_volume_validation`이
+    'off'면 빈 리스트. CLI 도구가 직접 호출하는 준공개 함수.
+
+    Expand a full pose list into dense footprint samples (translation +
+    rotation per adjacent pair). Empty if validation is 'off'. Called directly
+    by the preview CLIs.
+    """
     if config.swept_volume_validation == "off":
         return []
     info = _workspace_info(config)
@@ -1168,6 +1521,14 @@ def swept_volume_summary(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> dict[str, float | int | str | bool]:
+    """경로의 스위프 볼륨 검증 결과 요약 딕셔너리(공개).
+
+    회전/이동/결합별 위반 샘플 수, 샘플 총수, 로봇·툴 치수, 검증 모드 등을 담는다.
+    `motor_command_generated`는 항상 False(미리보기 전용임을 명시).
+
+    Summary of swept-volume validation (per-type violation counts, sample totals,
+    robot/tool dims). motor_command_generated is always False (preview only).
+    """
     info = _workspace_info(config)
     samples = geometry_samples_for_path(config, poses)
     rotation_samples = [sample for sample in samples if sample.sample_type == "rotation"]
@@ -1201,9 +1562,13 @@ def swept_volume_summary(
     }
 
 
+# ── 오염 분석 / Contamination analysis (chassis over wet cells) ──
+
+
 def _pose_by_segment(
     poses: list[dict[str, float | int | str | bool]],
 ) -> dict[str, dict[str, float | int | str | bool]]:
+    """세그먼트 ID → 첫 포즈 매핑. / Map each segment_id to its first pose."""
     mapping: dict[str, dict[str, float | int | str | bool]] = {}
     for pose in poses:
         mapping.setdefault(str(pose["segment_id"]), pose)
@@ -1215,6 +1580,14 @@ def _tool_active_for_sample(
     pose: dict[str, float | int | str | bool],
     sample: FootprintSample,
 ) -> bool:
+    """이 샘플 순간에 툴이 활성(청소 중)인지 판정.
+
+    회전/시작 정렬/전이 구간의 활성 여부는 각각의 config 플래그로 결정되고,
+    그 외 일반 청소 구간은 활성으로 본다.
+
+    Whether the tool is active (cleaning) at this sample; rotation/start-align/
+    transition follow their config flags, otherwise active.
+    """
     if sample.sample_type == "rotation":
         return config.tool_active_during_rotation
     if str(pose["segment_id"]).startswith("route_start_A"):
@@ -1228,6 +1601,18 @@ def contamination_analysis(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> dict[str, object]:
+    """섀시가 이미 청소된(젖은) 셀을 다시 밟는 시간적 오염을 분석(공개).
+
+    각 시간 스텝에서 섀시/툴 셀을 래스터화하고, (1) 이전 스텝에 이미 청소된 셀을
+    섀시가 밟았는지, (2) 같은 스텝에 툴이 방금 청소한 셀을 섀시가 밟았는지
+    검사한다. 위반 사건 목록과 스텝별 타임라인, 청소된 셀 집합을 반환한다.
+    `contamination_mode == "off"`면 검사를 건너뛰고 기본(무위반) 요약을 준다.
+
+    Analyze temporal contamination — chassis stepping onto already-cleaned (wet)
+    cells. Per time step it checks overlap with (1) prior-cleaned cells and
+    (2) the same-step tool sweep, returning events, a timeline, and cleaned
+    cells. Skips the check when contamination_mode == "off".
+    """
     info = _workspace_info(config)
     grid = _coverage_grid(info, config.coverage_resolution_m)
     selected_strategy = (
@@ -1278,12 +1663,18 @@ def contamination_analysis(
         pose = pose_lookup[str(sample.segment_id)]
         chassis_cells = _cells_for_polygon(info, grid, sample.chassis_polygon)
         tool_cells = _cells_for_polygon(info, grid, sample.tool_polygon)
+        # 이전 스텝에서 이미 청소된 셀을 섀시가 밟으면 오염(엄격한 시간 순서 검사).
+        # Chassis stepping on cells cleaned at an *earlier* step = contamination.
         prior_cleaned = {
             cell
             for cell in chassis_cells
             if cell in cleaned_at_step and cleaned_at_step[cell] < time_step
         }
         tool_active = _tool_active_for_sample(config, pose, sample)
+        # 같은 스텝에 툴이 방금 청소한 셀을 섀시가 밟는 경우도 위반으로 본다. 단,
+        # same_step_tool_before_chassis 이면 툴이 섀시보다 앞서므로 허용.
+        # Same-step chassis/tool overlap is a violation unless the tool is
+        # declared to lead the chassis within a step.
         same_step_overlap = (
             set(chassis_cells & tool_cells)
             if tool_active and not config.same_step_tool_before_chassis
@@ -1387,7 +1778,11 @@ def contamination_analysis(
     }
 
 
+# ── 포즈 행 주석기(annotators) / Pose-row annotators (fill CSV-facing fields) ──
+
+
 def _sample_bbox(samples: list[FootprintSample]) -> tuple[float, float, float, float]:
+    """샘플들의 결합 경계 상자. / Combined bbox over a list of samples."""
     return (
         min(sample.combined_bbox_x_min_m for sample in samples),
         max(sample.combined_bbox_x_max_m for sample in samples),
@@ -1397,6 +1792,10 @@ def _sample_bbox(samples: list[FootprintSample]) -> tuple[float, float, float, f
 
 
 def _sample_violation_reason(samples: list[FootprintSample], default: str) -> str:
+    """샘플들의 고유 위반 사유를 '+'로 합치고, 없으면 default 반환.
+
+    Join distinct non-OK violation reasons with '+', else return default.
+    """
     reasons = sorted(
         {
             sample.violation_reason
@@ -1411,6 +1810,14 @@ def annotate_swept_volume_fields(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> None:
+    """각 포즈 dict에 스위프 볼륨 검증 필드를 in-place로 채운다(부수효과).
+
+    세그먼트별로 회전/이동 샘플의 경계 상자와 위반 여부를 집계해 pose 키에 쓴다.
+    검증 'off'면 통과 플래그만 설정. **poses를 직접 변형**한다.
+
+    Fill swept-volume validation fields into each pose dict in place (bbox,
+    within-boundary flags, violation counts). Mutates `poses`.
+    """
     if config.swept_volume_validation == "off":
         for pose in poses:
             pose["swept_volume_within_boundary"] = True
@@ -1484,6 +1891,14 @@ def annotate_contamination_fields(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> None:
+    """각 포즈 dict에 오염 분석 결과(세그먼트 단위 집계)를 in-place로 채운다.
+
+    타임라인/사건을 세그먼트별로 묶어 청소 추가 면적, 재청소 면적, 위반 수 등을
+    pose 키에 쓴다. **poses를 직접 변형**한다.
+
+    Fill per-segment contamination results into each pose dict in place
+    (cleaned-area added, reclean area, violation counts). Mutates `poses`.
+    """
     analysis = contamination_analysis(config, poses)
     timeline = list(analysis["timeline"])
     events = list(analysis["events"])
@@ -1528,10 +1943,25 @@ def annotate_contamination_fields(
         pose["tool_active"] = tool_active
 
 
+# ── 운동학 주석 / Kinematics annotation (differential-drive feasibility) ──
+
+
 def _movement_kinematics(
     current: dict[str, float | int | str | bool],
     nxt: dict[str, float | int | str | bool] | None,
 ) -> tuple[float, float, float, str, bool, str, str]:
+    """두 연속 포즈로부터 이동 프리미티브와 미분구동 실현가능성을 판정.
+
+    반환: (거리, 헤딩변화, 회전량, 진행방향, 실현가능, 사유, 서브타입).
+    핵심 규약: 이동과 회전은 동시에 불가(비홀로노믹) — 거리가 있으면서 헤딩이
+    바뀌면 위반. 옆으로 미끄러지는 이동도 금지. 진행방향이 헤딩과(또는 +180°와)
+    정렬돼야 전진/후진으로 분류된다.
+
+    Classify the movement primitive and differential-drive feasibility from two
+    consecutive poses. Returns (distance, heading_delta, rotation, travel_dir,
+    feasible, reason, subtype). Simultaneous move+turn and sideways motion are
+    infeasible; travel must align with heading (or heading+180°).
+    """
     if nxt is None:
         return 0.0, 0.0, 0.0, float(current["heading_deg"]), True, "OK", "move_forward"
     dx = float(nxt["x_m"]) - float(current["x_m"])
@@ -1574,6 +2004,14 @@ def annotate_kinematic_fields(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> None:
+    """각 포즈 dict에 운동학 필드(거리·회전·프리미티브·실현가능성)를 in-place로 채운다.
+
+    포즈 i→i+1 전이를 `_movement_kinematics`로 분석해 이동 프리미티브, 시작/끝 좌표,
+    실현가능 플래그 등을 pose 키에 쓴다. **poses를 직접 변형**한다.
+
+    Fill kinematic fields (distance, rotation, primitive type, feasibility,
+    start/end coords) into each pose dict in place. Mutates `poses`.
+    """
     for index, pose in enumerate(poses):
         nxt = poses[index + 1] if index + 1 < len(poses) else None
         (
@@ -1624,6 +2062,12 @@ def _chassis_center_from_tool(
     tool_y_m: float,
     heading_deg: float,
 ) -> tuple[float, float]:
+    """툴 중심에서 섀시 중심을 역산(측면 오프셋만큼 반대로 이동).
+
+    `_tool_pose`의 역연산. 툴 우선 계획에서 섀시 지지 경로를 유도할 때 쓴다.
+    Inverse of _tool_pose: shift back by the lateral offset to get the chassis
+    center from a tool center (used to derive the support path in tool-first).
+    """
     side = _side_sign(config.tool_side)
     normal_x, normal_y = _left_normal(heading_deg)
     return (
@@ -1636,6 +2080,16 @@ def annotate_tool_primary_fields(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> None:
+    """툴을 "주(primary) 경로"로 삼는 필드를 각 포즈 dict에 in-place로 채운다.
+
+    툴 세그먼트 라벨/타입, 툴 시작·끝 좌표, 연결자 각도·거리, 그리고 섀시가 툴에서
+    올바르게 역산되는지(`chassis_path_derived_from_tool`)를 검증해 기록한다.
+    **poses를 직접 변형**한다.
+
+    Fill "tool-as-primary-path" fields (tool labels/types, tool start/end,
+    connector angle/distance, chassis-derived-from-tool check) into each pose
+    dict in place. Mutates `poses`.
+    """
     for index, pose in enumerate(poses):
         nxt = poses[index + 1] if index + 1 < len(poses) else None
         tool_start_x = float(pose["tool_x_m"])
@@ -1713,7 +2167,18 @@ def annotate_tool_primary_fields(
         pose["primitive_value"] = float(pose["distance_m"]) if str(pose["movement_primitive_type"]).startswith("move_") else float(pose["angle_deg"])
 
 
+# ── A/B 엔드포인트 판정 / A/B endpoint targets & reachability ──
+
+
 def _ab_targets_local(info: WorkspaceInfo) -> tuple[tuple[float, float], tuple[float, float]]:
+    """로컬 좌표계에서의 시작(A)·끝(B) 목표점을 반환.
+
+    코너/대각선 모드는 A/B를 원점 기준 로컬로 환산하고, 축+폭 모드는 중심선의
+    양 끝 (0, centerline)·(길이, centerline)을 목표로 한다.
+
+    Start(A)/end(B) targets in local coords: corner/diagonal modes use A/B
+    relative to origin; axis+width modes use the centerline endpoints.
+    """
     if info.workspace_mode in {"tool_serpentine_ab", "ab_diagonal_center"}:
         return (
             (info.a_x_m - info.world_origin_x_m, info.a_y_m - info.world_origin_y_m),
@@ -1728,6 +2193,14 @@ def _ab_targets_local(info: WorkspaceInfo) -> tuple[tuple[float, float], tuple[f
 
 
 def _require_start_at_a(config: SideToolPlanConfig) -> bool:
+    """시작점이 정확히 A여야 하는지 결정. / Whether the route must start exactly at A.
+
+    명시 플래그 우선, 없으면 rover-center 모드(diagonal_center/centerline_width)는
+    기본 True, 그 외는 require_exact_start.
+
+    Explicit flag wins; else rover-center modes default True, otherwise
+    require_exact_start.
+    """
     if config.require_start_at_A is not None:
         return config.require_start_at_A
     if config.workspace_mode in {"ab_diagonal_center", "ab_centerline_width"}:
@@ -1736,6 +2209,10 @@ def _require_start_at_a(config: SideToolPlanConfig) -> bool:
 
 
 def _require_end_at_b(config: SideToolPlanConfig) -> bool:
+    """끝점이 정확히 B여야 하는지 결정(_require_start_at_a와 대칭).
+
+    Whether the route must end exactly at B (mirror of _require_start_at_a).
+    """
     if config.require_end_at_B is not None:
         return config.require_end_at_B
     if config.workspace_mode in {"ab_diagonal_center", "ab_centerline_width"}:
@@ -1748,6 +2225,14 @@ def _route_endpoint_status(
     info: WorkspaceInfo,
     poses: list[dict[str, float | int | str | bool]],
 ) -> dict[str, float | bool | str]:
+    """경로의 시작/끝이 A/B에 도달했는지와 오차·실현가능 사유를 계산.
+
+    시작·끝 포즈와 A/B 목표점의 거리를 재고 허용 오차와 비교한다. 요구 사항 위반
+    시 사유 문자열을 누적한다. 포즈가 없으면 무한대 오차의 실패 상태를 반환.
+
+    Compute whether the route reaches A/B, the errors, and infeasibility
+    reasons. Empty poses → an all-infeasible status with infinite errors.
+    """
     start_pose = poses[0] if poses else None
     final_pose = poses[-1] if poses else None
     start_target, end_target = _ab_targets_local(info)
@@ -1800,6 +2285,11 @@ def annotate_endpoint_fields(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> None:
+    """각 포즈 dict에 A/B 도달 여부·오차 필드를 in-place로 채운다.
+
+    Fill A/B reachability and error fields into each pose dict in place.
+    Mutates `poses`.
+    """
     info = _workspace_info(config)
     status = _route_endpoint_status(config, info, poses)
     for pose in poses:
@@ -1811,6 +2301,10 @@ def annotate_endpoint_fields(
 
 
 def workspace_polygon(config: SideToolPlanConfig) -> list[tuple[float, float]]:
+    """작업 사각형의 4코너를 월드 좌표로 반환(공개, 시각화용).
+
+    The workspace rectangle's four corners in world coords (public; for plots).
+    """
     info = _workspace_info(config)
     return [
         _workspace_to_world(info, 0.0, 0.0),
@@ -1821,7 +2315,11 @@ def workspace_polygon(config: SideToolPlanConfig) -> list[tuple[float, float]]:
 
 
 def boundary_polygon(config: SideToolPlanConfig) -> list[tuple[float, float]]:
+    """경계 폴리곤(= 작업 폴리곤)의 별칭. / Alias of workspace_polygon (boundary)."""
     return workspace_polygon(config)
+
+
+# ── 툴 스트립 후보: 생성·집합피복 선택 / Tool strips: generation & set-cover ──
 
 
 def _feasible_tool_center_bounds_for_sign(
@@ -1829,6 +2327,16 @@ def _feasible_tool_center_bounds_for_sign(
     info: WorkspaceInfo,
     tool_world_sign: int,
 ) -> tuple[float, float]:
+    """주어진 툴 배치 부호(위/아래)에 대해 툴 중심 y의 허용 [low, high] 범위.
+
+    툴 폭·섀시 반경·전이 간극·마진을 모두 만족해야 한다. tool_world_sign은 툴이
+    섀시의 어느 쪽(폭 +/-)에 놓이는지이며, 이에 따라 오프셋이 범위를 밀고 당긴다.
+    범위가 비면(high<low) ValueError.
+
+    Feasible [low, high] for the tool center y for a given placement sign
+    (tool above/below chassis), respecting tool width, robot radius, turn
+    clearance, and margins. Raises ValueError if empty.
+    """
     margin = config.boundary_margin_m
     robot_radius = info.robot_radius_m
     transition_radius = info.transition_clearance_radius_m
@@ -1858,6 +2366,10 @@ def _feasible_tool_center_bounds(
     config: SideToolPlanConfig,
     info: WorkspaceInfo,
 ) -> tuple[float, float]:
+    """양쪽 배치 부호를 합친 툴 중심 y의 전체 허용 범위.
+
+    Union of feasible tool-center bounds over both placement signs.
+    """
     bounds: list[tuple[float, float]] = []
     for tool_world_sign in (1, -1):
         try:
@@ -1870,6 +2382,14 @@ def _feasible_tool_center_bounds(
 
 
 def _feasible_tool_centers(config: SideToolPlanConfig, info: WorkspaceInfo) -> list[float]:
+    """레인 간격으로 배치한 실현가능 툴 중심 y 목록.
+
+    row_count가 'auto'면 허용 범위를 lane_spacing으로 채우고 마지막에 high를 보정,
+    고정 개수면 그만큼 배치한다.
+
+    Feasible tool-center ys spaced by lane_spacing across the feasible range
+    ('auto' fills and snaps the last to high; fixed count places that many).
+    """
     low, high = _feasible_tool_center_bounds(config, info)
 
     centers: list[float] = []
@@ -1896,28 +2416,45 @@ def _feasible_tool_centers(config: SideToolPlanConfig, info: WorkspaceInfo) -> l
 
 
 def _tool_offset_sign(config: SideToolPlanConfig, info: WorkspaceInfo) -> int:
+    """월드 기준 툴 오프셋 부호(툴 측 부호 × 헤딩 축 부호).
+
+    World-frame tool-offset sign (tool-side sign × heading-axis sign).
+    """
     return _side_sign(config.tool_side) * info.heading_axis_sign
 
 
 def _heading_axis_sign_for_tool_world_sign(config: SideToolPlanConfig, tool_world_sign: int) -> int:
+    """툴 배치 부호로부터 헤딩 축 부호를 역산. / Heading-axis sign from tool placement sign."""
     return tool_world_sign * _side_sign(config.tool_side)
 
 
 def _heading_deg_for_axis_sign(heading_axis_sign: int) -> float:
+    """헤딩 축 부호 → 헤딩 각(0° 또는 180°). / Heading angle (0/180) from axis sign."""
     return 0.0 if heading_axis_sign > 0 else 180.0
 
 
 def _tool_world_side(tool_world_sign: int) -> str:
+    """툴이 섀시의 위/아래 어느 쪽인지 라벨. / Label: tool above/below chassis."""
     return "above_chassis" if tool_world_sign > 0 else "below_chassis"
 
 
 def _candidate_mode(heading_axis_sign: int, tool_world_sign: int) -> str:
+    """후보의 (헤딩, 툴 배치) 조합을 사람이 읽을 라벨로. / Human-readable candidate-mode label."""
     heading_label = "heading_0" if heading_axis_sign > 0 else "heading_180"
     side_label = "tool_above_chassis" if tool_world_sign > 0 else "tool_below_chassis"
     return f"{heading_label}_{side_label}"
 
 
 def _coverage_grid(info: WorkspaceInfo, resolution_m: float) -> CoverageGridInfo:
+    """작업 영역을 균일 셀로 나눈 커버리지 격자를 만든다(준공개, CLI가 호출).
+
+    셀 크기는 요청 해상도를 넘지 않도록 ceil로 셀 수를 정하고, 폭·길이를 정확히
+    나눠 실제 셀 크기를 맞춘다.
+
+    Build a uniform coverage grid (quasi-public; used by CLIs). Cell counts use
+    ceil so cells never exceed the requested resolution, then sizes divide the
+    span exactly.
+    """
     nx = max(1, math.ceil(info.ab_length_m / resolution_m))
     ny = max(1, math.ceil(info.workspace_width_m / resolution_m))
     cell_width = info.ab_length_m / nx
@@ -1933,6 +2470,14 @@ def _coverage_grid(info: WorkspaceInfo, resolution_m: float) -> CoverageGridInfo
 
 
 def _required_min_lane_count(config: SideToolPlanConfig, info: WorkspaceInfo) -> int:
+    """폭을 툴 폭+간격으로 덮는 데 필요한 최소 레인 수.
+
+    명시값이 있으면 그 값. 폭이 툴 폭 이하면 1레인이면 충분. 커버리지 완전성
+    검사(`selected_lane_count_ok`)의 기준.
+
+    Minimum lanes needed to cover the width by tool width + spacing (explicit
+    value wins; ≤ tool width → 1). Basis for the coverage-completeness check.
+    """
     if config.min_lane_count != "auto":
         return int(config.min_lane_count)
     if info.workspace_width_m <= config.tool_width_m:
@@ -1949,6 +2494,12 @@ def _covered_cells_for_tool_strip(
     y_min_m: float,
     y_max_m: float,
 ) -> frozenset[int]:
+    """축 정렬 사각 스트립 [x_min,x_max]×[y_min,y_max]이 덮는 셀 집합.
+
+    폴리곤 대신 직사각형 툴 스트립 전용의 빠른 셀 집계(중심점 샘플링).
+    Cells covered by an axis-aligned rectangular tool strip (fast path vs the
+    polygon rasterizer; center-sampling).
+    """
     cells: set[int] = set()
     for ix in range(grid.nx):
         cx = (ix + 0.5) * grid.cell_width_m
@@ -1962,6 +2513,14 @@ def _covered_cells_for_tool_strip(
 
 
 def _cleaning_x_bounds(config: SideToolPlanConfig, info: WorkspaceInfo) -> tuple[float, float]:
+    """청소 레인이 커버할 x(길이 방향) [start, end] 범위.
+
+    centerline_width는 마진+툴 반길이만큼 양끝을 들여쓰고, 그 외는 미리 계산된
+    endpoint_inset을 쓴다.
+
+    X range for cleaning lanes; centerline_width insets by margin+half tool
+    length, others use the precomputed endpoint_inset.
+    """
     if config.workspace_mode == "ab_centerline_width":
         inset = config.boundary_margin_m + tool_length_m(config) / 2.0
         if inset * 2.0 >= info.ab_length_m:
@@ -1975,6 +2534,16 @@ def _candidate_tool_centers_for_sign(
     info: WorkspaceInfo,
     tool_world_sign: int,
 ) -> list[float]:
+    """주어진 배치 부호에 대한 후보 툴 중심 y 목록(모드별 특수점 포함).
+
+    기본은 lane_spacing 격자. centerline_width면 중심선 정렬 후보를, diagonal_center면
+    양 끝 섀시 y(0, width)에 대응하는 후보를 추가해 A/B 정확 도달을 돕는다.
+    중복은 반올림 후 제거·정렬한다.
+
+    Candidate tool-center ys for a placement sign, seeded with mode-specific
+    points (centerline for centerline_width; endpoint chassis ys for
+    diagonal_center) plus a lane_spacing grid; deduped and sorted.
+    """
     low, high = _feasible_tool_center_bounds_for_sign(config, info, tool_world_sign)
     centers: list[float] = []
     if config.workspace_mode == "ab_centerline_width":
@@ -2002,6 +2571,14 @@ def _generate_tool_strip_candidates(
     info: WorkspaceInfo,
     grid: CoverageGridInfo,
 ) -> list[ToolStripCandidate]:
+    """가능한 모든 툴 스트립 후보를 생성(각 후보 = 배치·헤딩·덮는 셀 집합).
+
+    양쪽 배치 부호 × 각 후보 중심 y에 대해 섀시 y와 툴 가장자리, 덮는 셀을 계산해
+    `ToolStripCandidate`로 모은다. 후보가 하나도 없으면 ValueError.
+
+    Generate all tool-strip candidates (each = placement, heading, covered
+    cells) over both signs and candidate ys. Raises ValueError if none exist.
+    """
     candidates: list[ToolStripCandidate] = []
     x_min, x_max = _cleaning_x_bounds(config, info)
     for tool_world_sign in (-1, 1):
@@ -2049,6 +2626,19 @@ def _select_tool_strip_candidates(
     config: SideToolPlanConfig,
     candidates: list[ToolStripCandidate],
 ) -> list[tuple[ToolStripCandidate, frozenset[int]]]:
+    """탐욕적 집합피복으로 커버리지에 쓸 툴 스트립 부분집합을 고른다.
+
+    각 스트립이 "새로" 덮는 셀 수가 최대인 것을 반복 선택한다(동률이면 섀시가
+    중심선에 가깝고 인덱스가 작은 쪽 우선 — 결정적/재현가능). 특수 처리:
+    - centerline_width + 엄격 오염 + A/B 정확 요구: 중심선 정렬 후보 하나만 선택.
+    - diagonal_center + boustrophedon: 내부 회전 포켓을 확보 못 하는(가장자리에
+      너무 가까운) 스트립은 후보에서 제외.
+    반환은 (스트립, 그 스트립이 새로 덮는 셀) 목록을 툴 중심 y로 정렬한 것.
+
+    Greedy set-cover selection of tool strips (pick max new coverage; ties →
+    closer-to-centerline, lower-index for determinism). Special cases handle
+    centerline exact-A/B and diagonal-center internal-pocket feasibility.
+    """
     if (
         config.workspace_mode == "ab_centerline_width"
         and config.contamination_mode == "strict"
@@ -2126,6 +2716,19 @@ def _ordered_candidate_sequences(
     config: SideToolPlanConfig,
     selected: list[tuple[ToolStripCandidate, frozenset[int]]],
 ) -> list[tuple[str, list[tuple[ToolStripCandidate, frozenset[int]]]]]:
+    """선택된 스트립들을 route-order 전략에 따라 방문 순서로 배열한다.
+
+    대부분의 명명 전략은 결국 "아래→위" 또는 "위→아래" 정렬 중 하나로 귀결된다
+    (전략 이름은 의도 문서화 목적). `route_order == "auto_temporal_safe"`면 여러
+    전략을 순서대로 시도할 후보열로 펼치되, boustrophedon이 아니면 각 전략의
+    접두(prefix) 길이별 변형까지 생성한다(오염 회피용 부분 커버). 동일 방문열
+    (candidate_index 시그니처)은 중복 제거.
+
+    Order selected strips into visitation sequences per route_order. Most named
+    strategies reduce to bottom→top or top→bottom; "auto_temporal_safe" expands
+    into many candidate sequences (with prefix variants for best-effort),
+    deduped by visitation signature.
+    """
     bottom_to_top = sorted(selected, key=lambda item: (item[0].tool_center_y_m, item[0].candidate_index))
     top_to_bottom = list(reversed(bottom_to_top))
     fixed = list(selected)
@@ -2191,12 +2794,23 @@ def _ordered_candidate_sequences(
     return [(config.route_order, strategies[config.route_order])]
 
 
+# ── 툴 포즈·전이 포장·경계 상태 / Tool pose, transition envelopes, boundary status ──
+
+
 def _tool_pose(
     config: SideToolPlanConfig,
     heading_deg: float,
     chassis_x_m: float,
     chassis_y_m: float,
 ) -> tuple[float, float, float, float]:
+    """섀시 포즈로부터 툴 중심과 툴의 폭 방향 min/max y를 계산.
+
+    반환: (tool_x, tool_y, tool_edge_min_y, tool_edge_max_y). 툴은 좌측 법선 ×
+    측 부호 방향으로 lateral_offset만큼 이동한다(`_chassis_center_from_tool`의 역).
+
+    Tool center and tool width-edge min/max y from a chassis pose. Returns
+    (tool_x, tool_y, edge_min_y, edge_max_y). Inverse of _chassis_center_from_tool.
+    """
     side = _side_sign(config.tool_side)
     normal_x, normal_y = _left_normal(heading_deg)
     tool_x = chassis_x_m + normal_x * side * config.tool_lateral_offset_m
@@ -2207,10 +2821,12 @@ def _tool_pose(
 
 
 def _in_interval(value: float, low: float, high: float, eps: float = 1e-9) -> bool:
+    """value가 [low, high]에 (부동소수 eps 여유로) 드는지. / Closed-interval test with eps."""
     return low - eps <= value <= high + eps
 
 
 def _is_transition_segment(segment_type: SegmentType) -> bool:
+    """세그먼트가 전이(회전/오프셋 이동 등)인지. / Whether a segment is a transition."""
     return segment_type in {
         "rotate_90",
         "reverse_offset",
@@ -2221,6 +2837,10 @@ def _is_transition_segment(segment_type: SegmentType) -> bool:
 
 
 def _transition_pocket_side(info: WorkspaceInfo, segment_type: SegmentType, x_m: float) -> str:
+    """전이가 x축 어느 쪽 내부 포켓에서 일어나는지 라벨(중점 기준).
+
+    Which interior pocket side (x_min/x_max) the transition occupies, by midpoint.
+    """
     if not _is_transition_segment(segment_type):
         return "none"
     midpoint = info.ab_length_m / 2.0
@@ -2234,6 +2854,16 @@ def _transition_envelope(
     x_m: float,
     y_m: float,
 ) -> tuple[float, float, float, float, bool, str, str]:
+    """한 점 전이의 회전 포장(원반 근사) 상자와 경계 내 여부를 계산.
+
+    전이 세그먼트는 (x,y)를 중심으로 transition_clearance_radius 반경의 원반이
+    필요하다고 보고 그 외접 상자가 마진 안쪽 작업 영역에 드는지 검사한다. 외부
+    turn bay는 허용하지 않으므로 벗어나면 위반. 비전이는 점 자체 포함만 검사.
+
+    Envelope box (disk approximation) and boundary check for a point transition.
+    Transitions need a clearance-radius disk inside the margined workspace
+    (external turn bays are disallowed); non-transitions just check the point.
+    """
     if not _is_transition_segment(segment_type):
         center_ok = (
             _in_interval(x_m, 0.0, info.ab_length_m)
@@ -2269,6 +2899,14 @@ def _transition_envelope_for_shift(
     y1_m: float,
     y2_m: float,
 ) -> tuple[float, float, float, float, bool, str]:
+    """레인 y1→y2 측면 이동 전이의 포장 상자와 경계 내 여부.
+
+    이동 구간 [y1,y2] 양끝에 전이 반경을 더한 상자가 마진 안 작업 영역에 드는지
+    검사(외부 turn bay 금지).
+
+    Envelope box and boundary check for a lateral y1→y2 shift transition (band
+    plus clearance radius must stay inside the margined workspace).
+    """
     radius = info.transition_clearance_radius_m
     margin = config.boundary_margin_m
     x_min = x_m - radius
@@ -2289,6 +2927,15 @@ def _transition_primitive_candidates(
     current: ToolStripCandidate,
     nxt: ToolStripCandidate,
 ) -> list[str]:
+    """두 레인 사이에서 시도할 전이 프리미티브 후보 목록.
+
+    두 레인의 헤딩 축 부호가 같으면 회전-이동-회전/짧은 접기 계열, 다르면 헤딩
+    뒤집기/역방향 접기 계열을 제시하고, 최후 수단으로 side_step_reverse_90 추가.
+
+    Candidate transition primitives between two lanes (same heading axis →
+    rotate-drive-rotate/fold; different → heading-flip/reverse-fold), always
+    plus side_step_reverse_90 as fallback.
+    """
     primitives: list[str] = []
     if current.heading_axis_sign == nxt.heading_axis_sign:
         primitives.append("rotate_drive_rotate_shift")
@@ -2306,6 +2953,15 @@ def _transition_cost(
     nxt: ToolStripCandidate,
     x_m: float,
 ) -> float:
+    """전이 프리미티브의 비용(작을수록 선호). / Cost of a transition primitive (lower=better).
+
+    측면 이동량 + 헤딩 변화(가중) + 프리미티브별 페널티 + 끝단 근접 페널티의 합.
+    페널티 표는 단순/자연스러운 회전을 복잡한 후진 기동보다 선호하도록 설정됨.
+
+    Sum of lateral shift + weighted heading change + per-primitive penalty +
+    endpoint-proximity penalty; the table favors simple turns over complex
+    reversing maneuvers.
+    """
     lateral = abs(nxt.chassis_y_m - current.chassis_y_m)
     heading_change = abs(_normalize_angle_deg(nxt.heading_deg - current.heading_deg))
     primitive_penalty = {
@@ -2326,6 +2982,15 @@ def _select_transition_choice(
     nxt: ToolStripCandidate,
     x_m: float,
 ) -> TransitionChoice:
+    """후보 전이들 중 최소 비용의 실현가능 전이를 선택.
+
+    스타일이 side_step_reverse_90이면 그 하나만 고려. 경계 밖 포장은 거대한 비용을
+    더해 사실상 배제한다(그래도 전부 밖이면 최소값이 선택되지만, fail 플래그가
+    켜져 있으면 ValueError). 부수효과 없음.
+
+    Pick the min-cost feasible transition. Out-of-bounds envelopes get a huge
+    cost so they lose; if all fail and fail_on_boundary_violation is set, raise.
+    """
     style = _normalize_transition_style(config.transition_style)
     primitives = (
         ["side_step_reverse_90"]
@@ -2365,6 +3030,7 @@ def _select_transition_choice(
 
 
 def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """겹치는 1D 구간들을 병합. / Merge overlapping 1D intervals (커버리지 길이 계산용)."""
     if not intervals:
         return []
     sorted_intervals = sorted((min(a, b), max(a, b)) for a, b in intervals)
@@ -2379,7 +3045,11 @@ def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, 
 
 
 def _interval_total_length(intervals: list[tuple[float, float]]) -> float:
+    """구간들의 총 길이 합. / Total covered length of intervals."""
     return sum(max(0.0, high - low) for low, high in intervals)
+
+
+# ── 경계 상태 종합 / Combined boundary status per pose ──
 
 
 def _boundary_status(
@@ -2394,6 +3064,15 @@ def _boundary_status(
     tool_edge_min_y_m: float,
     tool_edge_max_y_m: float,
 ) -> tuple[bool, bool, bool, str]:
+    """한 포즈의 섀시·툴 경계 준수 상태를 종합 판정.
+
+    반환: (전체 OK, 섀시 OK, 툴 OK, 사유문자열). boundary_mode='none'이면 무조건
+    통과. 섀시 중심 허용 여부와 활성 툴 청소면 포함을 검사해 위반 사유를 모은다.
+
+    Combined boundary status for one pose: (all_ok, chassis_ok, tool_ok, reason).
+    'none' mode passes; otherwise checks chassis-center allowance and active-tool
+    clean-surface containment.
+    """
     if config.boundary_mode == "none":
         return True, True, True, "OK"
 
@@ -2465,6 +3144,20 @@ def _pose_dict(
     transition_choice: TransitionChoice | None,
     notes: str,
 ) -> dict[str, float | int | str | bool]:
+    """하나의 경로 세그먼트를 나타내는 넓은 포즈 dict(포즈 행)를 만든다.
+
+    이 dict의 키 집합은 CLI가 CSV로 그대로 내보내는 **핵심 계약**이다. 섀시/툴
+    좌표(로컬·월드), 폴리곤 경계 상자, 경계·전이 검사 결과, 커버리지 역할, 각종
+    운동학/오염 자리표시자 필드를 채운다. `motor_command_generated`=False.
+
+    리팩토링 주의: 여기 키를 추가/이름변경/삭제하면 CSV 스키마와 시각화, 그리고
+    이후 annotate_* 단계가 덮어쓰는 필드들과의 정합이 깨질 수 있다.
+
+    Build one wide "pose row" dict for a path segment — the core CSV-facing
+    contract emitted by the CLIs (chassis/tool coords local+world, bboxes,
+    boundary/transition checks, coverage role, kinematic/contamination
+    placeholders). Do not casually rename/remove keys.
+    """
     motion_direction = _motion_direction(travel_sign, heading_axis_sign)
     travel_direction_deg = 0.0 if travel_sign > 0 else 180.0
     tool_x_m, tool_y_m, tool_edge_min_y_m, tool_edge_max_y_m = _tool_pose(
@@ -2660,10 +3353,30 @@ def _pose_dict(
     }
 
 
+# ── 경로 요약·검증 / Path summary & feasibility roll-up ──
+
+
 def summarize_side_tool_path(
     config: SideToolPlanConfig,
     poses: list[dict[str, float | int | str | bool]],
 ) -> dict[str, float | int | str | bool]:
+    """생성된 포즈열에 대한 커버리지·검증 지표를 하나의 요약 dict로 집계(공개).
+
+    커버리지 비율/면적/겹침, 스위프 볼륨·오염·운동학·경계 위반 수, 레인/전이/연결자
+    통계, boustrophedon 유효성, A/B 도달, 그리고 종합 실현가능성
+    (`route_feasible_for_physical_preview`)과 그 실패 사유를 계산한다. 미리보기 전용
+    (`motor_command_generated`=False). 부수효과 없음(poses를 변형하지 않음).
+
+    Roll up coverage and validation metrics for a pose list into one summary
+    dict (coverage ratio/area/overlap, violation counts, lane/transition stats,
+    boustrophedon validity, A/B reach, overall feasibility + reason). Preview
+    only; does not mutate poses.
+
+    주의(gotcha): `route_feasible_for_physical_preview`는 `workspace_mode ==
+    "ab_diagonal_center"`를 강제 조건에 포함한다 — 다른 모드에서는 이 요약 기준상
+    실현가능으로 표시되지 않는다.
+    Note: overall feasibility here requires workspace_mode == "ab_diagonal_center".
+    """
     info = _workspace_info(config)
     grid = _coverage_grid(info, config.coverage_resolution_m)
     lane_rows = [pose for pose in poses if pose["coverage_role"] == "tool_sweep"]
@@ -2794,6 +3507,10 @@ def summarize_side_tool_path(
     lane_start_pose_rows = [pose for pose in poses if pose["segment_type"] == "lane_start"]
     lane_order = [int(pose["lane_index"]) for pose in lane_start_pose_rows]
     lane_start_xs = [float(pose["x_m"]) for pose in lane_start_pose_rows]
+    # 왕복(boustrophedon)이면 이웃 레인의 시작 x가 서로 반대편이어야 한다(길이의
+    # 절반 이상 차이). 이를 통해 지그재그 방향 교대를 확인한다.
+    # In a boustrophedon, adjacent lanes start on opposite ends (>half-length
+    # apart) — this verifies the back-and-forth alternation.
     lane_start_alternates = all(
         abs(lane_start_xs[index] - lane_start_xs[index - 1]) > info.ab_length_m / 2.0
         for index in range(1, len(lane_start_xs))
@@ -3061,6 +3778,9 @@ def summarize_side_tool_path(
     }
 
 
+# ── 경로 조립 / Route assembly (poses: start → lanes+transitions → end) ──
+
+
 def _build_side_tool_path_for_candidates(
     config: SideToolPlanConfig,
     info: WorkspaceInfo,
@@ -3069,11 +3789,25 @@ def _build_side_tool_path_for_candidates(
     route_order_strategy: str,
     route_order_candidates_evaluated: int,
 ) -> list[dict[str, float | int | str | bool]]:
+    """선택·정렬된 스트립열로부터 전체 포즈열(경로)을 조립한다.
+
+    구조: (rover-center 모드면) A에서의 툴-비활성 정렬 시작 연결자 → 각 스트립의
+    청소 레인(왕복 방향 교대) + 레인 간 내부 전이(회전-이동-회전) → (마지막에)
+    B로의 툴-비활성 종료 연결자. 이후 annotate_* 로 운동학/툴/엔드포인트 필드를
+    채우고 route-order 메타와 첫 레인 헤딩 정렬 플래그를 기록한다.
+
+    Assemble the full pose list from ordered strips: optional tool-inactive
+    start connector at A, per-strip cleaning lanes (alternating direction) with
+    internal transitions between them, optional tool-inactive end connector to
+    B; then run the annotators.
+    """
     x_min, x_max = _cleaning_x_bounds(config, info)
 
     poses: list[dict[str, float | int | str | bool]] = []
     start_target, end_target = _ab_targets_local(info)
 
+    # 내부 헬퍼: 세그먼트 인덱스를 자동 부여하며 포즈 행을 리스트에 추가.
+    # Local helper: append a pose row, auto-assigning the running segment index.
     def add_pose(
         *,
         segment_id: str,
@@ -3118,6 +3852,10 @@ def _build_side_tool_path_for_candidates(
         )
 
     for lane_index, (candidate, new_cells) in enumerate(selected_candidates):
+        # 시작 연결자(rover-center 모드 전용): A의 정확한 로버 중심에서 출발해 툴을
+        # 켜지 않은 채(dry) 첫 청소 레인 진입 자세까지 회전·이동으로 도달한다.
+        # Start connector (rover-center modes): from the exact A center, drive dry
+        # (tool off) via rotate/translate to reach the first cleaning lane pose.
         if lane_index == 0 and config.workspace_mode in {"ab_diagonal_center", "ab_centerline_width"}:
             start_x = x_min if _direction_for_lane(config.first_lane_direction, lane_index) > 0 else x_max
             start_dx = start_x - start_target[0]
@@ -3278,8 +4016,13 @@ def _build_side_tool_path_for_candidates(
             notes="end of selected tool-coverage strip",
         )
 
+        # 마지막 레인 뒤에는 전이가 없다. / No transition after the final lane.
         if lane_index == len(selected_candidates) - 1:
             continue
+        # 레인 간 내부 전이: 다음 레인 쪽(±90°)으로 제자리 회전 → 레인 중심 간 직선
+        # 이동 → 다시 청소 헤딩으로 회전(4개 포즈로 표현).
+        # Inter-lane transition: rotate toward the next lane (±90°), drive between
+        # lane centers, rotate back to cleaning heading (four poses).
         next_candidate = selected_candidates[lane_index + 1][0]
         transition_heading = 90.0 if next_candidate.chassis_y_m >= candidate.chassis_y_m else -90.0
         transition_choice = _select_transition_choice(
@@ -3359,6 +4102,10 @@ def _build_side_tool_path_for_candidates(
             notes="differential-drive transition: rotate in place to selected tool-strip heading",
         )
 
+    # 종료 연결자(rover-center 모드 전용): 마지막 레인 끝에서 툴을 끈 채 B의 정확한
+    # 로버 중심까지 회전·이동으로 마무리한다.
+    # End connector (rover-center modes): from the last lane end, drive dry to the
+    # exact B center via rotate/translate.
     if poses and config.workspace_mode in {"ab_diagonal_center", "ab_centerline_width"}:
         last_lane = selected_candidates[-1][0]
         last_pose = poses[-1]
@@ -3488,12 +4235,23 @@ def _build_side_tool_path_for_candidates(
 def generate_side_tool_path(
     config: SideToolPlanConfig,
 ) -> list[dict[str, float | int | str | bool]]:
-    """Generate an A/B-bounded side-mounted cleaning-tool coverage preview.
+    """A/B 경계 기반 사이드 툴 커버리지 경로 미리보기를 생성한다(주 진입점, 공개).
 
-    Tool swept strips are selected first using a grid set-cover pass. Chassis
-    poses are then derived to support the selected tool placements. The
-    generated rows describe geometry only; they are not rover commands and never
-    contain motor commands.
+    파이프라인: 툴 스트립 후보 생성 → 집합피복 선택 → route-order 전략별 방문열 →
+    각 방문열로 포즈열 조립·채점 → 최적 후보 선택. 채점은 오염·운동학·스위프·경계
+    위반 수, B 도달 여부, 커버리지 비율, 최종 B까지 거리를 사전식으로 비교한다.
+    결과 행은 기하 정보일 뿐이며 로버 명령이 아니다(모터 명령 없음).
+
+    Generate an A/B-bounded side-mounted cleaning-tool coverage preview
+    (public main entry). Pipeline: candidate strips → set-cover selection →
+    route-order sequences → build+score poses per sequence → pick the best by a
+    lexicographic score (violations, reaches-B, coverage, distance-to-B).
+    Output rows are geometry only, never rover/motor commands.
+
+    부수효과: 선택된 포즈열에 대해 annotate_contamination/endpoint를 in-place로
+    적용해 반환한다. fail_on_boundary_violation이면 위반 시 ValueError.
+    Side effect: annotates the chosen poses in place before returning; may raise
+    ValueError on boundary violations when configured to fail.
     """
     info = _workspace_info(config)
     grid = _coverage_grid(info, config.coverage_resolution_m)
@@ -3513,6 +4271,10 @@ def generate_side_tool_path(
         )
         contam = contamination_analysis(config, poses)
         summary = summarize_side_tool_path(config, poses)
+        # 사전식(lexicographic) 점수: 앞쪽 항목일수록 우선순위가 높다. 위반이 적고,
+        # B에 도달하며, 커버리지가 높고(음수라 작을수록 좋음), B에 가까운 경로를 선호.
+        # Lexicographic score (earlier keys dominate): fewer violations, reaches B,
+        # higher coverage (negated), then closer to B.
         score = (
             float(contam["contamination_violation_count"]),
             float(summary["kinematic_violation_count"]),
@@ -3557,10 +4319,22 @@ def generate_side_tool_path(
     return poses
 
 
+# ── 진단 / Diagnostics (offline route-order comparison) ──
+
+
 def strategy_diagnostics(
     config: SideToolPlanConfig,
 ) -> list[dict[str, float | int | str | bool]]:
-    """Evaluate route-order strategies for offline infeasibility diagnosis."""
+    """여러 route-order 전략을 평가해 실현 불가 원인을 오프라인 진단(공개).
+
+    각 전략별로 포즈열을 만들어 레인 수, B 도달, 오염 위반, 커버리지, 거절 사유 등을
+    한 행으로 요약해 리스트로 반환한다. 후보 생성 자체가 실패하면 단일 진단 행 반환.
+    `dataclasses.replace`로 route_order만 바꿔 시도하므로 원본 config는 불변.
+
+    Evaluate route-order strategies for offline infeasibility diagnosis; returns
+    one summary row per strategy (lane count, reaches-B, contamination, coverage,
+    rejection reason). Uses dataclasses.replace to vary only route_order.
+    """
     info = _workspace_info(config)
     grid = _coverage_grid(info, config.coverage_resolution_m)
     diagnostics: list[dict[str, float | int | str | bool]] = []
@@ -3644,12 +4418,36 @@ def strategy_diagnostics(
     return diagnostics
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 단순 툴 왕복(serpentine) 미리보기 모델 / Simple tool-serpentine preview model
+#   tool_serpentine_ab 전용. 위의 레인 탐색/집합피복과 독립된 별도 경로 모델로,
+#   툴 중심선(왕복 트랙)을 먼저 만들고 섀시/프리미티브를 나중에 유도한다.
+#   Standalone from the lane-search planner above; tool centerline first, then
+#   chassis/primitives derived.
+# ══════════════════════════════════════════════════════════════════════════
+
+
 def _tool_serpentine_track_ys(config: SideToolPlanConfig, height_m: float) -> tuple[list[float], list[float], float]:
+    """왕복 트랙들의 y 위치, 실제 간격, 마지막 부분 간격을 계산.
+
+    B(하단, y=0)에서 정확히 끝나도록 간격을 조정할 수 있다(`adjust_spacing_to_end_at_B`):
+    이 경우 간격 수를 올림하고, force_end_at_B면 홀짝(parity)을 맞춰 마지막 트랙이
+    y=0에 오게 한다. 조정하지 않으면 요청 간격을 쓰되 parity가 안 맞으면 ValueError.
+
+    Track y positions (top→bottom), actual spacings, and final partial spacing.
+    Optionally adjusts spacing so the last track lands exactly at B (y=0), fixing
+    parity when force_end_at_B; otherwise uses the requested spacing and raises on
+    a parity mismatch.
+    """
     if height_m <= 0.0:
         raise ValueError("TOOL_SERPENTINE_AB_WIDTH_ZERO")
     requested = config.step_spacing_m
     if config.adjust_spacing_to_end_at_B:
         interval_count = max(1, math.ceil(height_m / requested))
+        # 짝수 간격이어야 트랙 수가 홀수가 되어 마지막 트랙이 시작과 같은 변(y=0=B)에서
+        # 끝난다. 홀수면 하나 늘려 B 종료 보장.
+        # Even interval count → odd track count → last track ends on the start side
+        # (y=0=B). Bump by one if odd to guarantee ending at B.
         if config.force_end_at_B and interval_count % 2 == 1:
             interval_count += 1
         actual_spacing = height_m / interval_count
@@ -3682,6 +4480,7 @@ def _tool_serpentine_chassis_pose(
     tool_y_m: float,
     heading_deg: float,
 ) -> tuple[float, float, float]:
+    """툴 (x, y, heading)에서 섀시 포즈(x, y, heading)를 유도. / Chassis pose from tool pose."""
     chassis_x, chassis_y = _chassis_center_from_tool(
         config,
         tool_x_m=tool_x_m,
@@ -3694,11 +4493,25 @@ def _tool_serpentine_chassis_pose(
 def generate_tool_serpentine_preview(
     config: SideToolPlanConfig,
 ) -> dict[str, object]:
-    """Generate the fresh tool-centered serpentine preview model.
+    """툴 중심 왕복(serpentine) 미리보기 모델을 생성한다(공개, tool_serpentine_ab 전용).
 
-    This branch intentionally does not use the legacy chassis-lane route search.
-    The tool/paint-tank centerline is generated first, and chassis/primitive
-    rows are derived afterward.
+    위쪽의 레인 탐색/집합피복 플래너와 **독립**된 신형 모델이다. 먼저 툴/도료탱크
+    중심선(왕복 트랙 + 간격 연결자)을 만들고, 그로부터 섀시 세그먼트와 미분구동
+    프리미티브(전진/후진/좌·우회전)를 유도한다. 반환 dict에는 info, tool_segments,
+    chassis_segments, primitive_rows, summary가 들어 있으며 모두 미리보기 기하다
+    (모터 명령 없음).
+
+    검증 항목: 프리미티브 시퀀스 유효성, 전진/후진 교대, 연결자 패턴(우회전-전진-
+    좌회전, 도색 비활성), 툴 경로 연속성, A/B 시작·종료 일치, 커버리지 비율.
+
+    Fresh tool-centered serpentine preview (tool_serpentine_ab only); independent
+    of the lane-search planner. Builds the tool centerline first, then derives
+    chassis segments and differential-drive primitives. Returns a dict of info /
+    tool_segments / chassis_segments / primitive_rows / summary (preview geometry,
+    no motor commands).
+
+    리팩토링 주의: 이 모드는 tool_serpentine_ab 전용이라 A=좌상단, B=우하단을 가정한다.
+    (또한 상단 모듈 docstring의 `_robot_length` 미정의 주의 참고.)
     """
     if config.workspace_mode != "tool_serpentine_ab":
         raise ValueError("generate_tool_serpentine_preview requires workspace_mode='tool_serpentine_ab'")
@@ -3708,6 +4521,8 @@ def generate_tool_serpentine_preview(
     y_positions, spacing_values, final_partial = _tool_serpentine_track_ys(config, height)
     x_min = 0.0
     x_max = width
+    # 1) 툴 중심선 세그먼트 생성: 왕복 트랙(짝수=좌→우, 홀수=우→좌)과 그 사이 간격
+    #    연결자를 만든다. / Build tool centerline: alternating sweep tracks + connectors.
     tool_segments: list[dict[str, object]] = []
     segment_index = 0
     for track_index, y_m in enumerate(y_positions):
@@ -3776,6 +4591,8 @@ def generate_tool_serpentine_preview(
         )
         segment_index += 1
 
+    # 2) 각 툴 세그먼트에서 섀시 세그먼트를 유도(측면 오프셋 역산). 스위프 트랙은
+    #    레인 헤딩, 연결자는 -90° 헤딩. / Derive chassis segments from tool segments.
     lane_heading_deg = 0.0
     connector_heading_deg = -90.0
     chassis_segments: list[dict[str, object]] = []
@@ -3812,10 +4629,15 @@ def generate_tool_serpentine_preview(
             }
         )
 
+    # 3) 섀시 세그먼트로부터 미분구동 프리미티브(회전/전진/후진) 행을 생성.
+    #    아래 중첩 헬퍼들이 current_pose를 이어가며 rotate/move 행을 추가한다.
+    #    Generate differential-drive primitive rows from chassis segments; the
+    #    nested helpers thread current_pose and emit rotate/move rows.
     primitive_rows: list[dict[str, object]] = []
     current_pose: tuple[float, float, float] | None = None
 
     def _index_value(value: object) -> int | str:
+        """빈 문자열은 그대로, 아니면 int로. / Keep '' as-is, else coerce to int."""
         return "" if value == "" else int(value)
 
     def add_primitive(
@@ -3830,6 +4652,7 @@ def generate_tool_serpentine_preview(
         tool_active: bool,
         coverage_contributes: bool,
     ) -> None:
+        """프리미티브 행 하나를 목록에 추가. / Append one primitive row."""
         primitive_rows.append(
             {
                 "primitive_index": len(primitive_rows),
@@ -3857,6 +4680,10 @@ def generate_tool_serpentine_preview(
         segment: dict[str, object],
         segment_role: str,
     ) -> None:
+        """현재 헤딩에서 target_heading으로 제자리 회전 프리미티브 추가(무회전이면 생략).
+
+        Emit an in-place rotate to target_heading (skips if already aligned).
+        """
         nonlocal current_pose
         if current_pose is None:
             return
@@ -3880,6 +4707,10 @@ def generate_tool_serpentine_preview(
         current_pose = end_pose
 
     def add_track_move(chassis: dict[str, object], segment: dict[str, object]) -> None:
+        """스위프 트랙: 레인 헤딩 정렬 후 전진/후진 이동 프리미티브 추가.
+
+        Sweep track: align to lane heading, then a forward/backward move.
+        """
         nonlocal current_pose
         sx = float(chassis["chassis_start_x_m"])
         sy = float(chassis["chassis_start_y_m"])
@@ -3907,6 +4738,11 @@ def generate_tool_serpentine_preview(
         current_pose = end_pose
 
     def add_connector_primitives(chassis: dict[str, object], segment: dict[str, object]) -> None:
+        """간격 연결자: 회전(→-90°) → 전진 → 회전(→레인 헤딩)의 3 프리미티브 추가.
+
+        연결자 구간은 항상 툴 비활성(도색 안 함)이라 커버리지에 기여하지 않는다.
+        Spacing connector: rotate → forward → rotate (tool inactive, no coverage).
+        """
         nonlocal current_pose
         sx = float(chassis["chassis_start_x_m"])
         sy = float(chassis["chassis_start_y_m"])
@@ -3946,6 +4782,8 @@ def generate_tool_serpentine_preview(
         indices = segment_to_primitive_indices[str(segment["tool_segment_id"])]
         segment["associated_primitive_indices"] = ",".join(str(index) for index in indices)
 
+    # 4) 검증·요약: 프리미티브 시퀀스/패턴, 커버리지, A·B 정합을 확인하고 요약 dict 작성.
+    #    Validate & summarize: primitive/connector patterns, coverage, A/B match.
     allowed_primitives = {"move_forward", "move_backward", "rotate_left", "rotate_right"}
     primitive_sequence_valid = all(
         str(row["primitive_type"]) in allowed_primitives for row in primitive_rows

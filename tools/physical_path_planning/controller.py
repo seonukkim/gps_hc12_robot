@@ -32,6 +32,61 @@ New (loop-level) behavior layered on top of those primitives:
 Every emitted summary is routed through
 :func:`checks.assert_not_ready_for_full_path_following`, so the controller can
 never claim full-path-following readiness.
+
+--------------------------------------------------------------------------------
+[한국어 개요 / Korean overview]
+
+목적/역할:
+    계획된 커버리지 경로(직선 lane + 코너 connector)를 감독하에 따라가는 세그먼트
+    루프. 이 파일은 두 개의 상위 드라이브 루프를 담는다:
+      * :func:`run_controller` -- 연속 모션(gps_imu_closed_loop 등) 청크 드라이브.
+      * :func:`run_stop_correct_go` -- 이 모듈의 핵심 개념인 `stop_correct_go` 모드.
+    새로운 제어 법칙(control law)을 발명하지 않고, 이미 검증된 하위 프리미티브
+    (executor.send_pulse / geometry / safety / telemetry)를 재사용한다.
+
+핵심 개념 -- stop_correct_go:
+    "보정된(calibrated) 한 청크만큼 전진 -> 완전 정지 -> 안정화된 GPS/IMU
+    하트비트를 읽음 -> **정지한 상태에서** 헤딩을 보정"하는 이산(discrete) 루프.
+    코너 회전과 헤딩 보정은 burst->stop->measure(버스트 회전 -> 정지 -> 측정)
+    사이클로 돌린다. 이유(WHY): 모터가 도는 동안 펌웨어의 MOTOR_TRACE 스트림이
+    시리얼 링크(UART)를 포화시켜 yaw가 실린 하트비트가 거의 살아남지 못하기
+    때문 -- 즉 "움직이면서 보는" 연속 피드백은 실전에서 사실상 눈먼 상태다
+    (필드 데이터: 모든 커넥터가 시간 상한까지 돌았음). 그래서 반드시 멈춘 뒤에
+    측정한다. 전진 A(throttle)는 절대 낮추지 않고 조향 B(turn)만 만진다.
+
+불변식/함정(invariants & gotchas):
+    * 조향은 **B 축에만** 적용하고 +/-max_correction_b(기본 0.08)로 clamp한다.
+      전진 A와 펄스 길이는 캘리브레이션 값 그대로이며 컨트롤러가 낮추지 않는다.
+    * "mission" 헤딩 프레임은 하나의 yaw 기준을 런 전체에 이어 붙여, 덜 돈
+      커넥터 오차가 다음 lane의 헤딩 오차로 드러나 보정되게 한다. "per_lane"은
+      lane마다 기준 yaw를 다시 잡아 커넥터 오차를 조용히 흡수하는 레거시 동작.
+    * 예상되는 필드 결함(시리얼 끊김, RC invalid, GPS 정책, 하트비트 없음)은
+      raise하지 않고 abort_reason만 세팅한 뒤 루프를 깨끗이 멈춘다 -- 마지막
+      STOP/영점 핸드셰이크가 여전히 실행되도록.
+    * 모든 요약(summary)은 assert_not_ready_for_full_path_following를 통과하므로,
+      이 컨트롤러는 절대 "전체 경로 추종 준비 완료"를 주장할 수 없다(안전 규약).
+
+시스템 내 위치:
+    CLI(tools.physical_path_planning cli)의 상위 실행 모드가 이 두 진입점을
+    호출한다. 이 파일은 executor(시리얼 펄스), geometry(투영/보정 수학),
+    safety(정지/무효 판정), telemetry(행 파싱), checks(준비도 가드)를 import.
+
+리팩토링 노트:
+    순수 결정 헬퍼(no serial) 영역과 시리얼을 만지는 루프 영역이 나뉘어 있다.
+    새 제어 규칙을 넣을 때는 순수 헬퍼(pulse_correction, *_decision 등)에 로직을
+    두고 루프는 조립만 하도록 유지하면 단위 테스트가 쉽다. burst 길이/상한 상수,
+    turn-rate 추정, MOTOR_TRACE 포화 가정이 강하게 결합돼 있으니 함께 바꿀 것.
+
+[EN] Supervised segment loop that follows a planned coverage path. Two top-level
+drive loops live here: :func:`run_controller` (continuous chunked drive) and
+:func:`run_stop_correct_go` (the headline `stop_correct_go` mode: drive one
+bounded calibrated chunk, fully stop, read a stabilized GPS/IMU heartbeat, then
+correct heading *while stopped*). Turns and heading corrections run as
+burst->stop->measure cycles because the firmware's MOTOR_TRACE stream saturates
+the serial link during motion, so in-motion yaw feedback is effectively blind.
+Steering touches the B axis only (clamped); forward A and pulse length come from
+calibration and are never lowered. Expected field faults set ``abort_reason``
+instead of raising, and every summary is gated so readiness can never be claimed.
 """
 from __future__ import annotations
 
@@ -47,6 +102,11 @@ DEFAULT_RC_NEUTRAL_WAIT_S = 5.0
 DEFAULT_GPS_DEGRADATION_POLICY = "continue"
 DEFAULT_MANUAL_OVERRIDE_MODE = "abort"
 _ZERO_TOLERANCE = 1e-9
+# ── 경로 제어 모드 상수 / Path-control mode constants ──
+# 폐루프 강도가 낮은 순 -> 높은 순: open_loop_chunks(보정 없음) < imu_heading
+# (헤딩만) < gps_imu_closed_loop(헤딩+횡오차) / stop_correct_go(정지-보정-전진).
+# EN: modes ordered by closed-loop strength; stop_correct_go is the discrete
+# stop->correct->go variant driven by run_stop_correct_go.
 DEFAULT_PATH_CONTROL_MODE = "gps_imu_closed_loop"
 PATH_CONTROL_MODES = {
     "open_loop_chunks",
@@ -59,6 +119,9 @@ PATH_CONTROL_MODES = {
 # MANUAL during an AUTO-triggered run (auto-relative-run).
 MANUAL_SWITCH_ABORT_REASON = "USER_SWITCHED_TO_MANUAL"
 
+# ── stop_correct_go 기본값 / stop_correct_go defaults ──
+# 이산 "전진 -> 정지 -> 측정 -> 보정" 루프의 튜닝값. 조향(B 축)만 하고 제자리
+# 회전만 하며, 보정된 전진 A는 절대 낮추지 않는다.
 # stop_correct_go defaults: a discrete move -> stop -> measure -> correct loop
 # that only steers (B axis) and turns in place, never lowering the calibrated A.
 DEFAULT_MOVE_CHUNK_MS = 700
@@ -107,11 +170,18 @@ HEADING_REFERENCES = {"mission", "per_lane"}
 DEFAULT_HEADING_REFERENCE = "mission"
 
 
-# --- Pure decision helpers (no serial; directly unit-testable) ----------------
+# ── 순수 결정 헬퍼 / Pure decision helpers (no serial; directly unit-testable) ──
+# 시리얼을 만지지 않는 순수 함수들 -- 제어 판단 로직을 여기 모아 단위 테스트가
+# 하드웨어 없이 가능하게 한다. 루프는 이들을 조립만 한다.
+# EN: side-effect-free decision logic kept separate from the serial loop so it
+# can be unit-tested without hardware.
 
 
 def _row_lat_lon(row: dict[str, str] | None) -> tuple[float | None, float | None]:
-    """Latitude/longitude from a telemetry row, accepting ``current_*``/``gps_*``."""
+    """텔레메트리 행에서 위도/경도 추출 (current_*/gps_* 키 모두 허용).
+
+    Latitude/longitude from a telemetry row, accepting ``current_*``/``gps_*``.
+    """
     if row is None:
         return None, None
     lat = telemetry._optional_float(row.get("current_lat", row.get("gps_lat")))
@@ -120,7 +190,9 @@ def _row_lat_lon(row: dict[str, str] | None) -> tuple[float | None, float | None
 
 
 def mode_switch_state(row: dict[str, str] | None) -> str:
-    """Physical PPM mode switch state from a heartbeat row: AUTO / MANUAL / ABSENT.
+    """하트비트 행에서 물리 PPM 모드 스위치 상태를 읽는다: AUTO / MANUAL / ABSENT.
+
+    Physical PPM mode switch state from a heartbeat row: AUTO / MANUAL / ABSENT.
 
     Prefers the firmware's ``mode_switch=AUTO|MANUAL`` string; falls back to the
     ``auto_sw`` boolean gated by ``mode_channel_present``. Returns ``ABSENT`` when
@@ -142,7 +214,9 @@ def mode_switch_state(row: dict[str, str] | None) -> str:
 
 
 def dead_reckon_gps(row: dict[str, str] | None, cache: dict[str, object]) -> dict[str, object]:
-    """Resolve usable lat/lon for this step, dead-reckoning from cache when degraded.
+    """이번 스텝의 사용 가능한 위경도 확정 -- 열화 시 캐시로 추측항법(dead-reckon).
+
+    Resolve usable lat/lon for this step, dead-reckoning from cache when degraded.
 
     Mirrors the legacy stage35 ``_gps_fields`` semantics: a fresh fix updates the
     cache and clears degradation; a missing/blocked fix falls back to the last
@@ -178,7 +252,10 @@ def dead_reckon_gps(row: dict[str, str] | None, cache: dict[str, object]) -> dic
 def current_heading_deg(
     target_heading_deg: float, yaw: float | None, start_yaw_deg: float | None
 ) -> float:
-    """Segment heading adjusted by the measured yaw drift since the start yaw."""
+    """세그먼트 목표 헤딩을 시작 yaw 대비 측정된 yaw 드리프트만큼 보정한 값.
+
+    Segment heading adjusted by the measured yaw drift since the start yaw.
+    """
     if yaw is None or start_yaw_deg is None:
         return target_heading_deg
     return geometry.wrap_deg(target_heading_deg + geometry.wrap_deg(yaw - start_yaw_deg))
@@ -190,7 +267,12 @@ def reference_yaw_for_segment(
     provided_start_yaw: float | None,
     use_provided: bool,
 ) -> float | None:
-    """Resolve the IMU yaw reference a lane holds its heading against.
+    """lane가 헤딩을 유지할 기준이 되는 IMU yaw 기준값을 확정한다.
+
+    [KO] 헤딩 유지는 lane을 시작할 때의 방향에서 벗어난 드리프트를 측정하므로,
+    기준은 lane마다 다시 잡아야 한다(커넥터 회전 후 절대 yaw가 ~90도 바뀌므로).
+    --start-yaw-deg가 없으면(현장 기본값) 각 lane의 첫 하트비트 yaw를 기준으로
+    삼아 IMU 헤딩 보정이 살아 있게 한다 -- 그렇지 않으면 조용히 헤딩 오차 0을 낸다.
 
     Heading-hold measures drift away from the orientation the robot had when it
     started the lane, so the reference must be re-captured per lane (after each
@@ -230,7 +312,12 @@ def pulse_correction(
     k_cross_track: float = 0.20,
     max_correction_b: float = 0.08,
 ) -> dict[str, float]:
-    """Compute the per-pulse steering correction (B axis only).
+    """펄스마다의 조향 보정을 계산한다 (B 축 전용).
+
+    [KO] lane 세그먼트에서 B 명령 = 헤딩 오차 + 횡오차(cross-track) 보정
+    (+/-0.08로 clamp). 커넥터에서는 B = 보정된 회전값이고 보정 성분은 0으로 둔다
+    -- 커넥터는 조향 nudge가 아니라 의도된 회전이기 때문. 모드에 따라 헤딩/횡오차
+    성분을 끄는(0으로 만드는) 게이팅이 여기서 일어난다(open_loop/imu_heading 등).
 
     For lane segments the B command is the heading+cross-track correction from
     :func:`geometry.compute_b_correction` (clamped to +/-0.08). For connectors the
@@ -285,7 +372,9 @@ def pulse_correction(
 def connector_command(
     resolved_calibration: dict[str, object], direction: str
 ) -> dict[str, object]:
-    """Select the connector turn primitive, surfacing the repeated-pulses fallback.
+    """커넥터 회전 프리미티브를 선택하고, repeated-pulses 폴백 여부를 드러낸다.
+
+    Select the connector turn primitive, surfacing the repeated-pulses fallback.
 
     Prefers the angle-calibrated 90 degree turn; when no turn-angle calibration
     exists the resolver's ``repeated_pulses`` fallback is used and
@@ -308,7 +397,9 @@ def connector_command(
 
 
 def connector_turn_angle_deg(segment: dict[str, object]) -> float:
-    """Signed rotation a connector segment requests (+left / -right).
+    """커넥터 세그먼트가 요구하는 부호 있는 회전각 (+왼쪽 / -오른쪽).
+
+    Signed rotation a connector segment requests (+left / -right).
 
     Plans generated after the turn/step decomposition carry an explicit
     ``turn_angle_deg``; older plans fall back to +/-90 from the expected motion
@@ -321,7 +412,12 @@ def connector_turn_angle_deg(segment: dict[str, object]) -> float:
 
 
 def body_heading_target_deg(segment: dict[str, object]) -> float:
-    """Heading the robot BODY should hold on this segment.
+    """이 세그먼트에서 로봇 몸체(BODY)가 유지해야 할 헤딩.
+
+    [KO] 후진(reverse) lane은 몸체가 향하는 방향과 반대로 이동하므로 몸체 목표는
+    이동 헤딩 + 180이다. mission 프레임이 추적하는 것은 이동 방향이 아니라 몸체다.
+
+    Heading the robot BODY should hold on this segment.
 
     Backward (reverse-driven) lanes travel opposite to where the body points,
     so their body target is the travel heading plus 180. New plans carry an
@@ -343,7 +439,9 @@ def per_pulse_turn_angle_deg(
     turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
     turn_angle_override: float | None = None,
 ) -> float | None:
-    """Rotation one calibrated turn pulse is expected to produce, or None.
+    """보정된 회전 펄스 1회가 만들 것으로 기대되는 회전각, 또는 None.
+
+    Rotation one calibrated turn pulse is expected to produce, or None.
 
     ``None`` means unknown (repeated-pulse twitch calibration); callers then keep
     the fixed-pulse budget. ``assume_90`` reproduces the legacy one-pulse-per-90
@@ -361,7 +459,7 @@ def per_pulse_turn_angle_deg(
 
 
 def connector_planned_pulses(requested_angle_deg: float, per_pulse_angle_deg: float | None) -> int:
-    """Open-loop pulse count to cover the requested rotation (>= 1)."""
+    """요청된 회전을 덮는 개루프 펄스 개수 (>= 1). / Open-loop pulse count (>= 1)."""
     if per_pulse_angle_deg is None or per_pulse_angle_deg <= 0.0:
         return 1
     return max(1, math.ceil(abs(requested_angle_deg) / per_pulse_angle_deg - 1e-9))
@@ -374,7 +472,9 @@ def connector_pulse_budget(
     max_pulses: int = DEFAULT_MAX_CONNECTOR_PULSES_PER_TURN,
     imu_available: bool,
 ) -> int:
-    """Pulse cap for one connector turn (anti-rotation-loop guard).
+    """커넥터 회전 1회의 펄스 상한 (무한 회전 방지 가드).
+
+    Pulse cap for one connector turn (anti-rotation-loop guard).
 
     With IMU feedback the loop may use a couple of extra pulses beyond the
     planned count because each one is verified against measured yaw; without
@@ -386,7 +486,9 @@ def connector_pulse_budget(
 
 
 def manual_switch_seen(rows: Sequence[dict[str, str]]) -> bool:
-    """True when any telemetry row reports the physical mode switch in MANUAL.
+    """텔레메트리 행 중 하나라도 물리 모드 스위치를 MANUAL로 보고하면 True.
+
+    True when any telemetry row reports the physical mode switch in MANUAL.
 
     Rows without mode-channel fields (pulse ACK/STOP events) report ABSENT and
     never count, so this only triggers on explicit MANUAL evidence.
@@ -395,7 +497,10 @@ def manual_switch_seen(rows: Sequence[dict[str, str]]) -> bool:
 
 
 def manual_override_detected(row: dict[str, str] | None) -> bool:
-    """True => the operator has taken manual RC control (sticks off neutral / RC source)."""
+    """운영자가 수동 RC 제어를 가져갔으면 True (스틱이 중립 이탈 / RC 소스).
+
+    True => the operator has taken manual RC control (sticks off neutral / RC source).
+    """
     if row is None:
         return False
     if telemetry._parse_bool(row.get("neutral_ok"), default=True) is False:
@@ -410,7 +515,10 @@ def manual_override_detected(row: dict[str, str] | None) -> bool:
 
 
 def rc_ignored_for_usb_supervised(row: dict[str, str] | None) -> bool:
-    """True when the active Mac USB motion firmware explicitly ignores RC input."""
+    """활성 Mac USB 모션 펌웨어가 RC 입력을 명시적으로 무시하면 True.
+
+    True when the active Mac USB motion firmware explicitly ignores RC input.
+    """
     if row is None:
         return False
     return any(
@@ -426,7 +534,10 @@ def rc_ignored_for_usb_supervised(row: dict[str, str] | None) -> bool:
 
 
 def rc_warning_for_usb_supervised(row: dict[str, str] | None) -> str:
-    """Return non-fatal RC warning for USB-supervised modes."""
+    """USB 감독 모드에서의 비치명적 RC 경고 문자열 반환.
+
+    Return non-fatal RC warning for USB-supervised modes.
+    """
     if row is None or not rc_ignored_for_usb_supervised(row):
         return "NONE"
     if telemetry._parse_bool(row.get("rc_ok")) is not True:
@@ -441,7 +552,10 @@ _USB_PULSE_COMPAT_READY_KEY = "stage" + "20_firmware_ready"
 
 
 def guarded_pulse_compatible(row: dict[str, str]) -> bool:
-    """True => the firmware heartbeat exposes guarded physical A/B pulse mode."""
+    """펌웨어 하트비트가 guarded 물리 A/B 펄스 모드를 노출하면 True.
+
+    True => the firmware heartbeat exposes guarded physical A/B pulse mode.
+    """
     return (
         telemetry._parse_bool(row.get("usb_pulse_test_mode")) is True
         or telemetry._parse_bool(row.get(_USB_PULSE_COMPAT_MODE_KEY)) is True
@@ -457,7 +571,9 @@ def guarded_pulse_compatible(row: dict[str, str]) -> bool:
 
 
 def pulse_block_reason(pulse_rows: Sequence[dict[str, str]]) -> str | None:
-    """Return the abort/invalid reason for a completed pulse window, else None.
+    """완료된 펄스 윈도우의 abort/무효 사유를 반환, 없으면 None.
+
+    Return the abort/invalid reason for a completed pulse window, else None.
 
     Ordered so the most safety-critical condition wins: an RC_INVALID reject
     aborts the run; a missing ACK/STOP handshake, output still active after STOP,
@@ -476,6 +592,14 @@ def pulse_block_reason(pulse_rows: Sequence[dict[str, str]]) -> str | None:
 
 
 def live_drive_block_reason(rows: Sequence[dict[str, str]]) -> str | None:
+    """라이브 드라이브(연속) 윈도우의 무효 사유, 없으면 None.
+
+    [KO] pulse_block_reason의 라이브-드라이브 대응판. ARM/ACK 펄스 대신
+    ACTIVE/STOP 이벤트와 REJECT를 검사한다(연속 SET에는 ARM/ACK가 없음).
+
+    Invalidation reason for a live-drive (continuous) window, else None -- the
+    live-drive counterpart of :func:`pulse_block_reason`.
+    """
     if safety.rc_invalid_abort(rows):
         return "RC_INVALID"
     if any(telemetry.event(row) == "REJECT" for row in rows):
@@ -492,6 +616,7 @@ def live_drive_block_reason(rows: Sequence[dict[str, str]]) -> str | None:
 
 
 def _last_row_value(rows: Sequence[dict[str, str]], key: str) -> str | None:
+    """뒤에서부터 첫 유효값(None/""/NA 아님)을 찾는다. / Last non-empty value for key."""
     for row in reversed(rows):
         value = row.get(key)
         if value not in (None, "", "NA"):
@@ -500,6 +625,10 @@ def _last_row_value(rows: Sequence[dict[str, str]], key: str) -> str | None:
 
 
 def _final_zero(rows: Sequence[dict[str, str]]) -> bool:
+    """마지막 좌/우 바퀴 명령이 실질적으로 0인지 (정지 후 영점 확인).
+
+    Whether the final left/right wheel commands are effectively zero (post-stop).
+    """
     left = telemetry._optional_float(_last_row_value(rows, "final_left_cmd"))
     right = telemetry._optional_float(_last_row_value(rows, "final_right_cmd"))
     if left is None and right is None:
@@ -508,6 +637,10 @@ def _final_zero(rows: Sequence[dict[str, str]]) -> bool:
 
 
 def _segment_point(segment: dict[str, object], along_m: float) -> tuple[float, float]:
+    """세그먼트 시작점에서 along_m만큼 진행한 라인 위 점 (구간에 clamp).
+
+    Point on the segment line at ``along_m`` from the start (clamped to segment).
+    """
     sx = float(segment["start_x_m"])
     sy = float(segment["start_y_m"])
     ex = float(segment["end_x_m"])
@@ -526,6 +659,14 @@ def _dead_reckon_pose_along_segment(
     y_m: float,
     advance_m: float,
 ) -> tuple[float, float]:
+    """현재 pose를 세그먼트 방향으로 advance_m 전진시킨 추측항법 pose.
+
+    [KO] GPS가 없을 때, 캘리브레이션으로 추정한 전진량만큼 라인 방향으로 밀고
+    기존 횡오차는 (좌법선 부호 규약으로) 유지한다.
+
+    Dead-reckon the pose forward by ``advance_m`` along the segment, preserving
+    the current signed cross-track offset (projection_metrics' left-normal sign).
+    """
     along, signed_cte, _ = geometry.projection_metrics(segment, x_m, y_m)
     new_along = min(float(segment.get("length_m", 0.0)), along + max(0.0, advance_m))
     px, py = _segment_point(segment, new_along)
@@ -553,6 +694,16 @@ def _pose_from_gps_or_dead_reckon(
     advance_m: float = 0.0,
     gps_reanchor: bool = True,
 ) -> dict[str, object]:
+    """유효 GPS면 로컬 좌표로 재앵커(re-anchor), 아니면 추측항법으로 pose 갱신.
+
+    [KO] GPS가 유효하면 시작 위경도 기준 로컬 x/y로 다시 고정하고 pose_state를
+    갱신한다. 열화 시 마지막 pose에서 advance_m만큼 추측항법으로 밀며,
+    gps_reanchored는 GPS가 열화 이후 처음 복구되어 재앵커됐음을 표시한다.
+    부수효과: 인자로 받은 ``pose_state`` 딕셔너리를 in-place로 갱신한다.
+
+    Update pose from GPS when valid (re-anchoring to local x/y), otherwise dead-
+    reckon forward by ``advance_m``. Side effect: mutates ``pose_state`` in place.
+    """
     lat = gps.get("lat")
     lon = gps.get("lon")
     gps_valid = bool(lat is not None and lon is not None and not gps.get("gps_degraded"))
@@ -587,7 +738,10 @@ def _pose_from_gps_or_dead_reckon(
 def planned_pulse(
     *, seq: int, a_cmd: float, b_cmd: float, pulse_ms: int
 ) -> dict[str, object]:
-    """Build the ARM/CMD/STOP command texts for :func:`executor.send_pulse`."""
+    """executor.send_pulse에 넘길 ARM/CMD/STOP 명령 텍스트를 구성한다.
+
+    Build the ARM/CMD/STOP command texts for :func:`executor.send_pulse`.
+    """
     return {
         "arm_command_text": f"USB_PULSE_TEST_ARM seq={seq}",
         "command_text": (
@@ -599,23 +753,33 @@ def planned_pulse(
     }
 
 
-# --- Serial-facing waits (small; exercised with a fake handle) -----------------
+# ── 시리얼 대기 헬퍼 / Serial-facing waits (small; exercised with a fake handle) ──
+# 시리얼 핸들을 만지는 얇은 대기 함수들. 단위 테스트는 fake handle로 검증한다.
+# EN: thin blocking waits on the serial handle; tested with a fake handle.
 
 
 def _is_guarded_pulse_heartbeat(row: dict[str, str]) -> bool:
+    """행이 guarded 펄스 모드를 노출하는 HEARTBEAT인지. / Guarded-pulse HEARTBEAT row?"""
     return telemetry.event(row) == "HEARTBEAT" and guarded_pulse_compatible(row)
 
 
 def wait_for_guarded_pulse_heartbeat(
     handle: object, raw_lines: list[str], timeout_s: float
 ) -> dict[str, str] | None:
+    """guarded 펄스 하트비트가 올 때까지 대기 (없으면 None).
+
+    Block until a guarded-pulse heartbeat arrives, else None on timeout.
+    """
     return executor.wait_for_row(handle, raw_lines, _is_guarded_pulse_heartbeat, timeout_s)
 
 
 def wait_for_neutral_rc(
     handle: object, raw_lines: list[str], timeout_s: float
 ) -> dict[str, str] | None:
-    """Wait for a guarded pulse heartbeat whose RC sticks are neutral and ready."""
+    """RC 스틱이 중립이고 준비된 guarded 펄스 하트비트를 대기.
+
+    Wait for a guarded pulse heartbeat whose RC sticks are neutral and ready.
+    """
     return executor.wait_for_row(
         handle,
         raw_lines,
@@ -624,7 +788,11 @@ def wait_for_neutral_rc(
     )
 
 
-# --- Execution row + summary --------------------------------------------------
+# ── 실행 행 + 요약 / Execution row + summary ──
+# 청크/펄스 1회를 CSV 한 행(dict)으로, 그리고 런 전체를 요약 dict으로 만든다.
+# 두 드라이브 루프(run_controller / run_stop_correct_go)가 공유하는 출력 스키마.
+# EN: turn one chunk/pulse into a CSV row dict and the whole run into a summary
+# dict -- the shared output schema for both drive loops.
 
 
 def build_execution_row(
@@ -655,6 +823,19 @@ def build_execution_row(
     base_a_cmd: float | None = None,
     b_trim: float = 0.0,
 ) -> dict[str, object]:
+    """한 청크/펄스의 실행 결과를 표준 CSV 행(dict)으로 조립한다.
+
+    [KO] pose/GPS/IMU/보정 성분/명령/유효성 판정을 한 행에 담는다. drive_mode가
+    "continuous"면 무효 사유는 호출자가 넘긴 override를 쓰고(라이브 드라이브에는
+    펄스 ACK/STOP 윈도우가 없으므로), 그 외에는 pulse_block_reason으로 계산한다.
+    ``valid_pulse``/``invalid_reason``이 상위 루프의 중단 판단에 쓰인다.
+    ``ready_for_full_path_following``은 항상 False(안전 규약).
+
+    Assemble one chunk/pulse result into the standard CSV row dict (pose, GPS,
+    IMU, correction components, commands, validity). Continuous rows take the
+    caller's ``block_reason_override``; pulse rows compute it from the ACK/STOP
+    window. ``ready_for_full_path_following`` is always False by contract.
+    """
     if drive_mode == "continuous":
         block_reason = block_reason_override
     else:
@@ -752,7 +933,15 @@ def build_controller_summary(
     fallback_to_repeated_pulses: bool,
     abort_reason: str = "NONE",
 ) -> dict[str, object]:
-    """Build the guarded controller run summary (routed through the readiness check)."""
+    """guarded 컨트롤러 런 요약을 만든다 (준비도 체크를 통과시킨다).
+
+    [KO] 행들을 집계해 유효/무효 카운트, GPS/IMU 사용 카운트, 평균/최대 헤딩·횡오차,
+    폐루프 보정 enabled(설정 의도) vs applied(실제 B에 반영된 증거) 등을 뽑는다.
+    반드시 assert_not_ready_for_full_path_following를 통과해 반환 -- 준비 완료를
+    주장할 수 없게 하는 안전 게이트.
+
+    Build the guarded controller run summary; routed through the readiness check.
+    """
     pulse_rows = [r for r in rows if r.get("row_type") == "pulse"]
     valid = sum(1 for r in pulse_rows if r.get("valid_pulse") is True)
     continuous_drive_count = sum(1 for r in pulse_rows if r.get("drive_mode") == "continuous")
@@ -864,11 +1053,17 @@ def build_controller_summary(
     return checks.assert_not_ready_for_full_path_following(summary)
 
 
-# --- The continuous-motion loop -----------------------------------------------
+# ── 연속 모션 루프 / The continuous-motion loop ──
+# run_controller: 멈추지 않고 이어지는 청크 드라이브. stop_correct_go와 달리
+# 조향 보정을 정지 없이 B에 연속으로 실어 보낸다(하트비트 사이 IMU yaw로 헤딩 유지).
+# EN: run_controller drives in continuous chunks, applying B corrections without
+# stopping (contrast with the discrete run_stop_correct_go below).
 
 
 def correction_token(row: dict[str, object]) -> str:
-    """One-word correction summary for the per-chunk console line.
+    """청크별 콘솔 라인에 쓰는 한 단어짜리 보정 요약.
+
+    One-word correction summary for the per-chunk console line.
 
     ``dead_reckon`` when GPS is degraded (pose came from IMU + calibrated
     progress, not GPS); otherwise ``both`` / ``cross_track`` / ``heading`` for
@@ -889,7 +1084,10 @@ def correction_token(row: dict[str, object]) -> str:
 
 
 def chunk_status_line(row: dict[str, object], *, a_cmd: float, b_cmd: float) -> str:
-    """Render the required one-line per-chunk status string for a built row."""
+    """빌드된 행으로부터 청크별 한 줄 상태 문자열을 렌더링.
+
+    Render the required one-line per-chunk status string for a built row.
+    """
     imu_ok = row.get("imu_relative_yaw_deg") not in (None, "", "NA")
     return (
         f"seg={row['segment_index']} chunk={row['chunk_index']} "
@@ -913,7 +1111,9 @@ def _segment_pulse_budget(
     turn_angle_override: float | None = None,
     imu_available: bool = False,
 ) -> tuple[int, bool, str]:
-    """Return (pulse_budget, is_connector, direction) for a planned segment.
+    """계획된 세그먼트에 대해 (펄스 예산, 커넥터 여부, 방향)을 반환.
+
+    Return (pulse_budget, is_connector, direction) for a planned segment.
 
     Angle-calibrated connectors budget ``ceil(|requested| / per-pulse angle)``
     pulses from the calibration's target_angle_deg instead of assuming one pulse
@@ -975,7 +1175,16 @@ def run_controller(
     turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
     turn_angle_override: float | None = None,
 ) -> tuple[list[dict[str, object]], list[str], str]:
-    """Run the supervised pulse loop over ``segments``; return (rows, raw_lines, abort_reason).
+    """``segments`` 위에서 감독 펄스 루프를 돌린다; (rows, raw_lines, abort_reason) 반환.
+
+    [KO] 세그먼트마다: 펄스/청크 예산을 정하고, 매 청크 전에 하트비트를 기다려
+    RC/모드 스위치/GPS 정책 안전 게이트를 통과시킨 뒤, 조향 보정을 얹어 전진
+    청크(또는 라이브 드라이브)를 보내고, 이후 하트비트로 pose를 갱신해 행을 쌓는다.
+    커넥터는 IMU yaw 조기 종료(측정된 회전이 요청각에 도달하면 중단)를 적용한다.
+    예상 결함은 raise하지 않고 abort_reason만 세팅한 뒤 깨끗이 멈춘다(마지막
+    STOP/영점 핸드셰이크는 여전히 실행됨).
+
+    Run the supervised pulse loop over ``segments``; return (rows, raw_lines, abort_reason).
 
     Never raises on the expected field faults (serial disconnect, RC invalid,
     GPS abort policy, missing heartbeat): each sets ``abort_reason`` and stops the
@@ -1041,6 +1250,10 @@ def run_controller(
             connector_b = 0.0
             base_b = float(motion.get("b_cmd", 0.0))
 
+        # ── 직선 lane: 연속 청크 드라이브 / Straight lane: continuous chunk drive ──
+        # 전체 이동 시간을 firmware-safe 상한(effective_live_max_ms)으로 잘게 쪼갠
+        # 라이브 드라이브 청크들로 흘려보내고, 콜백이 최신 텔레메트리로 매 SET마다
+        # B 보정을 다시 계산한다. remaining이 충분히 줄면 조기 종료.
         if not is_connector and straight_motion_mode == "continuous":
             total_duration_ms = max(1, int(pulse_ms) * max(1, budget))
             bounded_chunk_ms = effective_live_chunk_ms
@@ -1101,6 +1314,10 @@ def run_controller(
                     chunk_gps_reanchored = bool(pose_before.get("gps_reanchored"))
 
                     def command_from_row(row: dict[str, str] | None) -> tuple[float, float]:
+                        # 라이브 드라이브 콜백: 매 SET 갱신마다 최신 활성 텔레메트리로
+                        # pose와 B 보정을 다시 계산해 (a_cmd, b_cmd)를 돌려준다. A는 고정.
+                        # EN: recompute pose + B correction from the freshest active
+                        # telemetry on each live-drive SET; forward A stays fixed.
                         nonlocal latest_correction, latest_pose, chunk_gps_reanchored
                         source = row or heartbeat
                         local_gps = dead_reckon_gps(source, gps_cache)
@@ -1226,6 +1443,11 @@ def run_controller(
                 break
             continue
 
+        # ── 펄스 청크 루프 / Guarded-pulse chunk loop ──
+        # 연속 모드가 아닌 경로: 각 계획 펄스를 firmware-safe 상한으로 쪼갠
+        # guarded 펄스(ARM->CMD->STOP)들로 실행. 커넥터는 IMU yaw 조기 종료 적용.
+        # EN: non-continuous path -- run each planned pulse as firmware-safe-capped
+        # guarded pulses; connectors early-stop on measured IMU yaw.
         pulse_chunk_ms_values: list[int] = []
         for _ in range(budget):
             remaining_pulse_ms = int(pulse_ms)
@@ -1392,7 +1614,22 @@ def run_controller(
     return rows, raw_lines, abort_reason
 
 
-# --- stop_correct_go: discrete move -> stop -> measure -> correct loop ---------
+# ── stop_correct_go: 이산 전진->정지->측정->보정 루프 ──
+# stop_correct_go: discrete move -> stop -> measure -> correct loop
+#
+# [KO] 이 모듈의 핵심 모드. 짧은 필드 테스트용으로 일부러 보수적으로 만든 경로
+# 추종 방식이다. 연속 gps_imu_closed_loop과 달리, 각 직선 청크는 완전히 멈추고
+# 영점을 확인한 뒤에야 pose를 읽는다. 그래서 헤딩 보정은 연속 B nudge가 아니라
+# **정지 상태의 이산 제자리 IMU 회전**이고, 횡오차는 *다음* 청크의 B로 넘겨 트림한다.
+#
+# 왜 멈춰서 측정하는가(WHY): 모터가 도는 동안 펌웨어가 MOTOR_TRACE 라인으로
+# 시리얼(UART)을 포화시켜 yaw가 실린 하트비트가 거의 살아남지 못한다 -- 움직이며
+# 보는 연속 피드백은 실전에서 눈먼 상태다. 그래서 회전(커넥터/헤딩 보정)은
+# burst -> stop -> 텔레메트리 회복 대기 -> 정지 yaw 측정 사이클로 돈다.
+#
+# 재사용(primitives): executor.send_pulse(guarded 전진), projection_metrics(기하),
+# dead_reckon_gps / _pose_from_gps_or_dead_reckon(pose), build_execution_row
+# (표준 요약/CSV 경로 그대로) -- 새 제어 법칙은 없다.
 #
 # A deliberately conservative path-following mode for short field tests. Unlike
 # the continuous gps_imu_closed_loop drive, each straight chunk fully stops and
@@ -1411,7 +1648,9 @@ def stop_correct_go_sensor_source(
     trust_mode: str = DEFAULT_SENSOR_TRUST_MODE,
     allow_calibration_fallback: bool = True,
 ) -> dict[str, object]:
-    """Decide which sensor drives this cycle's pose/heading estimate.
+    """이번 사이클의 pose/헤딩 추정을 어떤 센서로 할지 결정.
+
+    Decide which sensor drives this cycle's pose/heading estimate.
 
     GPS and/or IMU are used whenever available. When *both* are unavailable the
     cycle may only continue on calibrated dead-reckoning if it is allowed --
@@ -1443,7 +1682,9 @@ def stop_correct_go_heading_decision(
     b_left: float,
     b_right: float,
 ) -> dict[str, object]:
-    """Whether an in-place heading correction is needed, and its turn command.
+    """제자리 헤딩 보정이 필요한지, 그리고 그 회전 명령을 결정한다.
+
+    Whether an in-place heading correction is needed, and its turn command.
 
     The correction is an IMU-feedback turn, so it is only attempted when IMU yaw
     is available; without IMU the rover keeps its heading on the next straight
@@ -1467,7 +1708,9 @@ def stop_correct_go_cross_track_trim(
     k_cross_track: float = 0.20,
     max_correction_b: float = 0.08,
 ) -> float:
-    """B trim applied to the *next* chunk when cross-track error exceeds threshold.
+    """횡오차가 임계값을 넘을 때 *다음* 청크에 적용할 B 트림.
+
+    B trim applied to the *next* chunk when cross-track error exceeds threshold.
 
     Uses the same sign/gain convention as the continuous closed-loop B correction
     (positive signed cross-track -> positive B -> steer back onto the line),
@@ -1483,7 +1726,9 @@ def stop_correct_go_cross_track_trim(
 
 
 def remaining_turn_error_deg(initial_heading_error_deg: float, yaw_delta_deg: float) -> float:
-    """Signed heading error left after rotating ``|yaw_delta|`` toward the target.
+    """목표 쪽으로 ``|yaw_delta|``만큼 회전한 뒤 남은 부호 있는 헤딩 오차.
+
+    Signed heading error left after rotating ``|yaw_delta|`` toward the target.
 
     The turn direction comes from the error sign and the IMU yaw magnitude
     measures how far we actually rotated, so the applied rotation is
@@ -1502,7 +1747,13 @@ def _collect_stabilized_heartbeat(
     heartbeat_timeout_s: float,
     verbose_raw: bool = True,
 ) -> dict[str, str] | None:
-    """Let the motion settle, then read heartbeats over the stabilize window.
+    """모션이 잦아들길 기다린 뒤, 안정화 윈도우 동안 하트비트를 읽는다.
+
+    [KO] 정지 직후의 과도(transient) 프레임이 아니라, 안정화 윈도우 안에서 본
+    *마지막* guarded 하트비트를 반환한다 -- 정지·안정된 표본에서 pose/헤딩을 읽기
+    위함. stop_correct_go의 "정지 후 측정"을 실제로 구현하는 지점.
+
+    Let the motion settle, then read heartbeats over the stabilize window.
 
     Returns the *last* guarded-pulse heartbeat seen inside the window so pose and
     heading are read from a stationary, settled telemetry sample rather than the
@@ -1542,7 +1793,17 @@ def _run_stop_correct_go_heading_turn(
     rate_dps_hint: float | None = None,
     max_burst_ms: int = DEFAULT_TURN_BURST_MAX_MS,
 ) -> dict[str, object]:
-    """Rotate in place toward the target in burst -> stop -> measure cycles.
+    """목표를 향해 burst -> stop -> measure 사이클로 제자리 회전한다.
+
+    [KO] stop_correct_go 회전 엔진(커넥터 pivot과 헤딩 보정이 공유). 모터가 도는
+    동안 MOTOR_TRACE 홍수로 시리얼이 포화돼 yaw 하트비트가 살아남지 못하므로,
+    각 사이클은 남은 각도와 회전율 추정으로 크기를 정한 데드맨 라이브 SET 버스트
+    1회를 쏘고 -> 멈추고 -> 텔레메트리 회복을 기다린 뒤 -> 정지 yaw를 읽어 다음
+    버스트를 정한다. 종료 조건: 허용오차 도달 / 오버슈트(부호 반전) / 정체(측정
+    가능한 진행 없음) / REJECT / MANUAL 스위치 / max_correction_ms 마감.
+    긴 guarded 펄스를 쓰지 않으므로 펌웨어의 guarded-pulse 상한은 트리거되지 않는다.
+
+    Rotate in place toward the target in burst -> stop -> measure cycles.
 
     While the motors run, the firmware floods the serial link with MOTOR_TRACE
     lines and saturates the UART, so yaw-bearing heartbeats rarely survive --
@@ -1649,7 +1910,10 @@ def _run_stop_correct_go_heading_turn(
 
 
 def stop_correct_go_status_line(row: dict[str, object]) -> str:
-    """One-line per-cycle console status for a built stop_correct_go row."""
+    """빌드된 stop_correct_go 행의 사이클별 한 줄 콘솔 상태.
+
+    One-line per-cycle console status for a built stop_correct_go row.
+    """
     imu_ok = bool(row.get("imu_valid"))
     return (
         f"seg={row['segment_index']} chunk={row['chunk_index']} "
@@ -1672,7 +1936,9 @@ def _stop_correct_go_preflight(
     manual_override_mode: str,
     require_auto_switch: bool,
 ) -> tuple[dict[str, str] | None, str]:
-    """Wait for a guarded heartbeat and apply the shared pre-move safety gates.
+    """guarded 하트비트를 기다린 뒤 공통 이동-전 안전 게이트를 적용한다.
+
+    Wait for a guarded heartbeat and apply the shared pre-move safety gates.
 
     Returns ``(heartbeat, abort_reason)`` where ``abort_reason`` is ``"NONE"`` when
     it is safe to move. Mirrors the per-pulse preamble of :func:`run_controller`.
@@ -1711,7 +1977,14 @@ def build_stop_correct_go_summary(
     turn_angle_policy: str = DEFAULT_TURN_ANGLE_POLICY,
     turn_calibration_angles: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Controller summary augmented with stop_correct_go-specific counters."""
+    """컨트롤러 요약에 stop_correct_go 전용 카운터를 덧붙인다.
+
+    [KO] 헤딩 보정 횟수/성공, 횡오차 트림 적용 수, 센서 폴백 수, 커넥터 회전
+    완료/미완/오버슈트/IMU 측정 수, GPS 점프 거부 수 등을 집계해 기본 요약에 병합.
+    반환은 준비도 게이트를 통과한다.
+
+    Controller summary augmented with stop_correct_go-specific counters.
+    """
     summary = build_controller_summary(
         rows,
         start_lat=start_lat,
@@ -1813,7 +2086,18 @@ def run_stop_correct_go(
     heading_reference: str = DEFAULT_HEADING_REFERENCE,
     max_gps_jump_m: float | None = None,
 ) -> tuple[list[dict[str, object]], list[str], str]:
-    """Run the stop_correct_go loop over ``segments``; return (rows, raw_lines, abort).
+    """``segments`` 위에서 stop_correct_go 루프를 돌린다; (rows, raw_lines, abort) 반환.
+
+    [KO] 이 모듈의 핵심 진입점. lane 세그먼트는 bounded guarded 청크를 한 번에
+    하나씩 전진하며, 완전히 멈추고 영점을 확인한 뒤 안정화된 pose를 읽는다. 임계값을
+    넘는 헤딩 오차는 이산 제자리 IMU 회전으로 보정하고, 횡오차는 다음 청크의 B로
+    트림한다. 커넥터는 코너마다 IMU 피드백 pivot(회전 엔진 공유)을 돌리되, IMU yaw가
+    없으면 캘리브레이션 target_angle_deg에서 유도한 개루프 펄스 수로 대체한다.
+    mission 헤딩 프레임(heading = yaw + offset)은 첫 lane 정렬 상태에서 한 번만 캡처해
+    런 전체에 이어 붙인다. ``max_gps_jump_m``는 lane 길이 스케일의 GPS 텔레포트를
+    거부하고 그 사이클을 추측항법으로 처리한다.
+
+    Run the stop_correct_go loop over ``segments``; return (rows, raw_lines, abort).
 
     Lane segments advance one bounded guarded chunk at a time, fully stopping and
     confirming zero before reading a settled pose; heading errors over threshold
@@ -1849,6 +2133,14 @@ def run_stop_correct_go(
     effective_max_chunks = max(1, int(max_segment_chunks))
     dead_reckon_advance_m = max(0.01, 0.30 * (float(move_chunk_ms) / 700.0))
 
+    # ── 미션 헤딩 프레임 / Mission-heading frame ──
+    # [KO] heading = yaw + offset. 오프셋은 로버가 아직 첫 lane에 정렬돼 있을 때
+    # (운영자 정렬 또는 초기 헤딩 정렬 스텝) 딱 한 번 캡처한다. 하나의 기준을 런
+    # 전체에 이어 붙이므로 덜 돈 커넥터가 다음 lane의 헤딩 오차로 드러나 보정된다
+    # (per_lane처럼 조용히 재영점하지 않음). 프레임은 첫 커넥터 회전 전에만 캡처
+    # 가능하며, 이후에야 IMU yaw가 나타나면 회전 도중 프레임을 잡는 대신 레거시
+    # per_lane 동작으로 강등된다.
+    #
     # Mission heading frame: heading = yaw + offset, captured once while the
     # rover is still aligned with the first lane (operator alignment or the
     # initial-heading-align step). Chaining one reference across the whole run
@@ -1870,6 +2162,11 @@ def run_stop_correct_go(
         mission_frame_offset = geometry.wrap_deg(first_lane_heading - provided_start_yaw)
 
     def maybe_capture_mission_frame(row: dict[str, str] | None) -> None:
+        """아직 미캡처이고 허용될 때, 첫 하트비트 yaw로 미션 프레임 오프셋을 잡는다.
+
+        Capture the mission-frame offset from the first heartbeat yaw, only while
+        still allowed (before the first connector) and not yet captured.
+        """
         nonlocal mission_frame_offset
         if (
             heading_reference != "mission"
@@ -1882,6 +2179,11 @@ def run_stop_correct_go(
             mission_frame_offset = geometry.wrap_deg(first_lane_heading - yaw_now)
 
     def mission_heading(yaw_value: float | None) -> float | None:
+        """미션 프레임에서 절대 헤딩 = wrap(yaw + offset); 사용 불가면 None.
+
+        Absolute heading in the mission frame = wrap(yaw + offset), or None when
+        the mission frame is unavailable/disabled.
+        """
         if (
             heading_reference != "mission"
             or yaw_value is None
@@ -1895,6 +2197,12 @@ def run_stop_correct_go(
         target_heading = float(segment["target_heading_deg"])
         length_m = float(segment.get("length_m", 0.0))
 
+        # ── 커넥터 회전 / Connector turns ──
+        # 코너마다 제자리 pivot. IMU yaw가 있으면 burst->stop->measure 피드백
+        # 회전(회전 엔진 공유), 없으면 캘리브레이션 각도에서 유도한 개루프 펄스.
+        # 첫 커넥터에 진입하는 순간 mission 프레임 캡처를 봉인한다.
+        # EN: per-corner in-place pivot -- IMU-feedback burst cycles when yaw is
+        # available, else calibration-derived open-loop pulses.
         if is_connector:
             mission_capture_allowed = False
             direction = "left" if str(segment["expected_motion_direction"]) == "turn_left" else "right"
@@ -2228,7 +2536,11 @@ def run_stop_correct_go(
                 break
             continue
 
-        # --- straight lane: discrete move -> stop -> measure -> correct ---------
+        # ── 직선 lane: 이산 전진 -> 정지 -> 측정 -> 보정 ──
+        # straight lane: discrete move -> stop -> measure -> correct
+        # [KO] 청크마다: 안전 게이트 -> 이전 사이클의 횡오차 트림을 B에 실은 bounded
+        # guarded 전진 -> 정착/안정화 후 pose 읽기 -> (임계 초과 시) 이산 IMU 제자리
+        # 헤딩 보정 -> 다음 청크용 횡오차 트림 계산 -> 행 기록. GPS 점프 가드 포함.
         motion = geometry._motion_calibrated(
             resolved_calibration, str(segment["expected_motion_direction"])
         )

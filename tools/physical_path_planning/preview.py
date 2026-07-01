@@ -1,17 +1,47 @@
-"""No-motion path preview: build a coverage/direct plan and render it.
+"""무모션 경로 미리보기: 커버리지/직선 계획을 만들고 PNG 로 렌더링.
+No-motion path preview: build a coverage/direct plan and render it.
 
-``build_preview`` composes the geometry (axis-aligned ㄹ/lawnmower coverage,
-explicit A->B-diagonal rectangle coverage, or a direct line) with a resolved
-calibration and returns a pure summary dict -- no serial, no firmware, no motion.
-It is guaranteed to succeed when the turn-angle calibration is MISSING: the
-resolver falls back to repeated-pulse connectors
-(``fallback_to_repeated_pulses=True``) and preview still produces a full plan.
-Every summary is routed through the readiness guard so it can never claim
-``ready_for_full_path_following``.
+목적/역할 (Purpose):
+    실제로 로버를 움직이지 않고 계획을 검증하는 미리보기 계층. 시리얼·펌웨어·모터
+    호출이 전혀 없다. :func:`build_preview` 는 :mod:`geometry` 로 기하를 만들고
+    해석된 캘리브레이션을 결합해 **순수 요약 dict** 를 돌려주며,
+    :func:`write_preview_png` 는 그 세그먼트를 PNG 그림으로 그린다.
 
-``write_preview_png`` renders the segments to a PNG; it returns ``None`` when
-matplotlib is unavailable. CLI preview modes treat that as a clear failure
-because field operation requires visual inspection.
+    Motion-free preview layer that validates a plan without touching serial,
+    firmware, or motors. :func:`build_preview` composes :mod:`geometry` with a
+    resolved calibration into a pure summary dict; :func:`write_preview_png`
+    draws the segments to a PNG.
+
+시스템 내 위치 (Where it sits):
+    CLI 의 preview 모드가 이 모듈을 호출한다. :mod:`geometry`(기하),
+    :mod:`calibration`(해석기), :mod:`checks`(준비-상태 가드)를 import 한다.
+    파이프라인에서 "계획 → 시각 검사 → (별도) 실행" 중 시각 검사 단계.
+
+    Invoked by the CLI preview modes; imports :mod:`geometry`,
+    :mod:`calibration`, and :mod:`checks`. It is the visual-inspection stage
+    between planning and (separate) execution.
+
+핵심 개념·불변식 (Key concepts / invariants):
+    * 턴-앵글 캘리브레이션이 **없어도** 반드시 성공한다: 해석기가 반복-펄스
+      연결부로 폴백(``fallback_to_repeated_pulses=True``)하고 미리보기는 여전히
+      완전한 계획을 만든다.
+    * 모든 요약은 준비-상태 가드를 거쳐 나가므로
+      ``ready_for_full_path_following`` 를 절대 참으로 주장할 수 없다(안전).
+    * 세 가지 path_shape: 축정렬 ㄹ/lawnmower, 명시적 A→B-대각선 사각형, 직선.
+
+    Guaranteed to succeed even with MISSING turn-angle calibration (resolver
+    falls back to repeated-pulse connectors). Every summary passes the readiness
+    guard so it can never claim ``ready_for_full_path_following``.
+
+리팩토링 노트 (Refactoring notes):
+    ``write_preview_png`` 는 matplotlib 이 없으면 ``None`` 을 돌려준다. CLI
+    미리보기 모드는 이를 **명확한 실패**로 취급한다 — 현장 운용에는 시각 검사가
+    필수이기 때문이다. 새 path_shape 를 더할 때는 :func:`build_preview` 분기와
+    요약 카운트(레인/연결부/스텝) 계산을 함께 갱신할 것.
+
+    ``write_preview_png`` returns ``None`` when matplotlib is absent; CLI treats
+    that as a hard failure since field ops require visual inspection. Adding a
+    path_shape means updating the branch and the lane/connector/step counts.
 """
 from __future__ import annotations
 
@@ -31,12 +61,15 @@ def resolve_preview_calibration(
     smooth_turn_calibration_json: Path | None = None,
     calibration_mode: str = "auto",
 ) -> dict[str, object]:
-    """Resolve calibration for preview, defaulting every source to absent.
+    """미리보기용 캘리브레이션 해석 — 모든 소스를 기본 "없음"으로 / Resolve calibration, sources default absent.
 
-    Unlike the resolver's own defaults (which point at on-disk calibration
-    files), this defaults all sources to ``None`` so preview never depends on
-    calibration existing -- a missing turn-angle file simply yields the
-    repeated-pulses fallback instead of an error.
+    해석기 자체 기본값(디스크의 캘리브레이션 파일을 가리킴)과 달리, 여기서는 모든
+    소스를 ``None`` 으로 기본 설정해 미리보기가 캘리브레이션 존재에 의존하지 않게
+    한다 — 턴-앵글 파일이 없으면 에러 대신 반복-펄스 폴백이 적용된다.
+
+    Unlike the resolver's on-disk defaults, this defaults every source to
+    ``None`` so preview never depends on calibration existing; a missing
+    turn-angle file yields the repeated-pulses fallback instead of an error.
     """
     return calibration_resolver.resolve_physical_calibration(
         motion_calibration_json=motion_calibration_json,
@@ -70,13 +103,20 @@ def build_preview(
     calibration: dict[str, object] | None = None,
     connector_style: str = geometry.DEFAULT_CONNECTOR_STYLE,
 ) -> dict[str, object]:
-    """Build a no-motion preview summary (segments + plan metadata).
+    """무모션 미리보기 요약 생성 (세그먼트 + 계획 메타데이터) / Build a no-motion preview summary.
 
-    ``calibration`` may be a resolved calibration dict; when omitted it defaults
-    to the missing-everything fallback so preview works with no calibration at
-    all. ``path_shape='direct_line'`` builds the single-line escape hatch.
-    ``coverage_lawnmower`` is the default ㄹ/lawnmower sweep in local ENU.
-    ``diagonal_rectangle_serpentine`` is the explicit A->B-diagonal frame.
+    ``calibration`` 은 해석된 캘리브레이션 dict 일 수 있고, 생략 시 "전부 없음"
+    폴백을 써서 캘리브레이션 없이도 동작한다. ``path_shape='direct_line'`` 은
+    단일-직선 탈출용, ``coverage_lawnmower`` 는 로컬 ENU 의 기본 ㄹ/lawnmower 스윕,
+    ``diagonal_rectangle_serpentine`` 은 명시적 A→B-대각선 프레임이다.
+    반환된 요약은 :func:`checks.assert_not_ready_for_full_path_following` 를 거쳐
+    준비-상태를 절대 참으로 만들지 않는다.
+
+    ``calibration`` may be a resolved dict; omitted => missing-everything
+    fallback so preview works with none. ``direct_line`` = single-line escape
+    hatch, ``coverage_lawnmower`` = default ㄹ sweep in local ENU,
+    ``diagonal_rectangle_serpentine`` = explicit A->B-diagonal frame. The summary
+    is routed through the readiness guard before return.
     """
     resolved = calibration if calibration is not None else geometry.FALLBACK_RESOLVED_CALIBRATION
     path_shape = geometry.canonical_path_shape(path_shape)
@@ -223,6 +263,18 @@ def write_preview_png(
     *,
     path_shape: str = geometry.COVERAGE_LAWNMOWER,
 ) -> Path | None:
+    """계획 세그먼트를 미리보기 PNG 로 렌더링 / Render plan segments to a preview PNG.
+
+    커버리지 사각형(있으면)·레인(실선)·연결부 회전(점선)·방향 화살표·시작/목표
+    마커·ENU 축을 그려 저장하고 저장 경로를 반환한다. matplotlib 이 없으면
+    ``None`` 을 돌려주며 — CLI 는 이를 실패로 취급한다(현장에서 시각 검사 필수).
+    부수효과: 파일 시스템에 PNG 를 기록한다.
+
+    Draws the coverage rectangle (if any), lanes (solid), connector turns
+    (dashed), direction arrows, start/goal markers, and ENU axes; saves and
+    returns the path. Returns ``None`` if matplotlib is missing (CLI treats that
+    as failure). Side effect: writes a PNG to disk.
+    """
     try:
         import matplotlib
 
@@ -231,6 +283,7 @@ def write_preview_png(
     except ImportError:
         return None
     fig, ax = plt.subplots(figsize=(7, 5))
+    # ── 커버리지 사각형·대각선·치수 주석 / Coverage rectangle, diagonal, dims ──
     if workspace is not None:
         a = workspace["A_corner"]  # type: ignore[index]
         b = workspace["B_corner"]  # type: ignore[index]
@@ -252,6 +305,7 @@ def write_preview_png(
             ((float(a["x_m"]) + float(c["x_m"])) / 2.0, (float(a["y_m"]) + float(c["y_m"])) / 2.0),  # type: ignore[index]
             color="tab:brown",
         )
+    # ── 세그먼트 그리기: 레인=실선, 연결부=점선 / Draw segments: lanes solid, connectors dashed ──
     for segment in segments:
         xs = [float(segment["start_x_m"]), float(segment["end_x_m"])]
         ys = [float(segment["start_y_m"]), float(segment["end_y_m"])]
@@ -272,6 +326,7 @@ def write_preview_png(
                 xytext=(xs[0] + dx * 0.38, ys[0] + dy * 0.38),
                 arrowprops={"arrowstyle": "->", "color": color, "lw": 1.5},
             )
+    # ── 시작/목표 마커·ENU 축·범례·저장 / Start-goal markers, ENU axes, legend, save ──
     ax.scatter([0], [0], c="green", s=80, label="current/start")
     goal_x, goal_y = geometry.goal_to_local(start_lat, start_lon, goal_lat, goal_lon)
     ax.scatter([goal_x], [goal_y], c="red", s=80, label="goal")
@@ -294,6 +349,8 @@ def write_preview_png(
     ax.set_ylabel("North from start (m)")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.axis("equal")
+    # 레인/연결부마다 같은 라벨이 반복되므로 dict 로 중복 제거 후 범례 생성.
+    # Every lane/connector re-uses one label; dedup via dict before legend.
     handles, labels = ax.get_legend_handles_labels()
     deduped = dict(zip(labels, handles))
     ax.legend(deduped.values(), deduped.keys())

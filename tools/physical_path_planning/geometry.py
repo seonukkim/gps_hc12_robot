@@ -1,11 +1,61 @@
-"""Rectangle coverage geometry, goal/start resolution, and stateless control math.
+"""사각형 커버리지 기하학 · 목표/시작점 해석 · 무상태 제어 수학.
+Rectangle coverage geometry, goal/start resolution, and stateless control math.
 
-``coverage_lawnmower`` builds an axis-aligned local-ENU ㄹ/lawnmower sweep.
-``diagonal_rectangle_serpentine`` remains as the explicit A->B-diagonal frame.
-``direct_line`` uses :func:`build_direct_segments`. The control-law helpers
-(:func:`projection_metrics`, :func:`compute_b_correction`) are stateless and
-reused by the continuous-motion controller. ``ready_for_full_path_following``
-stays False on every emitted primitive.
+목적/역할 (Purpose):
+    로버가 밭을 ㄹ자(lawnmower/boustrophedon)로 훑는 경로의 **순수 기하 계산**을
+    담당한다. 위경도(GPS) 시작·목표점을 로컬 ENU(동쪽=+X, 북쪽=+Y) 좌표로 바꾸고,
+    커버리지 사각형을 세운 뒤, 레인(lane)·코너 연결부(connector)·주행 프리미티브
+    (primitive)를 만든다. 시리얼/펌웨어/실제 모터 제어는 전혀 하지 않는다.
+
+    Pure geometry for lawnmower/boustrophedon field coverage: convert GPS
+    start/goal to local ENU (East=+X, North=+Y), build the coverage rectangle,
+    then emit lanes, corner connectors, and drive primitives. No serial, no
+    firmware, no motion here.
+
+시스템 내 위치 (Where it sits):
+    :mod:`preview`, :mod:`controller`, :mod:`alignment`, :mod:`tuning` 등 상위
+    모듈이 이 파일의 leaf 함수를 import 한다(이 파일은 아무 것도 되-import 하지
+    않아 순환이 없다). :mod:`gps_coverage_core.geo` 의 좌표 변환과
+    :mod:`tools.physical_path_planning.calibration` 의 캘리브레이션 해석기를 쓴다.
+    파이프라인 상 "계획 생성"의 최하단 수학 계층이다.
+
+    Leaf math layer imported by :mod:`preview`, :mod:`controller`,
+    :mod:`alignment`, :mod:`tuning`. Depends on :mod:`gps_coverage_core.geo`
+    (coord transforms) and :mod:`calibration` (resolver); imports nothing back.
+
+핵심 개념·불변식 (Key concepts / invariants):
+    * ``target_heading_deg`` 는 **주행 방향**(진행 방향)의 ENU 각도이고,
+      ``body_heading_deg`` 는 **차체가 향하는 방향**이다. 후진(backward) 레인에서는
+      차체가 진행 방향의 반대(+180°)를 향하므로 둘이 다르다. 회전(turn)은 항상
+      차체 헤딩(body heading)을 기준으로 정렬한다.
+    * 각도는 ``atan2(north, east)`` 규약 — 동쪽 0°, 반시계(CCW) 증가.
+    * 모든 산출 dict 는 ``ready_for_full_path_following=False`` 를 달고 나간다.
+      (이 계층은 "완전 경로추종 준비 완료"를 절대 주장하지 않는다 — 안전 불변식.)
+
+    ``target_heading_deg`` = travel direction (ENU); ``body_heading_deg`` = where
+    the chassis points. On backward lanes the body faces travel+180°, so they
+    differ; turns always align the BODY. Angles use ``atan2(north, east)`` (East
+    0°, CCW+). Every emitted dict carries ``ready_for_full_path_following=False``.
+
+사용법/진입점 (Entry points):
+    ``coverage_lawnmower`` 모드는 :func:`build_axis_aligned_lawnmower_workspace`
+    로 축정렬 사각형을 만든 뒤 :func:`build_serpentine_segments` 로 레인/코너를
+    생성한다. ``diagonal_rectangle_serpentine`` 은 명시적 A→B 대각선 프레임
+    (:func:`build_rectangle_from_diagonal_and_width`). ``direct_line`` 은
+    :func:`build_direct_segments` 로 단일 직선. 제어 법칙 헬퍼
+    (:func:`projection_metrics`, :func:`compute_b_correction`)는 무상태이며
+    연속-모션 컨트롤러가 재사용한다.
+
+리팩토링 노트 (Refactoring notes):
+    코너 분해(turn_step_turn)가 가장 미묘한 부분이다 — 아래 해당 섹션 배너 참고.
+    연결부 스타일을 늘릴 때는 ``CONNECTOR_STYLES`` 와
+    :func:`build_serpentine_segments` 의 분기를 함께 고쳐야 한다. body/target
+    헤딩 구분을 깨뜨리면 회전 방향이 조용히 틀어진다.
+
+    Corner decomposition (turn_step_turn) is the subtle part — see its section
+    banner. Adding a connector style means updating both ``CONNECTOR_STYLES`` and
+    the branch in :func:`build_serpentine_segments`; breaking the body/target
+    heading distinction silently flips turn directions.
 """
 from __future__ import annotations
 
@@ -15,6 +65,10 @@ from typing import Sequence
 from gps_coverage_core.geo import GeoPoint, LocalPoint, latlon_to_local, local_to_latlon
 from tools.physical_path_planning import calibration as calibration_resolver
 
+# ── 상수·별칭·폴백 캘리브레이션 / Constants, aliases, fallback calibration ──
+# 캘리브레이션이 하나도 주어지지 않을 때 쓰는 안전한 기본값. 프리뷰/미리보기가
+# 캘리브레이션 파일 없이도 동작하도록 "전부 없음" 해석 결과를 미리 만들어 둔다.
+# Safe default used when no calibration is supplied so preview works file-less.
 FALLBACK_RESOLVED_CALIBRATION = calibration_resolver.resolve_physical_calibration(
     motion_calibration_json=None,
     fine_calibration_json=None,
@@ -52,6 +106,12 @@ CONNECTOR_SEGMENT_TYPES = {"connector_turn", "path_connector"}
 
 
 def canonical_path_shape(path_shape: str) -> str:
+    """별칭을 정규 path_shape 로 변환 / Normalize any alias to a canonical path_shape.
+
+    미지원 값이면 ``ValueError``. lawnmower/boustrophedon/l_shape 등은 모두
+    ``coverage_lawnmower`` 로 합쳐진다.
+    Raises ``ValueError`` for unknown shapes.
+    """
     normalized = path_shape.strip().lower()
     if normalized not in PATH_SHAPE_ALIASES:
         raise ValueError(f"unsupported path_shape: {path_shape}")
@@ -59,23 +119,28 @@ def canonical_path_shape(path_shape: str) -> str:
 
 
 def _resolved_or_fallback(calibration: dict[str, object] | None) -> dict[str, object]:
+    """주어진 캘리브레이션 없으면 폴백 사용 / Use fallback calibration when None."""
     return calibration if calibration is not None else FALLBACK_RESOLVED_CALIBRATION
 
 
 def _motion_calibrated(calibration: dict[str, object] | None, direction: str) -> dict[str, object]:
+    """전/후진 프리미티브의 해석된 A/B/ms 를 반환 / Resolved fwd/back drive primitive."""
     name = "forward" if direction == "forward" else "backward"
     return calibration_resolver.planner_primitive(_resolved_or_fallback(calibration), name)
 
 
 def _turn_calibrated(calibration: dict[str, object] | None, direction: str) -> dict[str, object]:
+    """좌/우 회전 연결부 프리미티브를 반환 / Resolved left/right connector turn primitive."""
     return calibration_resolver.connector_primitive(_resolved_or_fallback(calibration), direction)
 
 
 def clamp(value: float, low: float, high: float) -> float:
+    """값을 [low, high] 로 제한 / Clamp value into the inclusive range."""
     return max(low, min(high, value))
 
 
 def wrap_deg(angle_deg: float) -> float:
+    """각도를 (-180, 180] 로 래핑 / Wrap an angle into (-180, 180] degrees."""
     while angle_deg > 180.0:
         angle_deg -= 360.0
     while angle_deg < -180.0:
@@ -83,7 +148,11 @@ def wrap_deg(angle_deg: float) -> float:
     return angle_deg
 
 
+# ── 위경도 검증 & 목표점 해석 / Lat-lon validation & goal resolution ──
+
+
 def validate_lat_lon(lat: float, lon: float, label: str) -> None:
+    """위경도 범위 검증 / Validate lat in [-90,90] and lon in [-180,180], else raise."""
     if not -90.0 <= lat <= 90.0:
         raise ValueError(f"{label} latitude must be between -90 and 90")
     if not -180.0 <= lon <= 180.0:
@@ -91,6 +160,12 @@ def validate_lat_lon(lat: float, lon: float, label: str) -> None:
 
 
 def goal_to_local(start_lat: float, start_lon: float, goal_lat: float, goal_lon: float) -> tuple[float, float]:
+    """시작점 기준 목표점의 로컬 ENU (동, 북) 미터 오프셋 / Goal as local ENU (east, north) m.
+
+    시작점을 원점으로 하는 로컬 평면 좌표를 돌려준다. 이후 모든 사각형 기하가
+    이 (x=동, y=북) 규약 위에서 계산된다.
+    Returns ``(x_m=east, y_m=north)`` relative to the start point.
+    """
     validate_lat_lon(start_lat, start_lon, "start")
     validate_lat_lon(goal_lat, goal_lon, "goal")
     local = latlon_to_local(GeoPoint(start_lat, start_lon), GeoPoint(goal_lat, goal_lon))
@@ -111,6 +186,19 @@ def resolve_goal_point(
     goal_bearing_deg: float | None = None,
     goal_distance_m: float | None = None,
 ) -> tuple[GeoPoint, dict[str, object]]:
+    """네 가지 목표 지정 방식을 하나의 GeoPoint 로 해석 / Resolve any goal spec to a GeoPoint.
+
+    지원 모드(``goal_mode``): ``absolute`` (위경도), ``relative_enu`` (동/북 미터),
+    ``relative_latlon`` (Δ위/Δ경도), ``bearing_distance`` (방위각°+거리 m). 각 모드는
+    필요한 인자가 빠지면 CLI 플래그 이름을 담은 ``ValueError`` 를 던진다.
+    반환: ``(목표 GeoPoint, 요약용 context dict)`` — context 는 어떤 입력이
+    쓰였는지 기록해 프리뷰/로그에 남긴다.
+
+    Resolves the four ``goal_mode`` variants (absolute / relative_enu /
+    relative_latlon / bearing_distance) into ``(GeoPoint, context)``. Missing
+    required args raise a ``ValueError`` naming the CLI flag; ``context`` records
+    which inputs were used for previews/logs.
+    """
     validate_lat_lon(start_lat, start_lon, "start")
     start = GeoPoint(start_lat, start_lon)
     context: dict[str, object] = {"goal_mode": goal_mode}
@@ -152,7 +240,11 @@ def resolve_goal_point(
     raise ValueError(f"unsupported goal_mode: {goal_mode}")
 
 
+# ── 2D 벡터 헬퍼 / 2D vector helpers ──
+
+
 def _unit(x: float, y: float) -> tuple[float, float]:
+    """단위 벡터로 정규화 / Normalize to a unit vector; raise on zero length."""
     length = math.hypot(x, y)
     if length <= 1e-12:
         raise ValueError("zero-length vector")
@@ -160,11 +252,16 @@ def _unit(x: float, y: float) -> tuple[float, float]:
 
 
 def _rot_cw(x: float, y: float) -> tuple[float, float]:
+    """시계방향 90° 회전 / Rotate a vector 90° clockwise."""
     return y, -x
 
 
 def _rot_ccw(x: float, y: float) -> tuple[float, float]:
+    """반시계방향 90° 회전 / Rotate a vector 90° counter-clockwise."""
     return -y, x
+
+
+# ── 커버리지 사각형 구성 / Coverage-rectangle construction ──
 
 
 def build_rectangle_from_diagonal_and_width(
@@ -177,12 +274,28 @@ def build_rectangle_from_diagonal_and_width(
     step_spacing_m: float,
     diagonal_orientation: str = "A_top_left_to_B_bottom_right",
 ) -> dict[str, object]:
+    """A→B 를 사각형의 **대각선**으로 보고 커버리지 프레임을 구성 / Rectangle from A-B diagonal.
+
+    ``coverage_lawnmower`` 와 달리 A→B 가 레인 축이 아니라 사각형의 대각선이다.
+    폭(``width_m``)이 반드시 필요하며, 대각선과 폭으로부터 긴 축(길이)과 짧은
+    축(폭)을 삼각함수로 복원한다. ``diagonal_orientation`` 은 사각형이 대각선의
+    어느 쪽으로 펼쳐지는지(좌상→우하 / 좌하→우상)를 결정한다.
+    반환: 코너·축 단위벡터·헤딩·치수를 담은 workspace dict.
+
+    Treats A-B as the rectangle's diagonal (not the lane axis): given the
+    diagonal and ``width_m``, recovers the long (length) and short (width) axes
+    trigonometrically. ``diagonal_orientation`` selects which side of the
+    diagonal the rectangle unfolds toward. Returns a workspace dict of corners,
+    axis unit vectors, headings, and dimensions.
+    """
     if width_m <= 0:
         raise ValueError("workspace width is required because A-B is a diagonal, not a direct path")
     if step_spacing_m <= 0:
         raise ValueError("step_spacing_m must be > 0")
     bx, by = goal_to_local(start_lat, start_lon, goal_lat, goal_lon)
     diagonal_length = math.hypot(bx, by)
+    # 대각선이 폭보다 길어야 직각삼각형(길이²=대각선²-폭²)이 성립한다.
+    # Diagonal must exceed width so length = sqrt(diag^2 - width^2) is real.
     if diagonal_length <= width_m:
         raise ValueError("A-B diagonal length must be larger than workspace-width-m.")
     length_m = math.sqrt(diagonal_length * diagonal_length - width_m * width_m)
@@ -247,13 +360,20 @@ def build_axis_aligned_lawnmower_workspace(
     width_m: float,
     step_spacing_m: float,
 ) -> dict[str, object]:
-    """Build an axis-aligned local-ENU coverage rectangle for ㄹ/lawnmower sweeps.
+    """ㄹ자 스윕용 **축정렬** 로컬-ENU 커버리지 사각형 구성 / Axis-aligned lawnmower rectangle.
 
-    The dominant start->goal component becomes the lane direction. The other
-    local axis is the coverage-width direction, using the sign of the supplied
-    goal offset when available. This keeps common relative-ENU field commands
-    intuitive: ``goal-east=4, goal-north=-1.2, width=1.2`` sweeps east/west
-    lanes and steps south.
+    시작→목표 벡터의 **우세 성분**(더 큰 쪽)이 레인(주행) 방향이 되고, 나머지
+    로컬 축이 커버리지 폭 방향이 된다. 폭의 부호는 목표 오프셋의 부호를 따라가서,
+    흔한 상대-ENU 필드 명령을 직관적으로 만든다: 예) ``goal-east=4,
+    goal-north=-1.2, width=1.2`` 는 동/서 레인을 훑으며 남쪽으로 스텝한다.
+    :func:`build_rectangle_from_diagonal_and_width` 와 달리 축이 항상 로컬
+    동/북에 정렬되므로 회전 없이 격자 커버리지가 된다.
+
+    The dominant start->goal component becomes the lane direction; the other
+    local axis is the coverage-width direction, taking the sign of the goal
+    offset. This keeps common relative-ENU commands intuitive (e.g.
+    ``goal-east=4, goal-north=-1.2, width=1.2`` sweeps E/W lanes, steps south).
+    Unlike the diagonal builder, axes stay aligned to local East/North.
     """
     if width_m <= 0:
         raise ValueError("workspace_width_m must be > 0")
@@ -262,6 +382,8 @@ def build_axis_aligned_lawnmower_workspace(
     goal_x, goal_y = goal_to_local(start_lat, start_lon, goal_lat, goal_lon)
     if math.hypot(goal_x, goal_y) <= 1e-9:
         raise ValueError("goal distance must be > 0")
+    # 더 큰 성분을 레인 축으로 선택. |동|>=|북| 이면 동/서로 훑고 남/북으로 스텝.
+    # Pick the larger component as the lane axis; |E|>=|N| => E/W lanes.
     if abs(goal_x) >= abs(goal_y):
         length = goal_x
         if math.isclose(length, 0.0, abs_tol=1e-9):
@@ -323,7 +445,16 @@ def build_axis_aligned_lawnmower_workspace(
     }
 
 
+# ── 레인/코너/프리미티브 생성 / Lane, connector & primitive generation ──
+
+
 def _track_offsets(width_m: float, step_spacing_m: float) -> list[float]:
+    """폭을 스텝 간격으로 나눈 레인 오프셋 목록 / Lane offsets across the width.
+
+    0 에서 시작해 ``step_spacing_m`` 씩 증가하며, 마지막 오프셋이 폭에 정확히
+    닿지 않으면 ``width_m`` 를 끝에 덧붙여 가장자리까지 커버되도록 한다.
+    Always includes 0 and ``width_m`` so both edges are covered.
+    """
     offsets = [0.0]
     value = step_spacing_m
     while value < width_m and not math.isclose(value, width_m, abs_tol=1e-9):
@@ -335,6 +466,11 @@ def _track_offsets(width_m: float, step_spacing_m: float) -> list[float]:
 
 
 def _point_on_rectangle(workspace: dict[str, object], along_m: float, across_m: float) -> tuple[float, float]:
+    """(따라/가로) 좌표를 로컬 (x,y) 로 변환 / Map (along, across) to local (x, y).
+
+    긴 축 단위벡터 u 와 짧은 축 단위벡터 v 로 ``along*u + across*v`` 를 계산한다.
+    Uses the workspace long/short axis unit vectors.
+    """
     u = workspace["long_axis_unit"]  # type: ignore[index]
     v = workspace["short_axis_unit"]  # type: ignore[index]
     ux = float(u["x"])  # type: ignore[index]
@@ -347,11 +483,16 @@ def _point_on_rectangle(workspace: dict[str, object], along_m: float, across_m: 
 def _turn_repeat_count(
     calibration: dict[str, object] | None, direction: str, turn_angle_deg: float
 ) -> int:
-    """Planned pulse count for one connector turn (for primitives/preview).
+    """코너 회전 1회의 계획 펄스 수 / Planned pulse count for one connector turn.
 
-    Repeated-pulse twitch calibration keeps its fixed count; angle-calibrated
-    turns budget ``ceil(|angle| / per-pulse target_angle_deg)`` so a small turn
-    pulse stored under a turn_*_90 key plans 2-4 pulses per corner, not 1.
+    반복-펄스(repeated_pulses) 모드는 고정 펄스 수를 그대로 쓴다. 각도 캘리브레이션
+    모드는 ``ceil(|각도| / 펄스당 target_angle_deg)`` 로 예산을 잡아, turn_*_90
+    키에 저장된 작은 회전 펄스가 코너마다 1회가 아니라 2~4회로 계획되게 한다.
+    (프리뷰/프리미티브 표시에만 쓰이는 계획값 — 실제 정지 조건은 IMU 피드백.)
+
+    Repeated-pulse mode keeps its fixed count; angle-calibrated mode budgets
+    ``ceil(|angle| / per-pulse target_angle_deg)``. Planning value for
+    primitives/preview only; runtime stop is IMU-driven.
     """
     resolved = _resolved_or_fallback(calibration)
     if str(resolved.get("connector_mode_effective", "repeated_pulses")) == "repeated_pulses":
@@ -372,7 +513,12 @@ def _connector_turn_segment(
     body_before_deg: float,
     body_after_deg: float,
 ) -> dict[str, object]:
-    """Zero-length pivot segment rotating the body from before to after."""
+    """제자리 회전(길이 0) 세그먼트 / Zero-length in-place pivot segment.
+
+    차체 헤딩을 ``body_before_deg`` 에서 ``body_after_deg`` 로 돌린다. 회전각의
+    부호로 좌/우 회전을 정하고, 시작=끝 좌표(길이 0)로 순수 피벗을 표현한다.
+    Rotates body heading before->after; sign picks left/right, start==end.
+    """
     turn_angle = wrap_deg(body_after_deg - body_before_deg)
     return {
         "segment_index": segment_index,
@@ -397,6 +543,12 @@ def _turn_primitive_for_segment(
     segment: dict[str, object],
     primitive_index: int,
 ) -> dict[str, object]:
+    """회전 세그먼트를 실행 프리미티브(a/b/ms/repeat)로 변환 / Turn segment -> drive primitive.
+
+    세그먼트의 ``expected_motion_direction`` 으로 좌/우를 골라 해당 캘리브레이션의
+    A/B/pulse_ms 를 채우고, :func:`_turn_repeat_count` 로 반복 횟수를 계산한다.
+    Fills calibrated a/b/pulse_ms and the planned repeat count for the turn.
+    """
     direction = "left" if str(segment["expected_motion_direction"]) == "turn_left" else "right"
     turn = _turn_calibrated(calibration, direction)
     return {
@@ -428,6 +580,27 @@ def build_serpentine_segments(
     calibration: dict[str, object] | None = None,
     connector_style: str = DEFAULT_CONNECTOR_STYLE,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    """커버리지 사각형을 ㄹ자 세그먼트+프리미티브+경로점으로 전개 / Expand rectangle into ㄹ sweep.
+
+    레인을 번갈아 전진/후진으로 깔고(홀짝), 레인 사이를 ``connector_style`` 에 따라
+    연결한다. 반환: ``(segments, primitives, tool_path)`` 세 리스트.
+
+    핵심 불변식 (invariant): 전진 레인은 차체가 진행 방향을, 후진 레인은 그 반대
+    (+180°)를 향한다. 코너 회전은 항상 **차체 헤딩(body_heading_deg)** 기준으로
+    정렬해야 다음 레인이 올바른 자세로 시작한다.
+
+    연결부 스타일:
+        * ``turn_step_turn`` (기본): 물리적으로 주행 가능한 ㄹ 코너 —
+          회전→스텝오버 직선→회전 3-분해. 아래 섹션 배너 참고.
+        * ``single_turn`` (레거시): 한 번의 피벗으로 옆 레인으로 넘어가는 방식으로,
+          실제로는 주행되지 않던 1.2m 측면 이동을 가정한다.
+
+    Expands the coverage rectangle into an alternating forward/backward ㄹ sweep,
+    joining lanes per ``connector_style``. Returns ``(segments, primitives,
+    tool_path)``. Invariant: forward lanes face travel, backward lanes face
+    travel+180°; corner turns align the BODY heading. ``turn_step_turn`` (default)
+    is the drivable 3-part corner (see banner below); ``single_turn`` is legacy.
+    """
     if connector_style not in CONNECTOR_STYLES:
         raise ValueError(f"unsupported connector_style: {connector_style}")
     length_m = float(workspace["workspace_length_m"])
@@ -438,6 +611,7 @@ def build_serpentine_segments(
     primitives: list[dict[str, object]] = []
     segment_index = 0
     primitive_index = 0
+    # ── 레인 루프: 홀짝으로 전/후진 교대 / Lane loop: alternate fwd/back by parity ──
     for lane_index, offset in enumerate(offsets):
         forward = lane_index % 2 == 0
         start_along = 0.0 if forward else length_m
@@ -445,6 +619,8 @@ def build_serpentine_segments(
         sx, sy = _point_on_rectangle(workspace, start_along, offset)
         ex, ey = _point_on_rectangle(workspace, end_along, offset)
         heading = math.degrees(math.atan2(ey - sy, ex - sx))
+        # 전진 레인은 차체가 진행 방향을, 후진(역주행) 레인은 반대(+180°)를 향한다.
+        # 회전은 항상 이 body_heading 기준으로 정렬한다 — 핵심 불변식.
         # The body faces the travel direction on forward lanes and the opposite
         # way on backward (reverse-driven) lanes; turns align the BODY.
         body_heading = heading if forward else wrap_deg(heading + 180.0)
@@ -486,6 +662,25 @@ def build_serpentine_segments(
             csx, csy = ex, ey
             cex, cey = _point_on_rectangle(workspace, end_along, next_offset)
             connector_heading = math.degrees(math.atan2(cey - csy, cex - csx))
+            # ══════════════════════════════════════════════════════════════
+            # ㄹ 코너 3-분해 (회전→스텝→회전) / ㄹ corner: turn → step → turn
+            # ──────────────────────────────────────────────────────────────
+            # 이 파일에서 가장 미묘한 부분. 한 레인 끝에서 옆 레인 시작으로
+            # 넘어가는 코너를 물리적으로 주행 가능한 3개 세그먼트로 쪼갠다:
+            #   1) turn_in : 차체를 스텝오버 방향으로 피벗
+            #   2) step    : 스텝 간격만큼 짧은 직선 주행. 전진 레인 뒤엔 전진,
+            #      후진 레인 뒤엔 후진으로 밀어서 다음 레인이 이미 올바른 차체
+            #      자세로 시작되게 한다(추가 회전 절약).
+            #   3) turn_out: 다음 레인의 body_heading 으로 피벗
+            # 함정: step 방향을 전/후진으로 맞추지 않으면 다음 레인 진입 자세가
+            # 틀어져 헤딩이 조용히 어긋난다.
+            # The subtlest block here. Split each lane-to-lane corner into three
+            # drivable segments: (1) pivot into the step-over direction, (2) a
+            # short straight of one step spacing — forward after forward lanes,
+            # reverse after backward lanes so the next full lane already starts
+            # in the correct body pose, (3) pivot to the next lane's body
+            # heading. Gotcha: mismatching the step's fwd/back sense skews the
+            # next lane's entry pose and silently drifts heading.
             if connector_style == CONNECTOR_STYLE_TURN_STEP_TURN:
                 # Drivable ㄹ corner: pivot, drive the step-over as a short
                 # straight (forward after forward lanes, reverse after backward
@@ -509,6 +704,7 @@ def build_serpentine_segments(
                 )
                 segment_index += 1
                 primitive_index += 1
+                # (1) turn_in: 현재 차체 → 스텝오버 방향으로 피벗 / pivot into step-over.
                 turn_in = _connector_turn_segment(
                     segment_index=segment_index,
                     x=csx,
@@ -522,6 +718,7 @@ def build_serpentine_segments(
                 )
                 segment_index += 1
                 primitive_index += 1
+                # (2) step: 스텝 간격만큼 짧은 직선 / short straight of one step spacing.
                 step_length = abs(next_offset - offset)
                 step_budget = max(
                     1,
@@ -558,6 +755,7 @@ def build_serpentine_segments(
                 })
                 segment_index += 1
                 primitive_index += 1
+                # (3) turn_out: 다음 레인의 body_heading 으로 피벗 / pivot to next lane pose.
                 turn_out = _connector_turn_segment(
                     segment_index=segment_index,
                     x=cex,
@@ -570,6 +768,10 @@ def build_serpentine_segments(
                     _turn_primitive_for_segment(calibration, turn_out, primitive_index)
                 )
             else:
+                # 레거시 single_turn: 한 번의 피벗 연결부. 여기서 가정하는 측면
+                # 이동(≈1.2m)은 실제로 주행된 적이 없다 — 신규 계획엔 쓰지 말 것.
+                # Legacy single_turn: one-pivot connector; its sideways
+                # translation was never actually driven. Prefer turn_step_turn.
                 segment_index += 1
                 primitive_index += 1
                 turn_direction = "turn_left" if forward else "turn_right"
@@ -605,6 +807,7 @@ def build_serpentine_segments(
                     "repeat_count": repeat_count,
                     "ready_for_full_path_following": False,
                 })
+    # ── 세그먼트 → 위경도 경로점 열거 / Flatten segments to lat-lon path points ──
     tool_path = []
     point_index = 0
     origin = GeoPoint(float(workspace["local_frame_origin_lat"]), float(workspace["local_frame_origin_lon"]))
@@ -636,6 +839,13 @@ def build_direct_segments(
     nominal_forward_pulse_m: float,
     calibration: dict[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], float]:
+    """A→B 단일 직선(탈출용) 세그먼트 / Single straight A->B segment (escape hatch).
+
+    커버리지 없이 시작점에서 목표점까지 한 개의 전진 레인을 만든다.
+    반환: ``(segments, primitives, distance_m)``. 시작=목표이면 ``ValueError``.
+    Builds one forward lane start->goal; returns ``(segments, primitives,
+    distance)``. Raises if start and goal coincide.
+    """
     goal_x, goal_y = goal_to_local(start_lat, start_lon, goal_lat, goal_lon)
     distance = math.hypot(goal_x, goal_y)
     if distance <= 1e-6:
@@ -676,6 +886,15 @@ def primitives_from_segments(
     segments: Sequence[dict[str, object]],
     calibration: dict[str, object],
 ) -> list[dict[str, object]]:
+    """이미 계획된 세그먼트 리스트를 실행 프리미티브로 재변환 / Rebuild primitives from segments.
+
+    저장/재로드된 세그먼트에서 프리미티브를 다시 만들 때 쓴다. 연결부 세그먼트는
+    좌/우 회전으로, 나머지는 전/후진 이동으로 분류하고, 회전각이 없으면 좌=+90°,
+    우=-90° 로 기본값을 준다. :func:`build_serpentine_segments` 와 프리미티브
+    형식이 일치해야 한다(리팩토링 시 함께 유지).
+    Reconstructs primitives from a stored segment list; keep its primitive
+    schema in sync with :func:`build_serpentine_segments`.
+    """
     primitives: list[dict[str, object]] = []
     for primitive_index, segment in enumerate(segments, start=1):
         segment_type = str(segment.get("segment_type", ""))
@@ -715,6 +934,11 @@ def primitives_from_segments(
 
 
 def planned_path_points(segments: Sequence[dict[str, object]], start: GeoPoint) -> list[dict[str, object]]:
+    """각 세그먼트의 시작/끝점을 위경도 경로점으로 나열 / Segment endpoints as lat-lon points.
+
+    로컬 (x,y)를 시작점 기준 위경도로 되돌려 프리뷰/로그용 점 목록을 만든다.
+    Maps each segment start/end from local (x,y) back to lat-lon.
+    """
     points = []
     point_index = 0
     for segment in segments:
@@ -733,7 +957,23 @@ def planned_path_points(segments: Sequence[dict[str, object]], start: GeoPoint) 
     return points
 
 
+# ── 무상태 제어 법칙 헬퍼 (컨트롤러가 재사용) / Stateless control-law helpers ──
+
+
 def projection_metrics(segment: dict[str, object], x: float, y: float) -> tuple[float, float, float]:
+    """현재 위치를 세그먼트에 투영 / Project (x, y) onto the segment line.
+
+    반환: ``(along_m, signed_cross_m, perp_dist_m)`` — 세그먼트 시작에서의 진행
+    거리, 부호 있는 횡오차(cross-track; 좌+/우-), 투영점까지의 수직 거리.
+    투영 매개변수 t 는 [0,1] 로 clamp 되어 세그먼트 밖으로 나가지 않는다.
+    길이 0 세그먼트는 시작점까지 거리로 안전 처리한다. 연속-모션 컨트롤러가
+    횡오차 보정에 쓰는 무상태 계산.
+
+    Returns ``(along_m, signed_cross_m, perp_dist_m)``: progress from the start,
+    signed cross-track (left+/right-), and perpendicular distance. The
+    projection parameter is clamped to [0,1]; zero-length segments degrade to
+    distance-from-start. Stateless; reused by the continuous-motion controller.
+    """
     sx = float(segment["start_x_m"])
     sy = float(segment["start_y_m"])
     ex = float(segment["end_x_m"])
@@ -760,12 +1000,29 @@ def compute_b_correction(
     max_heading_b: float = 0.08,
     max_cte_b: float = 0.04,
 ) -> tuple[float, float, float]:
+    """헤딩+횡오차를 조향 B 보정으로 변환 / Blend heading+cross-track into a B steering nudge.
+
+    비례(P) 제어: 헤딩 성분과 횡오차(CTE) 성분을 각각 게인·상한으로 clamp 한 뒤
+    합치고, 최종 B 는 하드 상한 ±0.08 로 다시 clamp 한다(모터 안전 한계).
+    반환: ``(b_correction, heading_component, cte_component)`` — 디버깅용으로
+    성분도 함께 돌려준다. 무상태이므로 컨트롤러 루프가 매 틱 호출한다.
+
+    Proportional blend of a heading term and a cross-track term, each clamped to
+    its gain/limit, summed, then hard-clamped to ±0.08 (motor safety). Returns
+    the total plus both components for debugging. Stateless per control tick.
+    """
     heading_component = clamp(k_heading * heading_error_deg, -max_heading_b, max_heading_b)
     cte_component = clamp(k_cte * cross_track_error_m, -max_cte_b, max_cte_b)
     return clamp(heading_component + cte_component, -0.08, 0.08), heading_component, cte_component
 
 
 def gps_policy_action(gps_degraded: bool, policy: str) -> str:
+    """GPS 열화 시 정책 결정 / Map degraded-GPS state + policy to continue/pause/abort.
+
+    GPS 가 정상이면 항상 ``continue``. 열화 시 ``abort``/``pause`` 정책이면 그대로,
+    그 외엔 ``continue`` (알 수 없는 정책은 보수적으로 계속 진행이 아니라 기본값).
+    Normal GPS => continue; degraded => honor abort/pause, else continue.
+    """
     if not gps_degraded:
         return "continue"
     if policy == "abort":
@@ -776,6 +1033,12 @@ def gps_policy_action(gps_degraded: bool, policy: str) -> str:
 
 
 def manual_override_action(detected: bool, mode: str) -> str:
+    """수동 개입 감지 시 동작 결정 / Map manual-override detection + mode to an action.
+
+    :func:`gps_policy_action` 와 같은 형태 — 미감지면 ``continue``, 감지 시
+    ``abort``/``pause`` 모드면 그대로, 그 외엔 ``continue``.
+    Mirrors :func:`gps_policy_action`: not detected => continue.
+    """
     if not detected:
         return "continue"
     if mode == "abort":

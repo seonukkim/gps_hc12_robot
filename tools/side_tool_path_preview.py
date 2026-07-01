@@ -1,3 +1,61 @@
+"""사이드 툴(측면 장착 청소/도장 도구) 경로 미리보기 CLI / 렌더러.
+
+목적/역할:
+    `gps_coverage_core.side_tool_planner`가 계산한 **순수 기하 경로**를 받아
+    사람이 검토할 수 있는 산출물(CSV·요약 Markdown·PNG 미리보기·타임라인 프레임)
+    로 변환하는 오프라인 도구다. 이 파일 자체는 경로를 계획하지 않는다 —
+    계획 로직은 전부 플래너에 있고, 여기서는 그 결과를 "직렬화 + 시각화"만 한다.
+    가장 중요한 불변식: **모터 명령·HC-12 프레임·펌웨어 출력을 절대 만들지 않는다**
+    (모든 산출물에 `motor_command_generated=False`가 박혀 있고 문구로도 반복 명시).
+
+    Offline preview/rendering CLI for the side-mounted tool path. It takes the
+    geometry-only poses produced by `gps_coverage_core.side_tool_planner` and
+    turns them into human-review artifacts (CSV, summary markdown, PNG previews,
+    timeline/segment frames). It never plans a path and never emits any motor,
+    HC-12, or firmware output — everything is preview-only.
+
+시스템 내 위치 (pipeline):
+    - Import 하는 것: `side_tool_planner`의 공개 함수(`generate_side_tool_path`,
+      `generate_tool_serpentine_preview`, `summarize_side_tool_path`,
+      `contamination_analysis`, `strategy_diagnostics`, `swept_volume_summary`,
+      `geometry_samples_for_path`, `boundary_polygon`)와 준(準)공개 밑줄 헬퍼
+      (`_workspace_info`, `_coverage_grid`, `_cells_for_polygon`). 따라서 플래너
+      쪽 이 심볼들의 시그니처가 바뀌면 이 파일이 곧바로 깨진다(강한 결합).
+    - `_bootstrap`을 먼저 import 해 리포지토리 루트를 `sys.path`에 넣고
+      matplotlib 캐시 디렉터리를 설정한다. matplotlib은 **선택적 의존성**이라
+      미설치 시 렌더 함수들은 `None`을 반환하고 CSV/요약만 생성된다.
+    - 실행 진입점: `python -m tools.side_tool_path_preview ...`. 파이프라인상
+      맨 끝단(검토/디버깅)이며, 다른 모듈이 이 파일을 import 하지는 않는다.
+
+핵심 개념·불변식 (concepts / invariants):
+    - **CSV 필드 튜플이 스키마 계약**이다(`CSV_FIELDS`, `GEOMETRY_SAMPLE_FIELDS`,
+      `TOOL_SERPENTINE_CSV_FIELDS` 등). 플래너가 채우는 pose dict 키와 이름이
+      정확히 일치해야 하며, 순서가 곧 열 순서다. 함부로 재배열/개명 금지.
+    - **두 가지 CLI 모드**: 기본은 단순 serpentine 미리보기(`build_simple_parser`,
+      `tool_serpentine_ab`), `--advanced`/`--debug-planner-options`를 주면 레거시/
+      디버그 플래너 옵션 전체(`build_parser`)가 열린다. 두 모드가 만드는 산출물
+      집합과 CSV 파일명이 다르다.
+    - **좌표계**: 플래너는 로컬 작업 프레임에서 계산하고 pose에 `world_*` 필드로
+      A/B 프레임 좌표를 함께 담는다. 렌더러는 모드에 따라 로컬 오프셋을 더해
+      월드로 옮겨 그린다(예: `world(x,y) = (x_min+x, y_min+y)`).
+    - **오염(contamination) 재현**: `_contamination_samples`가 플래너의 시간순
+      샘플을 다시 훑어 셀별 최초 청소 시각을 기록하고, 섀시가 이미 젖은 셀을 밟는
+      위반을 판정한다. 이 로직은 플래너의 판정과 **의미가 일치해야** 한다.
+
+사용법/진입점 (entry points):
+    - `main(argv)` — CLI 디스패처. `--advanced` 유무로 파서/구성 경로를 가른다.
+    - `build_simple_parser()` / `build_parser()` — 각각 단순/고급 인자 정의.
+    - `_run_tool_serpentine_preview_output(...)` — serpentine 모드 산출물 일괄 생성.
+    - `_write_*` 계열 — 각 산출물(CSV/MD/PNG/프레임) 하나씩 담당하는 헬퍼.
+
+리팩토링 노트 (refactor cautions):
+    - 이 파일은 코드는 byte-identical로 두고 **문서만** 추가해야 하는 대상이다.
+    - 새 필드를 추가하려면 반드시 (1) 플래너의 pose dict, (2) 여기 필드 튜플,
+      (3) 해당 `_write_*` 헬퍼 세 곳을 함께 손봐야 한다.
+    - 모든 렌더 함수는 matplotlib import를 함수 내부 try/except로 감싸 미설치
+      환경에서도 CSV 경로가 동작하도록 한다 — 이 패턴을 깨지 말 것.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -29,6 +87,10 @@ from gps_coverage_core.side_tool_planner import (
 )
 
 
+# ── CSV 스키마 계약 / CSV schema contracts ──
+# 아래 필드 튜플들은 각 CSV의 헤더이자 열 순서다. 플래너가 채우는 pose dict의
+# 키 이름과 정확히 일치해야 하며, 순서를 바꾸면 다운스트림 파서가 깨진다.
+# Each tuple is a CSV header + column order; names must match planner pose keys.
 CSV_FIELDS = (
     "segment_index",
     "index",
@@ -270,7 +332,15 @@ TIMELINE_STATE_FIELDS = (
 )
 
 
+# ── CLI 인자 파싱 / CLI argument parsing ──
+
+
 def _parse_row_count(value: str) -> int | str:
+    """`--row-count` 인자 검증: 'auto' 또는 양의 정수만 허용.
+
+    argparse `type=` 콜백. Returns the literal ``"auto"`` or a positive int;
+    raises ``ArgumentTypeError`` otherwise.
+    """
     if value == "auto":
         return value
     parsed = int(value)
@@ -280,6 +350,10 @@ def _parse_row_count(value: str) -> int | str:
 
 
 def _parse_min_lane_count(value: str) -> int | str:
+    """`--min-lane-count` 인자 검증: 'auto' 또는 양의 정수만 허용.
+
+    argparse `type=` callback mirroring :func:`_parse_row_count`.
+    """
     if value == "auto":
         return value
     parsed = int(value)
@@ -289,6 +363,14 @@ def _parse_min_lane_count(value: str) -> int | str:
 
 
 def build_simple_parser() -> argparse.ArgumentParser:
+    """단순(기본) 모드 인자 파서: 툴 중심 serpentine 미리보기용.
+
+    기본 CLI 모드. A/B 좌표·간격·툴 치수 등 최소 인자만 노출하며 레거시/디버그
+    옵션은 숨긴다(`--advanced`로 전환). 로버 모터 명령은 생성하지 않는다.
+
+    Argument parser for the default tool-centered serpentine preview; exposes
+    only the minimal knobs (advanced/legacy options require ``--advanced``).
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Generate a simple offline tool-centered serpentine preview. "
@@ -323,6 +405,15 @@ def build_simple_parser() -> argparse.ArgumentParser:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """고급(--advanced) 모드 인자 파서: 레거시/디버그 플래너 옵션 전체를 노출.
+
+    워크스페이스 모드, route-order 전략, 오염/스윕 검증, 프레임 방출 등 플래너의
+    거의 모든 파라미터를 커버한다. `main`이 `--advanced` 플래그를 볼 때만 사용된다.
+    이 역시 오프라인 미리보기 전용이며 어떤 모터/HC-12 출력도 만들지 않는다.
+
+    Full argument parser used only in ``--advanced`` mode; surfaces the legacy
+    and debug planner knobs. Still preview-only — no motor/HC-12 output.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Generate an offline side-mounted cleaning-tool path preview. "
@@ -622,7 +713,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ── 산출물 직렬화: CSV/Markdown 라이터 / Artifact writers: CSV & Markdown ──
+
+
 def _write_csv(path: Path, poses: Sequence[dict[str, float | int | str | bool]]) -> None:
+    """고급 모드의 메인 pose CSV(`side_tool_path.csv`)를 기록.
+
+    각 pose dict에서 `CSV_FIELDS` 열만 뽑아 한 행씩 쓴다. `primitive_type` 열은
+    표시용 `movement_primitive_type`이 있으면 그 값으로 덮어쓴다(플래너가 내부
+    타입과 명령 타입을 구분하기 때문). 부수효과: `path`에 파일 생성.
+
+    Writes the primary pose CSV; projects each pose onto ``CSV_FIELDS`` and
+    prefers the display ``movement_primitive_type`` for the ``primitive_type``
+    column. Side effect: creates the file at ``path``.
+    """
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
@@ -686,6 +790,15 @@ TOOL_SERPENTINE_PRIMITIVE_FIELDS = (
 
 
 def _write_tool_serpentine_csv(path: Path, preview: dict[str, object]) -> None:
+    """serpentine 미리보기의 툴+섀시 세그먼트 CSV를 기록.
+
+    툴 세그먼트와 그로부터 파생된 섀시 세그먼트를 1:1로 짝지어(`strict=True`로
+    길이 불일치 시 즉시 오류) 한 행에 합친다. `motor_command_generated`는 항상
+    False로 강제. 부수효과: 파일 생성.
+
+    Zips tool segments with their derived chassis segments (strict length match)
+    into one row each; forces ``motor_command_generated=False``.
+    """
     tool_segments = list(preview["tool_segments"])  # type: ignore[index]
     chassis_segments = list(preview["chassis_segments"])  # type: ignore[index]
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -700,6 +813,10 @@ def _write_tool_serpentine_csv(path: Path, preview: dict[str, object]) -> None:
 
 
 def _write_tool_serpentine_primitives_csv(path: Path, preview: dict[str, object]) -> None:
+    """serpentine 미리보기의 원시 이동 명령(primitive) 시퀀스 CSV를 기록.
+
+    Writes the ordered movement-primitive rows (move/rotate) to CSV.
+    """
     primitive_rows = list(preview["primitive_rows"])  # type: ignore[index]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=TOOL_SERPENTINE_PRIMITIVE_FIELDS)
@@ -709,6 +826,11 @@ def _write_tool_serpentine_primitives_csv(path: Path, preview: dict[str, object]
 
 
 def _write_tool_serpentine_summary(path: Path, preview: dict[str, object]) -> None:
+    """serpentine 미리보기 요약 Markdown(`summary.md`)을 기록.
+
+    미리 정한 핵심 키 목록만 `- key: value` 형태로 나열해 사람이 빠르게
+    검토하도록 한다. Writes a compact key/value summary markdown for the preview.
+    """
     summary = dict(preview["summary"])  # type: ignore[arg-type]
     lines = [
         "# Tool-Centered Serpentine Path Preview",
@@ -751,6 +873,14 @@ def _write_tool_serpentine_summary(path: Path, preview: dict[str, object]) -> No
 
 
 def _write_tool_serpentine_route_sequence(path: Path, preview: dict[str, object]) -> None:
+    """serpentine 경로를 사람이 읽는 순서 설명 Markdown으로 기록.
+
+    툴 공간 경로 → 파생 섀시 경로 → primitive 시퀀스 세 절로 나눠, 각 세그먼트/
+    명령을 좌표·헤딩·거리와 함께 서술한다. 검토·디버깅용 문서.
+
+    Writes a narrated route document (tool route, derived chassis route,
+    primitive sequence). Human review/debug artifact only.
+    """
     tool_segments = list(preview["tool_segments"])  # type: ignore[index]
     chassis_segments = list(preview["chassis_segments"])  # type: ignore[index]
     primitive_rows = list(preview["primitive_rows"])  # type: ignore[index]
@@ -814,7 +944,22 @@ def _write_tool_serpentine_route_sequence(path: Path, preview: dict[str, object]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# ── 산출물 렌더링: PNG 미리보기/프레임 / Artifact rendering: PNG previews & frames ──
+
+
 def _write_tool_serpentine_previews(out_dir: Path, preview: dict[str, object]) -> dict[str, Path | None]:
+    """serpentine 모드의 핵심 PNG 미리보기 4종을 렌더링.
+
+    생성물: 툴 경로(primary), 툴에서 파생된 섀시 경로, primitive 시퀀스, 툴
+    커버리지 전용. 반환은 {파일명: 경로 또는 None} 매핑. matplotlib 미설치 시
+    모든 값이 None(부수효과 없음). 부수효과: `out_dir`에 PNG 파일 생성.
+
+    Renders the four essential serpentine PNGs (tool primary / derived chassis /
+    primitive sequence / tool-coverage-only). Returns {filename: path|None};
+    if matplotlib is unavailable, every value is None and no files are written.
+    """
+    # matplotlib은 선택적 의존성 — 미설치여도 CSV/요약은 나오도록 여기서만 실패.
+    # matplotlib is optional; degrade gracefully so CSV/summary still succeed.
     try:
         import matplotlib
 
@@ -840,6 +985,7 @@ def _write_tool_serpentine_previews(out_dir: Path, preview: dict[str, object]) -
     y_max = float(info.world_y_max_m)
 
     def setup(title: str):
+        """공통 축(경계 사각형·A/B점·격자·"preview only" 문구)을 세팅해 (fig, ax) 반환."""
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.add_patch(Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, fill=False, edgecolor="black", linewidth=1.4))
         ax.scatter([float(info.a_x_m)], [float(info.a_y_m)], color="black", s=40)
@@ -863,9 +1009,14 @@ def _write_tool_serpentine_previews(out_dir: Path, preview: dict[str, object]) -
         return fig, ax
 
     def world(point_x: float, point_y: float) -> tuple[float, float]:
+        """로컬 툴 좌표를 월드(A/B 프레임) 좌표로 평행이동 / local -> world offset."""
         return x_min + point_x, y_min + point_y
 
     def draw_tool_path(ax, *, labels: bool, arrows: bool) -> None:
+        """툴 세그먼트열을 그린다: 활성 sweep은 실선, 비활성/커넥터는 점선.
+
+        `labels`면 트랙/커넥터 라벨을, `arrows`면 이동 방향 화살표를 덧그린다.
+        """
         points: list[tuple[float, float]] = []
         for index, segment in enumerate(tool_segments):
             start = world(float(segment["tool_start_x_m"]), float(segment["tool_start_y_m"]))
@@ -999,6 +1150,15 @@ def _write_tool_serpentine_previews(out_dir: Path, preview: dict[str, object]) -
 
 
 def _write_tool_serpentine_timeline_frames(out_dir: Path, preview: dict[str, object]) -> int:
+    """툴 경로 진행을 누적해 보여주는 타임라인 PNG 프레임들을 생성.
+
+    프레임 i는 처음 i개 세그먼트까지 그린 스냅샷(애니메이션용). 생성한 프레임
+    개수를 반환하며 matplotlib 미설치 시 0. 부수효과: `out_dir/timeline_frames/`
+    에 PNG 생성.
+
+    Emits cumulative "progress" frames (frame i draws the first i segments).
+    Returns the frame count; 0 if matplotlib is missing.
+    """
     try:
         import matplotlib
 
@@ -1042,6 +1202,14 @@ def _write_tool_serpentine_timeline_frames(out_dir: Path, preview: dict[str, obj
 
 
 def _write_tool_serpentine_segment_frames(out_dir: Path, preview: dict[str, object]) -> int:
+    """세그먼트별로 한 장씩, 해당 툴 세그먼트를 화살표로 그린 PNG를 생성.
+
+    프레임 i는 i번째 세그먼트 하나만 강조(개별 검토용). 개수를 반환, matplotlib
+    미설치 시 0. 부수효과: `out_dir/segment_frames/`에 PNG 생성.
+
+    One PNG per tool segment (arrow for that single segment). Returns count; 0
+    without matplotlib.
+    """
     try:
         import matplotlib
 
@@ -1086,6 +1254,9 @@ def _write_tool_serpentine_segment_frames(out_dir: Path, preview: dict[str, obje
     return len(tool_segments)
 
 
+# ── serpentine 모드 산출물 오케스트레이션 / Serpentine-mode output orchestration ──
+
+
 def _run_tool_serpentine_preview_output(
     *,
     config: SideToolPlanConfig,
@@ -1095,6 +1266,17 @@ def _run_tool_serpentine_preview_output(
     emit_timeline_frames: bool = False,
     emit_segment_frames: bool = False,
 ) -> int:
+    """serpentine(tool_serpentine_ab) 모드의 모든 산출물을 한 번에 생성하고 요약 출력.
+
+    플래너에서 미리보기를 얻어 CSV·primitive CSV·요약·route 시퀀스(항상)와 PNG/
+    타임라인/세그먼트 프레임(플래그별)을 쓴 뒤, 핵심 지표를 stdout에 찍고 0을
+    반환한다. 단순 모드와 고급 serpentine 모드가 공유하는 진입점(파일명만 다름).
+    부수효과: 파일 다수 생성 + 콘솔 출력.
+
+    Generates the full serpentine artifact set and prints a summary; returns 0.
+    Shared by simple mode and advanced serpentine mode (only ``tool_csv_name``
+    and flags differ). Side effects: writes files, prints to stdout.
+    """
     preview = generate_tool_serpentine_preview(config)
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / tool_csv_name
@@ -1144,7 +1326,14 @@ def _run_tool_serpentine_preview_output(
     return 0
 
 
+# ── 오염(시간순) 재현 및 지오메트리 샘플 / Contamination replay & geometry samples ──
+
+
 def _cell_bounds(cell: int, nx: int, cell_width_m: float, cell_height_m: float) -> tuple[float, float, float, float]:
+    """평면 셀 인덱스를 (x_min, x_max, y_min, y_max) 사각형으로 환산 / cell id -> bbox.
+
+    셀 id는 row-major(ix = cell % nx, iy = cell // nx). 셀 사각형을 그릴 때 쓴다.
+    """
     ix = cell % nx
     iy = cell // nx
     x_min = ix * cell_width_m
@@ -1159,6 +1348,21 @@ def _contamination_samples(
     config: SideToolPlanConfig,
     poses: Sequence[dict[str, float | int | str | bool]],
 ) -> list[dict[str, object]]:
+    """시간순 지오메트리 샘플을 훑어 셀별 오염 상태를 재구성한다(핵심 헬퍼).
+
+    각 time step마다 섀시/툴이 덮는 그리드 셀을 계산하고, 셀별 "최초 청소 시각"을
+    누적(`cleaned_at_step`)한다. 이를 기준으로 섀시가 이미 젖은 셀(이전 또는 같은
+    스텝의 툴 스윕)을 밟는 위반을 판정한다. 툴 활성 여부는 정렬/회전/전이/레인
+    문맥에 따라 결정된다. 반환: step별 dict 목록(샘플·pose·셀 집합·위반 사유·격자
+    메타 포함). CSV 라이터와 프레임 렌더러 여러 곳이 이 목록을 공유해 소비한다.
+
+    Replays the planner's ordered geometry samples to reconstruct per-cell
+    contamination state. For each step it computes chassis/tool cells, tracks
+    each cell's first-cleaned step, and flags chassis-on-wet violations (prior
+    or same-step tool sweep). Tool-active state depends on alignment/rotation/
+    transition/lane context. Returns per-step dicts consumed by multiple CSV
+    writers and frame renderers.
+    """
     info = _workspace_info(config)
     grid = _coverage_grid(info, config.coverage_resolution_m)
     samples = geometry_samples_for_path(config, list(poses))
@@ -1174,6 +1378,9 @@ def _contamination_samples(
             for cell in chassis_cells
             if cell in cleaned_at_step and cleaned_at_step[cell] < time_step
         }
+        # 툴 활성 판정: 정렬/회전/전이 구간은 설정값에 따르고, 순수 청소 레인만
+        # 기본 활성. 이 규칙이 플래너의 오염 판정과 일치해야 함.
+        # Tool-active by context; must match the planner's contamination model.
         if str(pose["segment_id"]) == "route_start_A":
             tool_active = bool(config.tool_active_during_alignment)
         elif sample.sample_type == "rotation":
@@ -1188,6 +1395,8 @@ def _contamination_samples(
             else set()
         )
         current_reclean = {cell for cell in tool_cells if cell in cleaned_at_step}
+        # setdefault: 셀의 "최초" 청소 시각만 기록(재청소는 시각을 덮어쓰지 않음).
+        # setdefault keeps each cell's *first* cleaned step only.
         if tool_active:
             for cell in tool_cells:
                 cleaned_at_step.setdefault(cell, time_step)
@@ -1224,6 +1433,7 @@ def _contamination_samples(
 
 
 def _frame_path_by_step(frame_paths: dict[int, Path] | None) -> dict[int, str]:
+    """{step: Path} 매핑을 CSV에 넣기 좋은 {step: str} 문자열 매핑으로 변환."""
     if not frame_paths:
         return {}
     return {step: str(path) for step, path in frame_paths.items()}
@@ -1236,6 +1446,15 @@ def _write_geometry_samples_csv(
     poses: Sequence[dict[str, float | int | str | bool]],
     frame_paths: dict[int, Path] | None = None,
 ) -> None:
+    """스텝별 지오메트리 샘플(폴리곤 JSON·셀 수·오염 지표)을 CSV로 기록.
+
+    `_contamination_samples` 결과를 평탄화해 각 샘플의 섀시/툴 폴리곤(JSON 직렬화),
+    작업영역 내부 여부, 재청소/사전청소 셀 수와 면적, 프레임 경로를 남긴다.
+    부수효과: 파일 생성.
+
+    Flattens per-step geometry samples to CSV (chassis/tool polygons as JSON,
+    inside-workspace flags, reclean/prior-clean cell counts and areas).
+    """
     rows = _contamination_samples(config=config, poses=poses)
     frame_lookup = _frame_path_by_step(frame_paths)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -1285,6 +1504,10 @@ def _write_geometry_samples_csv(
 
 
 def _write_contamination_events_csv(path: Path, analysis: dict[str, object]) -> None:
+    """오염 위반 이벤트 목록을 CSV로 기록 / writes contamination violation events.
+
+    `contamination_analysis`가 만든 이벤트 객체들을 열 스키마에 맞춰 직렬화한다.
+    """
     events = list(analysis["events"])
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CONTAMINATION_EVENT_FIELDS)
@@ -1309,6 +1532,7 @@ def _write_contamination_events_csv(path: Path, analysis: dict[str, object]) -> 
 
 
 def _write_strategy_diagnostics_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    """route-order 전략별 진단 결과를 CSV로 기록 / per-strategy diagnostics to CSV."""
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=STRATEGY_DIAGNOSTIC_FIELDS)
         writer.writeheader()
@@ -1317,6 +1541,13 @@ def _write_strategy_diagnostics_csv(path: Path, rows: Sequence[dict[str, object]
 
 
 def _write_strategy_diagnostics_md(path: Path, rows: Sequence[dict[str, object]]) -> Path:
+    """전략 진단을 표 + 파라미터 튜닝 힌트가 담긴 Markdown으로 기록.
+
+    각 전략의 레인 수·B 도달·오염·커버리지·기각 사유를 표로 만들고, 경로가
+    기하학적으로 불가능할 때 조정해볼 파라미터 목록을 덧붙인다. 경로를 반환.
+
+    Renders a per-strategy table plus tuning hints; returns the written path.
+    """
     lines = [
         "# Strategy Diagnostics",
         "",
@@ -1360,6 +1591,14 @@ def _write_timeline_state_csv(
     frame_paths: dict[int, Path] | None,
     poses: Sequence[dict[str, float | int | str | bool]] = (),
 ) -> None:
+    """스텝별 누적 상태(청소 면적·커버리지·오염 카운트·B까지 잔여)를 CSV로 기록.
+
+    `contamination_analysis`의 timeline 상태 객체를 직렬화하고, segment_id로
+    pose를 조회해 `first_cleaning_heading_aligned` 같은 보조 필드를 채운다.
+
+    Serializes the per-step timeline state (cleaned area, coverage-so-far,
+    violation counts, remaining distance to B) to CSV.
+    """
     frame_lookup = _frame_path_by_step(frame_paths)
     pose_lookup = {str(pose["segment_id"]): pose for pose in poses}
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -1403,11 +1642,17 @@ def _write_swept_volume_json(
     config: SideToolPlanConfig,
     poses: Sequence[dict[str, float | int | str | bool]],
 ) -> None:
+    """스윕 볼륨(회전/병진 샘플 기반) 검증 요약을 JSON으로 기록 / swept-volume summary JSON."""
     payload = swept_volume_summary(config, list(poses))
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _timeline_frame_steps(total_steps: int, stride: int, max_frames: int | None) -> list[int]:
+    """방출할 타임라인 프레임의 스텝 인덱스 목록을 계산.
+
+    `stride` 간격으로 뽑되 마지막 스텝은 항상 포함하고, `max_frames`가 있으면 전
+    범위에 고르게 재샘플링한다. Returns the step indices to render as frames.
+    """
     if total_steps <= 0:
         return []
     stride = max(1, stride)
@@ -1426,6 +1671,11 @@ def _timeline_frame_steps(total_steps: int, stride: int, max_frames: int | None)
 
 
 def _draw_workspace_base(ax, config: SideToolPlanConfig, title: str) -> None:
+    """공통 배경(경계 폴리곤·A/B점·필요 시 A-B 대각선·격자·제목)을 축에 그린다.
+
+    여러 프레임/미리보기 렌더러가 반복 호출하는 공용 배경 헬퍼. Shared axis
+    backdrop used by the frame/preview renderers.
+    """
     polygon = boundary_polygon(config)
     closed = polygon + [polygon[0]]
     ax.plot(
@@ -1465,6 +1715,11 @@ def _draw_workspace_base(ax, config: SideToolPlanConfig, title: str) -> None:
 
 
 def _draw_cells(ax, cells: set[int] | frozenset[int], *, nx: int, cell_width_m: float, cell_height_m: float, color: str, alpha: float, label: str | None = None) -> None:
+    """셀 인덱스 집합을 반투명 사각형 패치들로 채워 그린다(그리드 히트맵 표현).
+
+    `label`은 범례 중복을 막기 위해 첫 패치에만 붙인다. Fills a set of grid cells
+    as translucent rectangles; the legend label is applied to the first patch only.
+    """
     label_used = False
     from matplotlib.patches import Rectangle
 
@@ -1485,6 +1740,11 @@ def _draw_cells(ax, cells: set[int] | frozenset[int], *, nx: int, cell_width_m: 
 
 
 def _write_timeline_index_html(path: Path, frame_paths: dict[int, Path]) -> Path:
+    """타임라인 프레임들을 스텝 순서로 나열한 정적 HTML 인덱스를 기록.
+
+    각 프레임 이미지를 상대 경로로 임베드한다(브라우저에서 훑어보기용). 경로 반환.
+    Writes a static HTML index embedding the timeline frames in step order.
+    """
     lines = [
         "<!doctype html>",
         "<html><head><meta charset=\"utf-8\"><title>Side Tool Timeline</title></head><body>",
@@ -1507,6 +1767,16 @@ def _write_timeline_frames(
     stride: int,
     max_frames: int | None,
 ) -> tuple[dict[int, Path], Path | None, Path | None]:
+    """오염 타임라인 프레임 + 컨택트 시트 + HTML 인덱스를 생성.
+
+    선택된 각 스텝마다 지금까지 청소된 셀, 위반 셀(빨강), 현재 섀시/툴 폴리곤,
+    누적 경로를 그린 프레임을 남긴다. 반환: ({step: 프레임경로}, 컨택트시트경로,
+    HTML경로). matplotlib 미설치 시 ({}, None, None). 부수효과: 파일 다수 생성.
+
+    Emits per-step contamination frames (cleaned cells, red violation cells,
+    current chassis/tool polygons, cumulative paths) plus a contact sheet and
+    HTML index. Returns (frame map, contact-sheet path, html path).
+    """
     try:
         import matplotlib
 
@@ -1527,6 +1797,9 @@ def _write_timeline_frames(
     tool_x: list[float] = []
     tool_y: list[float] = []
 
+    # 모든 스텝을 순회해 누적 경로 좌표를 쌓되, step_set에 없는 스텝은 프레임을
+    # 그리지 않고 건너뛴다(경로는 이어지되 이미지 수는 stride/max_frames로 제한).
+    # Iterate every step to accumulate path points, but only render selected steps.
     for row in rows:
         sample = row["sample"]
         pose = row["pose"]
@@ -1658,6 +1931,14 @@ def _write_contamination_previews(
     poses: Sequence[dict[str, float | int | str | bool]],
     analysis: dict[str, object],
 ) -> dict[str, Path | None]:
+    """오염 요약 PNG 2종(전체 타임라인 요약, 시간대별 청소 레이어)을 렌더링.
+
+    첫 장은 청소 셀·위반 셀·경로를 겹쳐 오염 여부를 요약하고, 둘째 장은 셀이
+    젖은 시점을 초기/중기/후기 색으로 나눠 보여준다. {파일명: 경로|None} 반환.
+
+    Renders two contamination summary PNGs (overall timeline summary, and
+    early/mid/late temporal cleaning layers). Returns {filename: path|None}.
+    """
     try:
         import matplotlib
 
@@ -1766,6 +2047,14 @@ def _write_chassis_vs_wet_preview(
     config: SideToolPlanConfig,
     poses: Sequence[dict[str, float | int | str | bool]],
 ) -> Path | None:
+    """섀시 스윕 영역 vs 툴이 적신(wet) 영역을 겹쳐 금지 중첩을 강조한 PNG를 렌더링.
+
+    전체 경로에 걸친 툴 wet 셀, 섀시 셀, 그리고 위반(빨강) 셀을 한 장에 겹쳐
+    그린다. 경로 반환(또는 matplotlib/샘플 없으면 None).
+
+    Overlays tool-wet cells, chassis-swept cells, and forbidden-overlap cells in
+    one figure. Returns the path (or None if matplotlib/samples unavailable).
+    """
     try:
         import matplotlib
 
@@ -1817,6 +2106,15 @@ def _write_segment_frames(
     config: SideToolPlanConfig,
     poses: Sequence[dict[str, float | int | str | bool]],
 ) -> tuple[dict[str, Path], Path | None]:
+    """세그먼트마다 종료 시점 상태를 담은 PNG를 한 장씩 생성.
+
+    segment_id별로 샘플을 묶어, 그 세그먼트 끝에서의 청소/위반 셀과 섀시/툴
+    폴리곤, 이동 궤적을 그린다. 반환: ({segment_id: 경로}, 세그먼트 디렉터리).
+    matplotlib 미설치/샘플 없음 시 ({}, None). 부수효과: 파일 생성.
+
+    One PNG per segment showing its end-of-segment state (cleaned/violation
+    cells, chassis/tool polygons, sample track). Returns (frame map, dir).
+    """
     try:
         import matplotlib
 
@@ -1901,6 +2199,16 @@ def _write_route_sequence_md(
     poses: Sequence[dict[str, float | int | str | bool]],
     segment_frame_paths: dict[str, Path],
 ) -> Path:
+    """고급 모드의 시간순 경로 서술 Markdown을 기록.
+
+    툴 공간 경로, 파생 섀시 경로, primitive 명령(포즈·검증 플래그 포함), 세그먼트
+    요약(프레임 링크 포함) 절을 순서대로 작성한다. serpentine 전용
+    `_write_tool_serpentine_route_sequence`보다 상세하다. 경로 반환.
+
+    Advanced-mode narrated route markdown (tool route, derived chassis route,
+    per-primitive commands with validation flags, and a segment summary with
+    frame links). Returns the written path.
+    """
     summary = summarize_side_tool_path(config, list(poses))
     lines = [
         "# Side-Tool Temporal Route Sequence",
@@ -2051,6 +2359,17 @@ def _write_summary(
     route_sequence_path: Path | None,
     timeline_frame_count: int,
 ) -> None:
+    """고급 모드의 종합 요약 Markdown(`summary.md`)을 기록.
+
+    안전 고지 → 입력 파라미터 전체 → 미리보기 의미 설명 → 산출 지표/검증 결과 →
+    생성된 모든 산출물 경로 순으로 담는 "마스터 문서"다. `summarize_side_tool_path`
+    가 계산한 지표를 그대로 나열하므로, 플래너 요약 키가 바뀌면 여기도 깨진다.
+    부수효과: 파일 생성.
+
+    Master summary markdown: safety notice, all inputs, preview semantics, the
+    full metric/validation block, and links to every generated artifact. Mirrors
+    ``summarize_side_tool_path`` keys, so it breaks if those keys change.
+    """
     path_summary = summarize_side_tool_path(config, list(poses))
     lines = [
         "# Side-Mounted Tool Path Preview",
@@ -2330,6 +2649,15 @@ def _write_png(
     config: SideToolPlanConfig,
     poses: Sequence[dict[str, float | int | str | bool]],
 ) -> Path | None:
+    """단일 종합 미리보기 PNG(`preview.png`)를 렌더링.
+
+    경계, A/B(및 대각선 가이드), 툴 커버리지 스윕, 툴/섀시 경로, 전이 봉투,
+    경계 위반 마커를 한 장에 겹쳐 그린다. 제목에 물리 미리보기 가능 여부
+    (READY/INFEASIBLE)를 표시. 경로 반환(또는 matplotlib 없으면 None).
+
+    Renders the single overview PNG (boundary, A/B, tool sweep, tool/chassis
+    paths, transition envelopes, violation markers). Returns path or None.
+    """
     try:
         import matplotlib
 
@@ -2597,6 +2925,18 @@ def _write_separated_previews(
     config: SideToolPlanConfig,
     poses: Sequence[dict[str, float | int | str | bool]],
 ) -> dict[str, Path | None]:
+    """관심사별로 분리한 미리보기 PNG 세트(약 12종)를 렌더링.
+
+    개요, 툴 경로, 파생 섀시, 스윕 패턴, 정렬/시작, 커버리지, boustrophedon 레인,
+    섀시 전용, 전이 전용, 회전 스윕 볼륨, 지오메트리 샘플 등을 각각 별도 파일로
+    만든다. 하나의 종합 그림(`_write_png`)보다 검토가 쉽다. {파일명: 경로|None}
+    반환. matplotlib 미설치 시 모두 None. 부수효과: 파일 다수 생성.
+
+    Renders the ~12 concern-separated preview PNGs (overview, tool path, derived
+    chassis, sweep pattern, alignment/start, coverage, boustrophedon, chassis-
+    only, transitions-only, rotation swept volume, geometry samples). Returns
+    {filename: path|None}; all None if matplotlib is unavailable.
+    """
     try:
         import matplotlib
 
@@ -2624,6 +2964,7 @@ def _write_separated_previews(
     samples = geometry_samples_for_path(config, list(poses))
 
     def setup_ax(title: str):
+        """공통 축(경계 폴리곤·A/B점·대각선 가이드·격자·"preview only")을 세팅해 (fig, ax) 반환."""
         fig, ax = plt.subplots(figsize=(8, 6))
         polygon = boundary_polygon(config)
         closed = polygon + [polygon[0]]
@@ -2675,6 +3016,7 @@ def _write_separated_previews(
         return fig, ax
 
     def draw_uncovered_and_swept(ax) -> None:
+        """미커버 여백(회색)과 툴이 쓸고 간 커버리지 구간(주황)을 채워 그린다."""
         low_margin = float(path_summary["uncovered_margin_low_m"])
         high_margin = float(path_summary["uncovered_margin_high_m"])
         x_low = float(path_summary["workspace_x_min_m"])
@@ -2706,6 +3048,10 @@ def _write_separated_previews(
             label_used = True
 
     def draw_segment_lines(ax, *, include_cleaning: bool, include_transitions: bool, tool: bool, chassis: bool) -> None:
+        """세그먼트별 툴/섀시 경로 선을 그린다(청소/전이·툴/섀시 포함 여부는 플래그로 선택).
+
+        전이는 점선, 청소 레인은 실선. 범례 라벨은 종류별 첫 세그먼트에만 붙인다.
+        """
         segment_ids: list[str] = []
         for pose in poses:
             segment_id = str(pose["segment_id"])
@@ -2761,6 +3107,10 @@ def _write_separated_previews(
                 chassis_label_used = True
 
     def draw_transition_envelopes(ax) -> None:
+        """전이(transition) 세그먼트의 봉투 사각형을 점선으로 그린다.
+
+        경계 내부면 파랑, 벗어나면 빨강. 세그먼트별로 한 번만 그린다.
+        """
         seen: set[str] = set()
         for pose in poses:
             if pose["primitive_type"] != "transition":
@@ -2785,6 +3135,11 @@ def _write_separated_previews(
             )
 
     def add_sample_polygons(ax, sample_type_filter: str | None, max_samples: int, alpha: float) -> None:
+        """지오메트리 샘플의 섀시/툴 폴리곤 윤곽을 그린다(작업영역 밖이면 빨강).
+
+        `sample_type_filter`로 회전/병진 등만 고를 수 있고, `max_samples`를 넘으면
+        일정 간격(stride)으로 솎아 과밀 렌더링을 막는다.
+        """
         filtered = [
             sample
             for sample in samples
@@ -2822,6 +3177,7 @@ def _write_separated_previews(
     outputs["preview_overview.png"] = _write_png(path=overview, config=config, poses=poses)
 
     def tool_points() -> list[tuple[float, float]]:
+        """전체 포즈열의 툴 월드 좌표 (x, y) 리스트를 반환 / tool world-space polyline points."""
         return [(float(row["tool_world_x_m"]), float(row["tool_world_y_m"])) for row in poses]
 
     fig, ax = setup_ax("Tool Path Primary")
@@ -3200,8 +3556,29 @@ def _write_separated_previews(
     return outputs
 
 
+# ── CLI 진입점 / CLI entry point ──
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    """CLI 진입점 겸 모드 디스패처. 종료 코드(int)를 반환.
+
+    `--advanced`(또는 `--debug-planner-options`) 유무로 두 갈래로 나뉜다:
+      - 없음 → 단순 serpentine 파서/구성 → `_run_tool_serpentine_preview_output`.
+      - 있음 → 고급 파서 → `SideToolPlanConfig` 전체 구성. 이때도 워크스페이스
+        모드가 `tool_serpentine_ab`면 serpentine 경로로, 그 외에는 다중 레인
+        `generate_side_tool_path` + 전체 산출물 생성으로 간다.
+    어떤 경로든 모터/HC-12/펌웨어 출력은 만들지 않는다(오프라인 미리보기 전용).
+    부수효과: 산출물 파일 생성 + stdout 출력.
+
+    CLI dispatcher. ``--advanced`` (or ``--debug-planner-options``) switches from
+    the simple serpentine path to the full legacy/debug config; within advanced
+    mode, ``tool_serpentine_ab`` still routes to the serpentine writer while
+    other workspace modes run the multi-lane pipeline. Always preview-only.
+    """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # 단순 모드는 레거시/디버그 플래그를 모르는 파서를 쓰므로, 두 트리거 플래그로
+    # 먼저 갈라 어떤 파서를 세울지 결정한다.
+    # Decide which parser to build before parsing (simple parser rejects legacy flags).
     advanced_mode = "--advanced" in raw_argv or "--debug-planner-options" in raw_argv
     if not advanced_mode:
         parser = build_simple_parser()
@@ -3488,6 +3865,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 플래너의 설정/기하 ValueError는 트레이스백 대신 깔끔한 `ERROR: ...` 메시지로
+    # 변환해 CLI 사용자가 읽기 쉽게 종료한다.
+    # Convert planner ValueErrors into a clean CLI error message (no traceback).
     try:
         raise SystemExit(main())
     except ValueError as exc:
