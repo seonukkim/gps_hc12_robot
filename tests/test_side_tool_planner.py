@@ -63,6 +63,7 @@ from gps_coverage_core.side_tool_planner import (
     summarize_side_tool_path,
     strategy_diagnostics,
     swept_volume_summary,
+    tool_length_m,
     tool_polygon,
     workspace_polygon,
     _workspace_info,
@@ -195,6 +196,29 @@ def test_tool_serpentine_ab_preserves_top_left_A_and_bottom_right_B() -> None:
     assert tool_segments[-1]["tool_end_y_m"] == pytest.approx(0.0)
     assert summary["tool_path_starts_at_A"] is True
     assert summary["tool_path_ends_at_B"] is True
+
+
+def test_tool_serpentine_summary_tool_length_falls_back_when_unset() -> None:
+    """tool_length_m 미설정 시 summary가 tool→robot→0.18m 폴백을 쓰는지 검증(회귀).
+
+    과거 이 경로는 정의되지 않은 `_robot_length()`를 호출해 NameError를 냈다.
+    이제 기존 `tool_length_m()` 헬퍼를 재사용하므로 tool_length_m=None 이면
+    robot_length_m(기본 0.18m)로 대체되어야 한다. / Regression: with
+    tool_length_m unset, the preview summary must fall back to the robot length
+    (0.18 m default) instead of raising the old undefined-name error.
+    """
+    config = SideToolPlanConfig(
+        workspace_mode="tool_serpentine_ab",
+        a_x_m=0.0,
+        a_y_m=1.2,
+        b_x_m=8.0,
+        b_y_m=0.0,
+        step_spacing_m=0.25,
+        tool_length_m=None,
+    )
+    preview = generate_tool_serpentine_preview(config)
+    assert preview["summary"]["tool_length_m"] == pytest.approx(0.18)
+    assert preview["summary"]["tool_length_m"] == pytest.approx(tool_length_m(config))
 
 
 def test_tool_serpentine_step_spacing_derives_tracks_and_connectors() -> None:

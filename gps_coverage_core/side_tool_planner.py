@@ -59,9 +59,9 @@
       `_validate_config`의 허용 집합과 반드시 동기화할 것.
     - `SideToolPlanConfig`는 frozen dataclass다. 변형이 필요하면 `dataclasses.replace`
       사용(예: `strategy_diagnostics`).
-    - 주의(gotcha): 4031행 `generate_tool_serpentine_preview`의
-      `_robot_length(config)` 호출 대상이 이 파일에 정의돼 있지 않다(잠재적 결함).
-      기존 동작 보존을 위해 여기서는 손대지 않는다.
+    - `generate_tool_serpentine_preview`의 summary는 `tool_length_m()`를 재사용해
+      유효 툴 길이를 tool → robot → 0.18m 순으로 대체한다. (과거 이 자리에서
+      미정의 `_robot_length()`를 호출하던 잠재적 NameError 버그는 수정됨.)
 
     Entry points: generate_side_tool_path / generate_tool_serpentine_preview /
     strategy_diagnostics. Pose rows are a wide CSV-facing contract; do not rename
@@ -4511,7 +4511,7 @@ def generate_tool_serpentine_preview(
     no motor commands).
 
     리팩토링 주의: 이 모드는 tool_serpentine_ab 전용이라 A=좌상단, B=우하단을 가정한다.
-    (또한 상단 모듈 docstring의 `_robot_length` 미정의 주의 참고.)
+    summary의 tool_length_m는 `tool_length_m()`로 결정한다(tool → robot → 0.18m).
     """
     if config.workspace_mode != "tool_serpentine_ab":
         raise ValueError("generate_tool_serpentine_preview requires workspace_mode='tool_serpentine_ab'")
@@ -4866,7 +4866,7 @@ def generate_tool_serpentine_preview(
         "robot_width_m": config.robot_width_m,
         "robot_length_m": config.robot_length_m,
         "tool_width_m": config.tool_width_m,
-        "tool_length_m": _robot_length(config) if config.tool_length_m is None else config.tool_length_m,
+        "tool_length_m": tool_length_m(config),
         "tool_lateral_offset_m": config.tool_lateral_offset_m,
         "requested_step_spacing_m": config.step_spacing_m,
         "actual_spacing_values_m": ",".join(f"{value:.6f}" for value in spacing_values),
