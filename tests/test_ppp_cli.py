@@ -1828,10 +1828,11 @@ def test_execute_plan_loads_default_motion_calibration(tmp_path: Path, monkeypat
     assert any(p["primitive_type"] == "move_backward" and p["pulse_ms"] == 350 for p in primitives)
 
 
-# --- diagnose --from-log (no serial) -----------------------------------------
+# ── diagnose --from-log (시리얼 없음) / diagnose --from-log (no serial) ──
 
 
 def test_diagnose_from_log_summarizes_telemetry(tmp_path: Path) -> None:
+    """저장된 로그를 파싱해 행/하트비트/마지막 GPS 차단사유를 요약 / Summarizes a saved log (rows, heartbeats, block reason)."""
     log = tmp_path / "serial.log"
     log.write_text(_LOG)
     rc = cli.main(["diagnose", "--from-log", str(log), "--out-dir", str(tmp_path)])
@@ -1846,6 +1847,7 @@ def test_diagnose_from_log_summarizes_telemetry(tmp_path: Path) -> None:
 
 
 def test_manual_rc_print_cmd_writes_standard_summary(tmp_path: Path) -> None:
+    """manual-rc --print-cmd 가 옛 known-good RC 경로 표식과 함께 표준 요약 기록 / manual-rc print-cmd writes standard summary."""
     rc = cli.main(["manual-rc", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     data = _assert_standard_summary(tmp_path)
@@ -1856,6 +1858,7 @@ def test_manual_rc_print_cmd_writes_standard_summary(tmp_path: Path) -> None:
 
 
 def test_rc_input_diagnose_absent_from_log(tmp_path: Path) -> None:
+    """무신호 PPM 프로브 로그 -> RC_INPUT_ABSENT / An empty PPM probe log classifies as RC_INPUT_ABSENT."""
     log = tmp_path / "ppm.log"
     log.write_text(
         "PPMHDR ppm_channel_map_probe - motors/GPS/HC12 disabled, read-only\n"
@@ -1871,6 +1874,7 @@ def test_rc_input_diagnose_absent_from_log(tmp_path: Path) -> None:
 
 
 def test_rc_input_diagnose_valid_ppm_from_log(tmp_path: Path) -> None:
+    """유효 다채널 PPM 로그 -> RC_CHANNELS_PRESENT_AND_VALID / A valid multi-channel PPM log passes."""
     log = tmp_path / "ppm.log"
     log.write_text(
         "PPMSUM timestamp_ms=1000 frame_counter=40 frame_age_ms=2 frames=40 invalid_frames=0 "
@@ -1889,6 +1893,7 @@ def test_rc_input_diagnose_valid_ppm_from_log(tmp_path: Path) -> None:
 
 
 def test_rc_input_diagnose_print_cmd_writes_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """rc-input-diagnose --print-cmd 가 PPM 프로브 명령 출력 + 표준 요약 / print-cmd prints the PPM probe command."""
     rc = cli.main(["rc-input-diagnose", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -1900,6 +1905,7 @@ def test_rc_input_diagnose_print_cmd_writes_summary(tmp_path: Path, capsys: pyte
 def test_manual_rc_upload_success_and_rc_absent_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """업로드는 성공하되 검증이 RC 부재면 upload_success=True + validation_success=False / Upload ok but RC-absent validation."""
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -1929,6 +1935,7 @@ def test_manual_rc_upload_success_and_rc_absent_summary(
 
 
 def test_diagnose_summary_is_pure_and_guarded(tmp_path: Path) -> None:
+    """diagnose_summary 는 순수(부수효과 없음) + 이벤트 카운트/가드된 ready=False / diagnose_summary is pure and guarded."""
     log = tmp_path / "serial.log"
     log.write_text(_LOG)
     rows = cli.load_rows_from_log(log)
@@ -1939,10 +1946,11 @@ def test_diagnose_summary_is_pure_and_guarded(tmp_path: Path) -> None:
     assert summary["ready_for_full_path_following"] is False
 
 
-# --- align-heading / initial-heading-align / reset-motion-calibration ---------
+# ── align-heading / initial-heading-align / reset-motion-calibration ──
 
 
 def _build_preview_plan_dir(tmp_path: Path) -> Path:
+    """preview 를 돌려 정렬 테스트가 소비할 plan-dir 을 만든다 / Build a preview plan-dir for alignment tests."""
     plan_dir = tmp_path / "preview"
     rc = cli.main(
         ["preview", *_PREVIEW_GOAL, "--workspace-width-m", "2", "--no-png", "--out-dir", str(plan_dir)]
@@ -1952,6 +1960,7 @@ def _build_preview_plan_dir(tmp_path: Path) -> Path:
 
 
 def test_align_heading_skip_writes_artifacts_without_serial(tmp_path: Path) -> None:
+    """strategy=skip 은 시리얼 없이 아티팩트 기록 + ready_for_execute_plan=True / skip writes artifacts without serial."""
     plan_dir = _build_preview_plan_dir(tmp_path)
     out_dir = tmp_path / "align"
     rc = cli.main(
@@ -1973,6 +1982,7 @@ def test_align_heading_skip_writes_artifacts_without_serial(tmp_path: Path) -> N
 
 
 def test_align_heading_requires_plan_dir(tmp_path: Path) -> None:
+    """plan-dir 없이 align-heading 은 ALIGN_PLAN_DIR_REQUIRED 로 거부 / align-heading requires a plan-dir."""
     out_dir = tmp_path / "align"
     rc = cli.main(["align-heading", "--strategy", "skip", "--out-dir", str(out_dir)])
     assert rc == 2
@@ -1981,6 +1991,7 @@ def test_align_heading_requires_plan_dir(tmp_path: Path) -> None:
 
 
 def test_align_heading_plan_dir_without_segments_fails_cleanly(tmp_path: Path) -> None:
+    """세그먼트 없는 plan-dir 은 PLAN_HAS_NO_SEGMENTS 로 깔끔히 실패 / A segment-less plan-dir fails cleanly."""
     plan_dir = tmp_path / "preview"
     plan_dir.mkdir()
     (plan_dir / "preview_summary.json").write_text(json.dumps({"segments": []}))
@@ -1992,17 +2003,20 @@ def test_align_heading_plan_dir_without_segments_fails_cleanly(tmp_path: Path) -
 
 
 def test_execute_plan_default_initial_heading_align_is_none() -> None:
+    """execute-plan/run 의 초기 헤딩정렬 기본은 none / execute-plan and run default initial-heading-align to none."""
     parser = cli.build_parser()
     assert parser.parse_args(["execute-plan"]).initial_heading_align == "none"
     assert parser.parse_args(["run"]).initial_heading_align == "none"
 
 
 def test_auto_relative_run_defaults_initial_heading_align_to_gps_probe() -> None:
+    """auto-relative-run 은 초기 헤딩정렬 기본이 gps_probe / auto-relative-run defaults to gps_probe alignment."""
     parser = cli.build_parser()
     assert parser.parse_args(["auto-relative-run"]).initial_heading_align == "gps_probe"
 
 
 def test_run_align_tunables_have_documented_defaults() -> None:
+    """정렬 튜너블(허용오차/프로브 A/지속/최소거리)이 문서화된 기본값 유지 / Alignment tunables keep documented defaults."""
     args = cli.build_parser().parse_args(["execute-plan"])
     assert args.align_heading_tolerance_deg == pytest.approx(8.0)
     assert args.align_probe_a == pytest.approx(0.25)
@@ -2011,6 +2025,7 @@ def test_run_align_tunables_have_documented_defaults() -> None:
 
 
 def test_execute_plan_print_plan_with_gps_probe_align_stays_no_serial(tmp_path: Path) -> None:
+    """정렬 전략을 요청해도 --print-plan 은 정렬/시리얼 전에 단락(short-circuit) / print-plan short-circuits before alignment."""
     # --print-plan must short-circuit before any alignment / serial work even when
     # an alignment strategy is requested.
     rc = cli.main(
@@ -2034,6 +2049,7 @@ def test_execute_plan_print_plan_with_gps_probe_align_stays_no_serial(tmp_path: 
 
 
 def test_run_initial_alignment_none_preserves_start_yaw(tmp_path: Path) -> None:
+    """정렬=none 이면 정렬을 수행하지 않고 주어진 start_yaw 를 그대로 보존 / align=none preserves the given start yaw."""
     args = types.SimpleNamespace(initial_heading_align="none", start_yaw_deg=12.5)
     raw_lines: list[str] = []
     result = cli._run_initial_alignment(
@@ -2049,6 +2065,7 @@ def test_run_initial_alignment_none_preserves_start_yaw(tmp_path: Path) -> None:
 
 
 def test_reset_motion_calibration_backs_up_and_clears_existing(tmp_path: Path) -> None:
+    """기존 캘리브레이션을 타임스탬프 백업 후 삭제(재캘리브 준비) / Backs up then clears existing calibration."""
     cal_path = tmp_path / "cal" / "motion_calibration.json"
     cal_path.parent.mkdir(parents=True)
     cal_path.write_text(json.dumps({"forward": {"a": 0.30, "b": 0.0, "ms": 900, "approved_by_user": True}}))
@@ -2071,6 +2088,7 @@ def test_reset_motion_calibration_backs_up_and_clears_existing(tmp_path: Path) -
 
 
 def test_reset_motion_calibration_no_existing_is_clean(tmp_path: Path) -> None:
+    """기존 파일이 없으면 NO_EXISTING_CALIBRATION + 백업 NONE 로 깔끔히 처리 / No existing file is handled cleanly."""
     cal_path = tmp_path / "cal" / "motion_calibration.json"  # never created
     out_dir = tmp_path / "reset"
     rc = cli.main(
@@ -2086,6 +2104,7 @@ def test_reset_motion_calibration_no_existing_is_clean(tmp_path: Path) -> None:
 def test_tune_motion_reset_calibration_backs_up_before_session(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """tune-motion --reset-calibration 은 후보 세션 전에 백업+초기화 / tune-motion resets (with backup) before the session."""
     cal_path = tmp_path / "cal" / "motion_calibration.json"
     cal_path.parent.mkdir(parents=True)
     cal_path.write_text(json.dumps({"forward": {"a": 0.30, "b": 0.0, "ms": 900, "approved_by_user": True}}))
@@ -2115,6 +2134,7 @@ def test_tune_motion_reset_calibration_backs_up_before_session(
 
 
 def test_help_includes_alignment_and_reset_modes() -> None:
+    """도움말에 align-heading/reset-motion-calibration 모드가 노출(옛 Stage 용어 없음) / Help lists alignment/reset modes."""
     help_text = cli.build_parser().format_help()
     assert "align-heading" in help_text
     assert "reset-motion-calibration" in help_text
