@@ -1,4 +1,28 @@
-"""Dispatch + no-hardware-path tests for the unified CLI.
+"""통합 CLI 디스패치 + 무(無)하드웨어 경로 계약 테스트.
+
+목적/역할:
+    펌웨어/시리얼 없이 실행 가능한 모든 모드를 잠근다: ``preview``(기하만),
+    ``run --print-plan`` / ``execute-plan --print-plan``(계획만 만들고 시리얼을 열지
+    않음), ``calibrate-turn --print-cmd``(셸 argv 를 실행 대신 출력),
+    ``diagnose --from-log``(저장된 시리얼 로그 파싱). 목적은 인자 파싱, 모드 어휘,
+    firmware-flag 조립, 요약(summary) 스키마, 표준 가드를 하드웨어 없이 고정하는 것.
+
+시스템 내 위치:
+    ``tools.physical_path_planning.cli`` 를 import 한다. 실제 시리얼/펌웨어 업로드
+    경로는 의도적으로 다루지 않는다 -- 컨트롤러 자체의 시리얼 루프는 자매 파일
+    ``test_ppp_controller`` 가 가짜 핸들로 담당한다. 셸 런처(run_physical_path_planner.sh)
+    도움말 동등성은 subprocess 로 교차 검증한다.
+
+핵심 개념·불변식:
+  - 모드 어휘는 기능 이름(gps-wait, manual-control, usb-pulse-test 등)만 노출하고,
+    옛 "Stage" 용어(Stage20/16/35/36...)는 도움말/요약 어디에도 남지 않아야 한다.
+  - 물리 A/B 매핑은 정확한 경계값(bounded)이며 프리미티브별 a/b/ms 가 고정된다.
+  - 모든 표준 요약은 ``ready_for_full_path_following=False`` 를 유지한다
+    (헬퍼 ``_assert_standard_summary`` 로 검사).
+  - 오류/중단(포트 없음, Ctrl-C, 시리얼 끊김)은 트레이스백 없이 요약 파일로 귀결된다.
+
+------------------------------------------------------------------------------
+Dispatch + no-hardware-path tests for the unified CLI.
 
 These exercise every mode that can run WITHOUT firmware or serial: ``preview``
 (geometry only), ``run --print-plan`` / ``execute-plan --print-plan`` (build the
@@ -19,6 +43,8 @@ from pathlib import Path
 import pytest
 
 from tools.physical_path_planning import cli
+
+# ── 공유 픽스처: 텔레메트리 로그 샘플 / Shared fixtures: telemetry log samples ──
 
 _HEARTBEAT = (
     "USB_PULSE_TEST event=HEARTBEAT usb_pulse_test_mode=true rc_ok=true "
@@ -43,6 +69,11 @@ _PREVIEW_GOAL = [
 
 
 def _assert_standard_summary(out_dir: Path) -> dict[str, object]:
+    """표준 summary.md/json 존재 + ready=False 를 검사하고 파싱된 dict 반환.
+
+    Assert the standard summary.md/json exist and stay guarded (ready False),
+    returning the parsed JSON for further per-mode assertions.
+    """
     assert (out_dir / "summary.md").exists()
     assert (out_dir / "summary.json").exists()
     data = json.loads((out_dir / "summary.json").read_text())
@@ -50,10 +81,11 @@ def _assert_standard_summary(out_dir: Path) -> dict[str, object]:
     return data
 
 
-# --- calibrate-turn argv (always --imu-angle-compare true) --------------------
+# ── calibrate-turn argv (항상 --imu-angle-compare true) / calibrate-turn argv ──
 
 
 def test_calibrate_turn_argv_always_enables_imu_angle_compare() -> None:
+    """calibrate-turn argv 는 항상 --imu-angle-compare true 를 포함(BMI160 yaw 정의 컴파일 트리거) / Always enables IMU angle-compare."""
     argv = cli.build_calibrate_turn_argv(
         script="legacy/stage_scripts/run_guarded_pulse_calibration.sh",
         port="/dev/ttyACM0",
@@ -74,6 +106,7 @@ def test_calibrate_turn_argv_always_enables_imu_angle_compare() -> None:
 
 
 def test_calibrate_turn_argv_accepts_direction_command_values() -> None:
+    """b-cmd/pulse-ms 가 --cmd-list/--pulse-ms-list 로 전달됨 / Direction command values reach the argv lists."""
     argv = cli.build_calibrate_turn_argv(
         script="legacy/stage_scripts/run_guarded_pulse_calibration.sh",
         port="/dev/cu.usbmodem212101",
@@ -92,6 +125,7 @@ def test_calibrate_turn_argv_accepts_direction_command_values() -> None:
 
 
 def test_calibrate_turn_print_cmd_does_not_invoke_subprocess(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """--print-cmd 는 서브프로세스 미실행, argv 출력 + COMMAND_PRINTED 요약 / --print-cmd prints argv, runs nothing."""
     rc = cli.main(
         [
             "calibrate-turn",
@@ -118,28 +152,32 @@ def test_calibrate_turn_print_cmd_does_not_invoke_subprocess(capsys: pytest.Capt
     assert data["reason"] == "COMMAND_PRINTED"
 
 
-# --- port resolution and unified mode vocabulary -----------------------------
+# ── 포트 해석 + 통합 모드 어휘 / Port resolution and unified mode vocabulary ──
 
 
 def test_resolve_port_explicit_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """명시 --port 가 env/자동탐지를 이긴다 / Explicit port beats env and auto-detect."""
     monkeypatch.setattr(cli, "arduino_cli_openrb_port", lambda: "/dev/cu.usbmodem212101")
     resolved = cli.resolve_port("/dev/custom", env={"PORT": "/dev/env"}, system_name="Darwin")
     assert resolved == {"port": "/dev/custom", "source": "explicit"}
 
 
 def test_resolve_port_env_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """명시 포트 없으면 PORT 환경변수를 사용 / Falls back to the PORT env var when no explicit port."""
     monkeypatch.setattr(cli, "arduino_cli_openrb_port", lambda: "/dev/cu.usbmodem212101")
     resolved = cli.resolve_port(None, env={"PORT": "/dev/env"}, system_name="Darwin")
     assert resolved == {"port": "/dev/env", "source": "env"}
 
 
 def test_resolve_port_uses_arduino_openrb_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS 에서 arduino-cli OpenRB 포트를 자동 사용 / On macOS, auto-uses the arduino-cli OpenRB port."""
     monkeypatch.setattr(cli, "arduino_cli_openrb_port", lambda: "/dev/cu.usbmodem212101")
     resolved = cli.resolve_port(None, env={}, system_name="Darwin")
     assert resolved == {"port": "/dev/cu.usbmodem212101", "source": "arduino_cli"}
 
 
 def test_resolve_port_macos_does_not_default_to_ttyacm0(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS 는 리눅스용 /dev/ttyACM0 으로 잘못 기본값을 잡지 않는다 / macOS never defaults to ttyACM0."""
     monkeypatch.setattr(cli, "arduino_cli_openrb_port", lambda: None)
     resolved = cli.resolve_port(None, env={}, system_name="Darwin")
     assert resolved == {"port": None, "source": "none"}
@@ -148,6 +186,7 @@ def test_resolve_port_macos_does_not_default_to_ttyacm0(monkeypatch: pytest.Monk
 def test_missing_port_writes_summary_without_traceback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """포트 미탐지 시 트레이스백 없이 SERIAL_PORT_NOT_FOUND 요약(탐지 목록 포함) / Missing port -> clean summary."""
     monkeypatch.setattr(cli, "arduino_cli_openrb_port", lambda: None)
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(cli, "detected_serial_ports", lambda: ["/dev/cu.usbserial-02442CA5"])
@@ -162,6 +201,7 @@ def test_missing_port_writes_summary_without_traceback(
 
 
 def test_help_uses_functional_mode_names() -> None:
+    """CLI 도움말은 기능 모드 이름만 노출하고 옛 Stage/station-drive 용어는 없다 / Help uses functional names only."""
     help_text = cli.build_parser().format_help()
     assert "gps-wait" in help_text
     assert "rc-input-diagnose" in help_text
@@ -180,6 +220,7 @@ def test_help_uses_functional_mode_names() -> None:
 
 
 def test_shell_help_uses_functional_mode_names() -> None:
+    """셸 런처 --help 도 동일한 기능 모드 어휘를 노출(파이썬과 일관) / Shell launcher help mirrors the functional vocabulary."""
     completed = subprocess.run(
         ["bash", "scripts/run_physical_path_planner.sh", "--help"],
         check=False,
@@ -204,6 +245,7 @@ def test_shell_help_uses_functional_mode_names() -> None:
 
 
 def test_shell_station_hw_subcommand_help_is_no_hardware() -> None:
+    """station-hw 서브커맨드 --help 는 하드웨어를 열지 않고 사용법만 출력 / station-hw help opens no hardware."""
     for mode in ("station-hw-diagnose", "station-hw-manual"):
         completed = subprocess.run(
             ["bash", "scripts/run_physical_path_planner.sh", mode, "--help"],
@@ -218,9 +260,13 @@ def test_shell_station_hw_subcommand_help_is_no_hardware() -> None:
             assert old_term not in completed.stdout
 
 
+# ── guarded-pulse-ready · usb-pulse-test · usb-drive-live (펌웨어 플래그/프로토콜) ──
+
+
 def test_guarded_pulse_ready_print_cmd_contains_imu_flags(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """guarded-pulse-ready --print-cmd 는 IMU_ENABLE/IMU_YAW_DIAG 플래그 포함 / Prints IMU enable/diag flags."""
     rc = cli.main(["guarded-pulse-ready", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -234,6 +280,7 @@ def test_guarded_pulse_ready_print_cmd_contains_imu_flags(
 def test_usb_pulse_test_print_command_uses_exact_bounded_ab_mapping(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """usb-pulse-test 사람용 명령 출력이 정확한 경계 A/B/ms(전/후/좌/우)를 찍는다 / Exact bounded A/B mapping."""
     rc = cli.main(["usb-pulse-test", "--print-command", "true", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -257,6 +304,7 @@ def test_usb_pulse_test_print_command_uses_exact_bounded_ab_mapping(
 def test_usb_pulse_test_raw_print_cmd_uses_usb_pulse_protocol(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """raw --print-cmd 는 USB_PULSE_TEST ARM/CMD/STOP 와이어 프로토콜을 출력 / Raw print-cmd emits the wire protocol."""
     rc = cli.main(["usb-pulse-test", "--print-cmd", "--out-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -267,6 +315,7 @@ def test_usb_pulse_test_raw_print_cmd_uses_usb_pulse_protocol(
 
 
 def test_usb_pulse_test_plan_preserves_physical_ab_mapping() -> None:
+    """usb_pulse_test_plan 이 프리미티브별 물리 a/b/ms 값을 정확히 보존 / Plan preserves per-primitive A/B/ms."""
     plan = cli.usb_pulse_test_plan()
     by_name = {str(item["primitive"]): item for item in plan}
     assert by_name["forward"]["a"] == pytest.approx(0.30)
@@ -284,6 +333,7 @@ def test_usb_pulse_test_plan_preserves_physical_ab_mapping() -> None:
 
 
 def test_usb_pulse_test_single_and_sequence_aliases() -> None:
+    """single/sequence 별칭이 프리미티브 목록으로 정확히 확장 / single/sequence aliases expand to primitive lists."""
     assert [item["primitive"] for item in cli.usb_pulse_test_plan(single="turn_left")] == ["left"]
     assert [item["primitive"] for item in cli.usb_pulse_test_plan(sequence="forward,left,right")] == [
         "forward",
@@ -293,6 +343,7 @@ def test_usb_pulse_test_single_and_sequence_aliases() -> None:
 
 
 def test_usb_pulse_test_default_does_not_require_rc_input() -> None:
+    """usb-pulse-test 기본은 RC 입력 불요, max_ms=1000 / Defaults require no RC input, max_ms=1000."""
     parser = cli.build_parser()
     args = parser.parse_args(["usb-pulse-test"])
     assert args.require_rc_input == "false"
@@ -300,6 +351,7 @@ def test_usb_pulse_test_default_does_not_require_rc_input() -> None:
 
 
 def test_usb_pulse_test_firmware_flags_include_rc_bypass() -> None:
+    """펌웨어 플래그가 RC 우회 + 경로추종 비활성(감독 펄스 전용) 포함 / Flags bypass RC and disable path-following."""
     flags = cli.usb_pulse_test_firmware_flags(max_ms=1000)
     assert "MAC_PHYSICAL_SUPERVISED=1" in flags
     assert "USB_PULSE_TEST_GUARDED=1" in flags
@@ -313,6 +365,7 @@ def test_usb_pulse_test_firmware_flags_include_rc_bypass() -> None:
 def test_usb_drive_live_print_command_uses_continuous_protocol(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """usb-drive-live 출력이 연속 SET(ttl 포함)/STOP 프로토콜을 찍는다 / Emits the continuous SET(ttl)/STOP protocol."""
     rc = cli.main(
         [
             "usb-drive-live",
@@ -337,6 +390,7 @@ def test_usb_drive_live_print_command_uses_continuous_protocol(
 
 
 def test_usb_drive_live_summary_does_not_require_rc_ok() -> None:
+    """usb-drive-live 요약은 rc_ok 없이도 성공 판정(감독 모드) / Summary succeeds without rc_ok in supervised mode."""
     rows = cli.telemetry.parse_usbdbg_rows(
         "USB_DRIVE_LIVE event=ACTIVE rc_ok=false neutral_ok=false physical_output_active=true\n"
         "USB_DRIVE_LIVE event=STOP rc_ok=false neutral_ok=false final_left_cmd=0.0 "
@@ -348,6 +402,7 @@ def test_usb_drive_live_summary_does_not_require_rc_ok() -> None:
 
 
 def test_usb_drive_live_firmware_flags_are_bounded_and_non_path_following() -> None:
+    """플래그가 최대 지속시간 경계 + 경로추종 비활성(안전) 을 명시 / Flags bound max duration and disable path-following."""
     flags = cli.usb_drive_live_firmware_flags(max_duration_ms=3000, update_timeout_ms=350)
     assert "MAC_PHYSICAL_SUPERVISED=1" in flags
     assert "USB_PULSE_TEST_GUARDED=1" in flags
@@ -359,7 +414,11 @@ def test_usb_drive_live_firmware_flags_are_bounded_and_non_path_following() -> N
     assert "PATH_FOLLOWING_HC12_ENABLED=0" in flags
 
 
+# ── manual-rc / manual-control 펌웨어 플래그 + PPM 매핑 / Manual RC/control flags + PPM mapping ──
+
+
 def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
+    """manual-rc 복구 플래그가 옛 known-good 부호/스왑 매핑을 고정(IMU 미사용) / Pins the old known-good mapping."""
     flags = cli.manual_rc_recovery_flags(mode_channel_index=4)
     assert "MANUAL_RC_RECOVERY=1" in flags
     assert "MANUAL_FORWARD_SIGN=-1" in flags
@@ -373,6 +432,7 @@ def test_manual_rc_recovery_flags_pin_old_known_good_mapping() -> None:
 
 
 def test_manual_control_firmware_flags_select_old_ppm_path() -> None:
+    """old-working-ppm 프로파일이 옛 PPM 경로(RISING/3000us/min800, IMU off)를 선택 / Selects the old PPM decode path."""
     flags = cli.manual_control_firmware_flags(
         profile=cli.MANUAL_CONTROL_OLD_WORKING_PPM_PROFILE,
         mode_channel_index=4,

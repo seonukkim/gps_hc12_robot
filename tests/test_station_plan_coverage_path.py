@@ -1,3 +1,32 @@
+"""스테이션 커버리지 경로 계획 CLI 계약 테스트 / Contract test for the station coverage-path planning CLI.
+
+목적/역할:
+    `scripts.station.plan_coverage_path` CLI가 두 코너점(A,B)으로 미션 산출물
+    (mission.json / mission.csv / preview.png)을 만드는 계약을 잠근다. 기본 모드는
+    corner-rectangle(코너 직사각형), 대안은 baseline-width(스윕폭 지정)이다.
+
+시스템 내 위치:
+    planner.py 라우팅 코어를 감싸 파일 산출물을 만드는 상류 CLI다. 이 CLI는 **PC측 dry-run
+    전용**이라 시리얼 포트를 열지 않고 로버 명령을 보내지 않는다 — 그 안전 메타/문구를 검증한다.
+
+핵심 개념·불변식:
+    - mission.json: metadata(dry_run=True, sends_rover_commands=False, planner_mode),
+      local_origin, input_points_local(A=원점 0,0 / B=반대 코너), waypoints, coverage_boundary(5점),
+      safety 배너 목록. 이 스키마 전체가 계약이다.
+    - 첫 웨이포인트는 A(0,0), 마지막은 B의 로컬 좌표와 정확히 일치.
+    - CSV 헤더는 최소 요구 키 집합을 포함하고 행 수는 waypoint_count와 일치.
+    - baseline-width 모드는 --sweep-width-m 필수(누락 시 SystemExit).
+
+리팩토링 노트:
+    JSON/CSV 스키마·safety 문구를 바꾸면 이 테스트의 상세 단언이 대거 깨진다(의도된 잠금).
+
+Contract test: the plan_coverage_path CLI turns two corner points (A, B) into mission artifacts
+(mission.json / mission.csv / preview.png). Default planner_mode is corner-rectangle; baseline-width
+is the sweep-width alternative. The CLI is a PC-side dry-run only (no serial port, no rover
+commands) — the test asserts that safety metadata/banner plus the full JSON schema, CSV header, A=
+origin / last=B invariants, and the baseline-width required-argument rule.
+"""
+
 import csv
 import json
 
@@ -7,10 +36,12 @@ from scripts.station import plan_coverage_path
 
 
 def test_parse_lat_lon() -> None:
+    """"LAT,LON" 문자열이 {lat, lon} dict로 파싱됨을 검증. / A "LAT,LON" string parses into a {lat, lon} dict."""
     assert plan_coverage_path.parse_lat_lon("35.1,129.2") == {"lat": 35.1, "lon": 129.2}
 
 
 def test_plan_coverage_path_writes_required_outputs(tmp_path) -> None:
+    """corner-rectangle 미션의 JSON/CSV/PNG 산출과 스키마·안전메타·A→B 불변식 전체 검증. / Full corner-rectangle mission: JSON/CSV/PNG outputs plus schema, safety metadata, and A->B invariants."""
     result = plan_coverage_path.main(
         [
             "--point-a",
@@ -86,6 +117,7 @@ def test_plan_coverage_path_writes_required_outputs(tmp_path) -> None:
 
 
 def test_plan_coverage_path_baseline_width_mode_uses_sweep_width(tmp_path) -> None:
+    """baseline-width 모드가 planner_mode와 입력 sweep_width_m를 미션에 반영함을 검증. / baseline-width mode records planner_mode and the input sweep_width_m in the mission."""
     result = plan_coverage_path.main(
         [
             "--planner-mode",
@@ -112,6 +144,7 @@ def test_plan_coverage_path_baseline_width_mode_uses_sweep_width(tmp_path) -> No
 
 
 def test_plan_coverage_path_baseline_width_requires_sweep_width() -> None:
+    """baseline-width 모드에서 --sweep-width-m 누락 시 SystemExit 발생 검증. / Omitting --sweep-width-m in baseline-width mode raises SystemExit."""
     with pytest.raises(SystemExit, match="--sweep-width-m is required"):
         plan_coverage_path.main(
             [

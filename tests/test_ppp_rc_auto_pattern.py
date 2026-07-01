@@ -1,4 +1,36 @@
-"""Untethered rc-auto-pattern mode: firmware flag builder + print-cmd path."""
+"""무선-끊김 없이 도는 rc-auto-pattern 모드: 펌웨어 플래그 빌더 + print-cmd 경로.
+
+목적/역할 (KO):
+    RC 스위치 하나로 온보드 자동 패턴(레인/스텝 서펜타인)을 돌리는 "untethered
+    (무선 미연결)" 모드를 검증한다. 이 테스트는 두 가지를 못 박는다:
+    (1) ``cli.rc_auto_pattern_firmware_flags`` 가 만드는 ``-D...`` 펌웨어 컴파일
+    플래그 집합 -- 실전에서 검증된 수동 프로파일(PPM 디코드), IMU yaw 피드백,
+    온보드 패턴 파라미터, 헤딩 홀드/RC-손실 유예 기본값, 그리고 자율 게이트는
+    반드시 꺼짐 -- 을, (2) ``--print-cmd`` 경로가 시리얼 없이도 설정/프리뷰
+    파일을 써 내려가는 것.
+
+핵심 계약·불변식 (KO):
+    - 기본 베이스는 full-telemetry-ppm(이 수신기 채널을 실전에서 유일하게 디코드
+      한 설정): ``MANUAL_CONTROL_PPM=1``, ``MANUAL_FORWARD_SIGN=-1``, IMU 켜짐.
+    - 이 구동계는 *주행 중* B 에 대한 yaw 응답이 정지 피벗과 반대(2026-06-12 현장
+      로그) -> ``DRIVE_STEER_SIGN=-1``. 직각 코너는 coast 보정 정지 + settle
+      재시도 + 도넛-방지 레인 중단으로 확보.
+    - 헤딩 홀드/RC-손실 유예 기본값은 항상 컴파일에 포함(무선에서도 레인이 곧게,
+      전파 글리치가 주행을 죽이지 못하게). 이 값들은 kwargs 로 오버라이드 가능.
+    - 자율 게이트(``PHYSICAL_PATH_FOLLOWING_ENABLE``, ``AUTO_MOTION_ARMED``)는
+      항상 0 -- 이것은 RC 스위치 패턴이지 경로 추종이 아니다.
+    - ``--print-cmd`` 는 시리얼 접속 없이 ``rc_auto_pattern_config.json`` +
+      ``_preview.png`` + ``summary.json`` 을 남기며, 설정은 절대 ready 아님.
+
+Purpose (EN):
+    Verifies the untethered rc-auto-pattern mode: the ``-D`` firmware compile
+    flags emitted by ``rc_auto_pattern_firmware_flags`` (field-proven manual PPM
+    profile, IMU yaw feedback, the onboard pattern params, always-baked heading-
+    hold / RC-loss-grace defaults, and autonomy gates forced off), plus the
+    ``--print-cmd`` path that writes config/preview/summary files without serial.
+    Note the drive-steer sign defaults to -1 because this drivetrain's yaw
+    response to B while DRIVING is inverted vs a stationary pivot.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +41,9 @@ from tools.physical_path_planning import cli
 
 
 def test_rc_auto_pattern_flags_combine_manual_profile_imu_and_pattern() -> None:
+    """기본 플래그가 수동 프로파일+IMU+온보드 패턴+홀드/유예 기본값을 결합하고 자율
+    게이트는 끈다 / the default flags combine the manual profile, IMU, onboard
+    pattern params and hold/grace defaults, with autonomy gates off."""
     flags = cli.rc_auto_pattern_firmware_flags(
         lanes=4,
         lane_ms=4200,
@@ -57,6 +92,9 @@ def test_rc_auto_pattern_flags_combine_manual_profile_imu_and_pattern() -> None:
 
 
 def test_rc_auto_pattern_flags_accept_heading_hold_overrides() -> None:
+    """헤딩 홀드/스티어/유예 파라미터를 kwargs 로 오버라이드하면 플래그에 반영된다 /
+    heading-hold / steer / grace parameters supplied as kwargs are reflected in
+    the emitted flags."""
     flags = cli.rc_auto_pattern_firmware_flags(
         lanes=4,
         lane_ms=4200,
@@ -89,6 +127,9 @@ def test_rc_auto_pattern_flags_accept_heading_hold_overrides() -> None:
 
 
 def test_rc_auto_pattern_print_cmd_writes_config_without_serial(tmp_path: Path) -> None:
+    """--print-cmd 는 시리얼 없이 config/preview/summary 를 쓰고 설정은 절대 ready
+    아님 / ``--print-cmd`` writes config/preview/summary files without any serial
+    connection, and the config is never ready for full-path following."""
     rc = cli.main(
         [
             "rc-auto-pattern",

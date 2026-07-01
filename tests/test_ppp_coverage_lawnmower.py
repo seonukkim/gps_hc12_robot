@@ -1,3 +1,28 @@
+"""커버리지 잔디깎기(ㄹ자) 계획 생성과 preview/inspect/execute 아티팩트 계약.
+
+목적/역할: relative_enu 목표에 대해 ``preview.build_preview`` 가 만드는 잔디깎기(lawnmower,
+ㄹ자) 경로의 기하/세그먼트 구조를 잠근다. 교대(전진/후진) 레인, 레인-간 커넥터, 그리고
+기본 코너 스타일(turn_step_turn: 피벗 -> 스텝오버 직진 -> 피벗)의 방향/각도/헤딩을 검증한다.
+
+시스템 내 위치: ``preview`` 는 계획 단계(모션 없음)이고, ``cli`` 의 preview/inspect-plan/
+execute-plan 모드가 이를 파일로 내보낸다. 이 테스트는 그 계획 구조와 산출 파일 집합을 고정한다.
+
+핵심 개념·불변식:
+  - 기본 경로 shape 는 ``coverage_lawnmower``, sweep 스타일은 ``lawnmower_ㄹ``.
+  - full 레인은 전진/후진이 교대해도 body_heading 은 항상 레인 축(동쪽, 0°)을 향한다
+    — 후진 레인을 주행 가능하게 만드는 핵심(스텝오버만 북향 이동).
+  - 프리미티브는 세그먼트와 1:1 동기화, 회전(turn_*) 프리미티브는 b-only(a_cmd≈0).
+  - ``diagonal_rectangle_serpentine`` 는 선택 가능하지만 기본이 아니다.
+
+Coverage lawnmower (ㄹ-shape) planning + preview/inspect/execute artifact
+contracts. Locks in the lawnmower geometry/segment structure ``build_preview``
+emits for a relative_enu goal: alternating forward/backward lanes, lane-to-lane
+connectors, and the default turn_step_turn corner (pivot -> straight step-over ->
+pivot). Full lanes keep body_heading on the lane axis (east/0°) even as travel
+alternates, which is what makes reverse lanes drivable; primitives stay 1:1 with
+segments and turn primitives are b-only. Also asserts the CLI preview/inspect/
+execute artifact set and that serpentine is available but not the default.
+"""
 from __future__ import annotations
 
 import json
@@ -8,7 +33,11 @@ import pytest
 from tools.physical_path_planning import cli, preview
 
 
+# ── 픽스처·헬퍼 / Fixtures & helpers ──────────────────────────────────────────
+
+
 def _coverage_preview_args(out_dir: Path) -> list[str]:
+    """커버리지 preview CLI 인자 한 벌(고정 시작점/1.2m 사각/0.4m 간격). / Canned preview CLI args."""
     return [
         "preview",
         "--start-lat",
@@ -31,6 +60,11 @@ def _coverage_preview_args(out_dir: Path) -> list[str]:
 
 
 def test_coverage_lawnmower_relative_enu_creates_alternating_lanes() -> None:
+    """1.2m×1.2m/0.4m 간격 -> 교대 방향의 레인 4개 + 커넥터 3개, ㄹ자 sweep.
+
+    각 레인은 한 축이 고정(수평/수직)이고 시작/끝 x 가 0↔1.2 로 교대함을 확인.
+    A 1.2m square at 0.4m spacing yields 4 alternating lanes + 3 connectors in a
+    ㄹ (lawnmower) sweep; each lane holds one axis fixed and x alternates 0<->1.2."""
     plan = preview.build_preview(
         start_lat=35.5709,
         start_lon=129.1871,
@@ -66,6 +100,13 @@ def test_coverage_lawnmower_relative_enu_creates_alternating_lanes() -> None:
 
 
 def test_coverage_lawnmower_default_corner_is_turn_step_turn() -> None:
+    """기본 코너 = turn_step_turn: 피벗~90° -> 스텝오버 직진 -> 피벗 복귀.
+
+    전진 레인 뒤 스텝은 forward, 후진 레인 뒤 스텝은 reverse 지만 둘 다 북향 이동.
+    full 레인 body_heading 은 항상 0°(동), 회전 프리미티브는 6개·b-only 임을 검증.
+    Default corner is turn_step_turn (pivot ~90 -> straight step-over -> pivot);
+    step is forward after forward lanes, reverse after backward lanes, both travel
+    north; full lanes face east (0deg) and the 6 turn primitives are b-only."""
     # Default ㄹ corner is drivable: pivot ~90, drive the step-over straight
     # (forward after forward lanes, reverse after backward lanes), pivot back.
     plan = preview.build_preview(
@@ -131,6 +172,11 @@ def test_coverage_lawnmower_default_corner_is_turn_step_turn() -> None:
 
 
 def test_coverage_lawnmower_single_turn_style_keeps_legacy_structure() -> None:
+    """connector_style=single_turn 은 레거시 구조 유지: 커넥터 3개, 세그먼트 7개, 스텝 레인 0.
+
+    커넥터 방향은 left/right/left 로 교대.
+    connector_style=single_turn keeps the legacy shape: 3 connectors, 7 segments,
+    0 step lanes, with connector turns alternating left/right/left."""
     plan = preview.build_preview(
         start_lat=35.5709,
         start_lon=129.1871,
@@ -152,6 +198,11 @@ def test_coverage_lawnmower_single_turn_style_keeps_legacy_structure() -> None:
 
 
 def test_coverage_lawnmower_preview_writes_required_artifacts(tmp_path: Path) -> None:
+    """preview CLI(rc=0)가 요구 산출물(PNG 2 + JSON/CSV/MD)을 모두 쓰고 field 를 해석.
+
+    field_config_resolved.json 의 shape/목표좌표/커넥터 수/sweep/이미지 경로를 확인.
+    The preview CLI (rc=0) writes the full artifact set (2 PNGs + JSON/CSV/MD) and
+    a resolved field config with the expected shape, goal coords, connectors, sweep."""
     rc = cli.main(_coverage_preview_args(tmp_path))
     assert rc == 0
 
@@ -172,6 +223,9 @@ def test_coverage_lawnmower_preview_writes_required_artifacts(tmp_path: Path) ->
 
 
 def test_inspect_plan_detects_missing_preview_images(tmp_path: Path) -> None:
+    """inspect-plan 은 삭제된 preview 이미지를 감지해 rc=1 + PREVIEW_IMAGE_MISSING 보고.
+
+    inspect-plan detects a deleted preview image (rc=1, PREVIEW_IMAGE_MISSING)."""
     plan_dir = tmp_path / "preview"
     rc = cli.main(_coverage_preview_args(plan_dir))
     assert rc == 0
@@ -187,6 +241,11 @@ def test_inspect_plan_detects_missing_preview_images(tmp_path: Path) -> None:
 
 
 def test_execute_plan_print_plan_uses_saved_planned_segments(tmp_path: Path) -> None:
+    """execute-plan --print-plan 은 재계산이 아니라 저장된 planned_segments.json 을 그대로 사용.
+
+    저장 파일을 세그먼트 1개로 잘라두면 요약 segment_count 도 1, start_source=plan_dir.
+    execute-plan --print-plan reuses the saved planned_segments.json (not a re-plan):
+    trimming it to one segment yields segment_count==1 and start_source==plan_dir."""
     plan_dir = tmp_path / "preview"
     out_dir = tmp_path / "execute"
     rc = cli.main(_coverage_preview_args(plan_dir))
@@ -205,6 +264,11 @@ def test_execute_plan_print_plan_uses_saved_planned_segments(tmp_path: Path) -> 
 
 
 def test_diagonal_rectangle_serpentine_available_but_not_default(capsys: pytest.CaptureFixture[str]) -> None:
+    """기본은 coverage_lawnmower 이고, diagonal_rectangle_serpentine 은 옵트인시에만 선택됨.
+
+    명시 요청 시 resolve_plan 이 A-B 대각 프레임 안내 문구를 출력하는지 확인.
+    Default stays coverage_lawnmower; diagonal_rectangle_serpentine is opt-in and,
+    when requested, resolve_plan prints its A-B diagonal-frame notice."""
     default_plan = preview.build_preview(
         start_lat=35.5709,
         start_lon=129.1871,
